@@ -47,6 +47,7 @@ subtle = "2"
 bytes = "1"
 hex = "0.4"
 rand = "0.8.6"
+futures = "0.3"          # StreamExt::select_next_some — Swarm event loop
 
 # Storage
 rocksdb = "0.24"
@@ -54,9 +55,13 @@ rocksdb = "0.24"
 # Testing utilities
 tempfile = "3.10"
 
-# Networking (0.56 is tokio-only — async-std removed)
+# Networking (0.56 is tokio-only — async-std removed; decisions-log 2026-05-30)
+# request-response + cbor: bounded pull-sync (/lemma/sync/1) via CBOR codec
+# (12-NETWORK_SYNC_SPEC §2.2, §1 transport table)
 libp2p = { version = "0.56", features = [
-    "tokio", "tcp", "noise", "yamux", "gossipsub",
+    "tokio", "tcp", "noise", "yamux",
+    "gossipsub",
+    "request-response", "cbor",
     "kad", "identify", "mdns", "ping",
 ] }
 

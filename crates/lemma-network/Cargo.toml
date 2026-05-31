@@ -2,10 +2,41 @@
 name = "lemma-network"
 version = "0.1.0"
 edition = "2021"
-description = "P2P networking for Lemma: libp2p, gossipsub, peer discovery, block sync"
+description = "P2P networking for Lemma: libp2p 0.56, gossipsub, peer discovery, block sync"
 
 [dependencies]
-serde = { workspace = true }
+# Error handling
 thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+bincode = { workspace = true }
+
+# Async runtime (tokio-only, matches libp2p 0.56 tokio-only transport)
 tokio = { workspace = true }
+
+# Networking (0.56 — tokio-only, async-std removed; decisions-log 2026-05-30)
+libp2p = { workspace = true }
+
+# JSON for gossipsub wire encoding (self-describing — required because lemma-core
+# types like Amount / Hash use custom serde impls that call deserialize_any,
+# which bincode v1 does not support). Bincode is used for request-response size
+# estimation only.
+serde_json = { workspace = true }
+
+# Hashing (content-addressed gossipsub message_id via Blake3)
+blake3 = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async streams (Swarm implements futures::Stream; select_next_some via StreamExt)
+futures = { workspace = true }
+
+# Internal dependencies
 lemma-core = { path = "../lemma-core" }
+
+[dev-dependencies]
+# #[tokio::test] for behaviour/tests.rs (build_behaviour requires a tokio runtime
+# because mdns::tokio::Behaviour spawns Tokio tasks internally).
+tokio = { workspace = true }

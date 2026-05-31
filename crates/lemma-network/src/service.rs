@@ -1,0 +1,671 @@
+//! NetworkService — the swarm event loop that wires all `lemma-network` modules
+//! into a running P2P node.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! ┌─────────────────┐  NetworkCommand  ┌──────────────────────────────┐
+//! │  NetworkHandle  │ ─────(mpsc)────► │  NetworkService              │
+//! │  (Clone-able)   │                  │  owns Swarm<LemmaBehaviour>  │
+//! │                 │ ◄────(mpsc)───── │  runs tokio event loop       │
+//! └─────────────────┘  NetworkEvent    └──────────────────────────────┘
+//! ```
+//!
+//! - **[`NetworkHandle`]** — cheap, `Clone`-able handle given to the rest of
+//!   the node (consensus, mempool, RPC). Used to send commands and receive
+//!   network events without touching the swarm directly.
+//! - **[`NetworkService`]** — owns the `Swarm` and all state (peer table, topics).
+//!   Created once via [`NetworkService::new`], then consumed by [`NetworkService::run`].
+//!
+//! ## Startup sequence
+//!
+//! 1. [`NetworkService::new`]: builds swarm, subscribes to gossip topics,
+//!    dials all bootstrap peers from `NetworkConfig::bootstrap_peers`.
+//! 2. [`NetworkService::run`]: drives the `tokio::select!` loop until all
+//!    `NetworkHandle` clones are dropped.
+//!
+//! ## Shutdown
+//!
+//! Dropping all `NetworkHandle` clones closes the command `mpsc::Sender` side,
+//! which causes `command_rx.recv()` to return `None` → the loop breaks → `run`
+//! returns cleanly (no force-kill needed).
+//!
+//! ## Phase 1 milestone (04-BUILD_GUIDE §2.6)
+//!
+//! This service implementation targets:
+//! - `[ ] lemma-network: 2 nodes discover each other via mDNS`
+//! - `[ ] lemma-network: gossipsub broadcasts messages`
+
+use futures::StreamExt as _;
+use libp2p::{
+    gossipsub, identify,
+    request_response::{self},
+    swarm::SwarmEvent,
+    noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
+};
+use tokio::sync::mpsc;
+
+use lemma_core::{block::Block, transaction::Transaction};
+
+use crate::{
+    behaviour::{build_behaviour, LemmaBehaviour, LemmaBehaviourEvent},
+    config::NetworkConfig,
+    discovery,
+    error::NetworkError,
+    gossip::{self, GossipTopics},
+    messages::{GossipMessage, RangeRequest, RangeResponse},
+    peer::{PeerEvent, PeerTable},
+};
+
+// ── Channel capacity ──────────────────────────────────────────────────────────
+
+/// Capacity of the command channel (handle → service).
+///
+/// Backpressure: if the service is busy, senders block at this depth.
+/// 256 is generous for a single-node setup; tune if profiling shows pressure.
+pub const COMMAND_CHANNEL_CAPACITY: usize = 256;
+
+/// Capacity of the event channel (service → subscribers).
+///
+/// Events that overflow the buffer are dropped with a `tracing::warn!`.
+pub const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+// ── NetworkCommand ────────────────────────────────────────────────────────────
+
+/// Commands the rest of the node sends to the network service.
+///
+/// Sent via [`NetworkHandle`] over a bounded mpsc channel.
+#[derive(Debug)]
+pub enum NetworkCommand {
+    /// Broadcast a newly finalized block to all gossip mesh peers.
+    ///
+    /// The block is encoded as a `GossipMessage::NewBlock` and published
+    /// on `lemma/blocks/1`. Gossip is a *hint* — receivers verify the QC.
+    BroadcastBlock(Block),
+
+    /// Broadcast a pending transaction to all gossip mesh peers.
+    ///
+    /// Published on `lemma/tx/1`.
+    BroadcastTransaction(Transaction),
+
+    /// Send a bounded range request to a specific peer (partition-heal path,
+    /// 12-NETWORK_SYNC_SPEC §2.2).
+    RequestRange {
+        /// Target peer.
+        peer: PeerId,
+        /// The range to fetch (must satisfy `request.validate(config.max_range)`).
+        request: RangeRequest,
+    },
+
+    /// Send a range response back through an open request-response channel.
+    ///
+    /// The channel comes from a [`NetworkEvent::RangeRequest`]; the node
+    /// fetches the blocks from storage and sends them back here.
+    SendRangeResponse {
+        /// The response channel from the inbound request.
+        channel: request_response::ResponseChannel<RangeResponse>,
+        /// The blocks to send (already validated against the request bounds).
+        response: RangeResponse,
+    },
+
+    /// Dial an address (bootstrap or peer discovered out-of-band).
+    Dial(Multiaddr),
+}
+
+// ── NetworkEvent ──────────────────────────────────────────────────────────────
+
+/// Events the network service emits to the rest of the node.
+///
+/// Received via the `mpsc::Receiver<NetworkEvent>` returned by
+/// [`NetworkService::new`].
+#[derive(Debug)]
+pub enum NetworkEvent {
+    /// A gossiped block was received and decoded successfully.
+    ///
+    /// **The block is NOT verified here.** The consensus layer MUST verify
+    /// the quorum certificate before extending the chain
+    /// (12-NETWORK_SYNC_SPEC §2.1: "gossip is a hint, the QC is the proof").
+    BlockReceived {
+        /// The peer that propagated the block (not necessarily the proposer).
+        from: PeerId,
+        /// The decoded block.
+        block: Block,
+    },
+
+    /// A gossiped transaction was received.
+    TransactionReceived {
+        /// The peer that forwarded the transaction.
+        from: PeerId,
+        /// The decoded transaction.
+        tx: Transaction,
+    },
+
+    /// An inbound range request arrived from a peer.
+    ///
+    /// The node must look up the requested blocks from storage and call
+    /// [`NetworkCommand::SendRangeResponse`] to reply.
+    RangeRequest {
+        /// The requesting peer.
+        from: PeerId,
+        /// The range being requested.
+        request: RangeRequest,
+        /// The response channel — must be consumed via `SendRangeResponse`.
+        channel: request_response::ResponseChannel<RangeResponse>,
+    },
+
+    /// A connection to a new peer was established.
+    PeerConnected(PeerId),
+
+    /// A connection to a peer was closed.
+    PeerDisconnected(PeerId),
+
+    /// The swarm started listening on a local address.
+    ListeningOn(Multiaddr),
+}
+
+// ── NetworkHandle ─────────────────────────────────────────────────────────────
+
+/// A cheap, `Clone`-able handle to the running [`NetworkService`].
+///
+/// The rest of the node holds one or more handles to send commands and does
+/// not interact with the swarm directly. Dropping all handles signals the
+/// service to shut down.
+#[derive(Clone, Debug)]
+pub struct NetworkHandle {
+    command_tx: mpsc::Sender<NetworkCommand>,
+}
+
+impl NetworkHandle {
+    /// Broadcast a finalized block to the gossip mesh.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed
+    /// (i.e. the service has stopped).
+    pub async fn broadcast_block(&self, block: Block) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::BroadcastBlock(block)).await
+    }
+
+    /// Broadcast a pending transaction to the gossip mesh.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn broadcast_transaction(
+        &self,
+        tx: Transaction,
+    ) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::BroadcastTransaction(tx)).await
+    }
+
+    /// Dial a bootstrap or peer address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn dial(&self, addr: Multiaddr) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::Dial(addr)).await
+    }
+
+    /// Send a command to the service.
+    async fn send(&self, cmd: NetworkCommand) -> Result<(), NetworkError> {
+        self.command_tx.send(cmd).await.map_err(|_| {
+            NetworkError::transport(std::io::Error::other(
+                "command channel closed — NetworkService has stopped",
+            ))
+        })
+    }
+}
+
+// ── NetworkService ────────────────────────────────────────────────────────────
+
+/// The P2P network service — owns the `Swarm` and drives the event loop.
+///
+/// Created via [`NetworkService::new`]; consumed by [`NetworkService::run`].
+/// Do not call `run` more than once.
+pub struct NetworkService {
+    swarm: Swarm<LemmaBehaviour>,
+    topics: GossipTopics,
+    peers: PeerTable,
+    command_rx: mpsc::Receiver<NetworkCommand>,
+    event_tx: mpsc::Sender<NetworkEvent>,
+}
+
+impl NetworkService {
+    /// Build the swarm, subscribe to gossip topics, and dial bootstrap peers.
+    ///
+    /// Returns `(service, handle, event_rx)`:
+    /// - `service` — call `service.run().await` to start the event loop.
+    /// - `handle` — clone and distribute to node subsystems.
+    /// - `event_rx` — receive network events (blocks, txs, peer changes).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if swarm construction, listening, or
+    /// gossip subscription fails.
+    pub fn new(
+        key: libp2p::identity::Keypair,
+        config: &NetworkConfig,
+    ) -> Result<(Self, NetworkHandle, mpsc::Receiver<NetworkEvent>), NetworkError> {
+        // Build swarm: identity → tokio → tcp/noise/yamux → behaviour → config.
+        // `with_behaviour` accepts `Result<B, Box<dyn Error + Send + Sync>>` via
+        // the `TryIntoBehaviour` trait impl in libp2p 0.56.
+        let mut swarm = SwarmBuilder::with_existing_identity(key.clone())
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default(),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .map_err(|e| {
+                NetworkError::transport(std::io::Error::other(format!(
+                    "TCP transport: {e}"
+                )))
+            })?
+            .with_behaviour(|k| {
+                build_behaviour(k, config).map_err(|e| {
+                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                })
+            })
+            .map_err(|e| {
+                NetworkError::transport(std::io::Error::other(format!(
+                    "LemmaBehaviour: {e}"
+                )))
+            })?
+            .with_swarm_config(|cfg| {
+                cfg.with_idle_connection_timeout(config.idle_timeout)
+            })
+            .build();
+
+        // Start listening on all configured addresses.
+        for addr in &config.listen_addrs {
+            swarm.listen_on(addr.clone()).map_err(|e| {
+                NetworkError::transport(std::io::Error::other(format!(
+                    "listen_on {addr}: {e}"
+                )))
+            })?;
+        }
+
+        // Subscribe to all three Lemma gossip topics.
+        let topics = GossipTopics::new();
+        gossip::subscribe_all(swarm.behaviour_mut().gossipsub_mut(), &topics)?;
+
+        // Dial bootstrap peers (best-effort — failures are logged, not fatal).
+        let bootstrap_pairs = discovery::parse_bootstrap_peers(&config.bootstrap_peers);
+        for (peer_id, addr) in &bootstrap_pairs {
+            swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(peer_id, addr.clone());
+            if let Err(e) = swarm.dial(addr.clone()) {
+                tracing::warn!(addr = %addr, error = ?e, "bootstrap dial failed (non-fatal)");
+            }
+        }
+
+        // Build mpsc channels.
+        let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+
+        let handle = NetworkHandle { command_tx };
+        let service = NetworkService {
+            swarm,
+            topics,
+            peers: PeerTable::new(),
+            command_rx,
+            event_tx,
+        };
+
+        Ok((service, handle, event_rx))
+    }
+
+    /// Run the event loop until all [`NetworkHandle`] clones are dropped.
+    ///
+    /// Calls `tokio::select!` on:
+    /// - Swarm events (from peers and the transport layer).
+    /// - Incoming commands (from [`NetworkHandle`]).
+    ///
+    /// Returns when the command channel closes (all handles dropped).
+    pub async fn run(mut self) {
+        loop {
+            tokio::select! {
+                event = self.swarm.select_next_some() => {
+                    self.handle_swarm_event(event);
+                }
+                cmd = self.command_rx.recv() => {
+                    match cmd {
+                        Some(c) => self.handle_command(c),
+                        // All NetworkHandle clones dropped → clean shutdown.
+                        None => {
+                            tracing::info!("NetworkService: all handles dropped, shutting down");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Swarm event dispatch ──────────────────────────────────────────────────
+
+    fn handle_swarm_event(
+        &mut self,
+        event: SwarmEvent<LemmaBehaviourEvent>,
+    ) {
+        match event {
+            // ── Behaviour events (sub-behaviour dispatch) ─────────────────────
+            SwarmEvent::Behaviour(behaviour_event) => {
+                self.handle_behaviour_event(behaviour_event);
+            }
+
+            // ── Connection lifecycle ──────────────────────────────────────────
+            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                self.peers.add_peer(peer_id);
+                self.peers.mark_connected(&peer_id);
+                self.emit(NetworkEvent::PeerConnected(peer_id));
+            }
+
+            SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
+                // Only mark disconnected when the last connection to this peer closes.
+                if num_established == 0 {
+                    self.peers.mark_disconnected(&peer_id);
+                    self.emit(NetworkEvent::PeerDisconnected(peer_id));
+                }
+            }
+
+            SwarmEvent::NewListenAddr { address, .. } => {
+                tracing::info!(addr = %address, "NetworkService: listening on {address}");
+                self.emit(NetworkEvent::ListeningOn(address));
+            }
+
+            SwarmEvent::IncomingConnectionError { error, .. } => {
+                tracing::warn!(error = ?error, "incoming connection error (non-fatal)");
+            }
+
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                tracing::warn!(
+                    peer = ?peer_id,
+                    error = ?error,
+                    "outgoing connection error (non-fatal)"
+                );
+            }
+
+            // Other swarm events (address changes, expired listeners, etc.) ignored.
+            _ => {}
+        }
+    }
+
+    fn handle_behaviour_event(&mut self, event: LemmaBehaviourEvent) {
+        match event {
+            // ── Gossipsub ─────────────────────────────────────────────────────
+            LemmaBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                propagation_source,
+                message,
+                ..
+            }) => {
+                self.handle_gossip_message(propagation_source, &message.data);
+            }
+
+            LemmaBehaviourEvent::Gossipsub(_) => {
+                // Subscription confirmations, graft/prune etc. — not actionable.
+            }
+
+            // ── Request-response (range sync) ─────────────────────────────────
+            LemmaBehaviourEvent::Sync(request_response::Event::Message {
+                peer,
+                message,
+                ..
+            }) => {
+                self.handle_sync_message(peer, message);
+            }
+
+            LemmaBehaviourEvent::Sync(request_response::Event::OutboundFailure {
+                peer, error, ..
+            }) => {
+                tracing::warn!(
+                    peer = %peer,
+                    error = ?error,
+                    "range sync outbound failure — peer demoted"
+                );
+                self.peers.record_event(&peer, PeerEvent::Timeout);
+                self.apply_peer_score(&peer);
+            }
+
+            LemmaBehaviourEvent::Sync(_) => {}
+
+            // ── Kademlia ──────────────────────────────────────────────────────
+            LemmaBehaviourEvent::Kademlia(kad_event) => {
+                discovery::handle_kademlia_event(&kad_event, &mut self.peers);
+            }
+
+            // ── mDNS ──────────────────────────────────────────────────────────
+            LemmaBehaviourEvent::Mdns(mdns_event) => {
+                let newly_discovered =
+                    discovery::handle_mdns_event(&mdns_event, &mut self.peers);
+                // Dial newly discovered LAN peers.
+                for peer_id in newly_discovered {
+                    if let Some(info) = self.peers.peer_info(&peer_id) {
+                        for addr in info.addresses.clone() {
+                            if let Err(e) = self.swarm.dial(addr.clone()) {
+                                tracing::debug!(
+                                    peer = %peer_id,
+                                    addr = %addr,
+                                    error = ?e,
+                                    "mDNS dial failed (non-fatal)"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Identify ──────────────────────────────────────────────────────
+            LemmaBehaviourEvent::Identify(identify::Event::Received {
+                peer_id, info, ..
+            }) => {
+                // Add all listen addresses reported by the peer via identify.
+                // This lets Kademlia use them for routing-table entries.
+                for addr in &info.listen_addrs {
+                    self.peers.add_peer(peer_id);
+                    self.peers.add_address(&peer_id, addr.clone());
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                }
+            }
+
+            LemmaBehaviourEvent::Identify(_) => {}
+
+            // ── Ping ──────────────────────────────────────────────────────────
+            LemmaBehaviourEvent::Ping(_) => {
+                // Ping is handled internally by libp2p (keepalive).
+                // Application-level timeout scoring happens on request failures.
+            }
+        }
+    }
+
+    // ── Gossip message handling ───────────────────────────────────────────────
+
+    fn handle_gossip_message(&mut self, from: PeerId, data: &[u8]) {
+        match gossip::decode_incoming(&from, data) {
+            Ok(GossipMessage::NewBlock(block)) => {
+                // Score: receiving a decodable block is a positive signal.
+                self.peers.record_event(&from, PeerEvent::ValidBlock);
+                self.apply_peer_score(&from);
+                self.emit(NetworkEvent::BlockReceived { from, block });
+            }
+
+            Ok(GossipMessage::NewTransaction(tx)) => {
+                self.emit(NetworkEvent::TransactionReceived { from, tx });
+            }
+
+            Err(err) => {
+                // Malformed message — demote sender.
+                tracing::warn!(
+                    peer = %from,
+                    error = %err,
+                    "gossip decode failed — peer demoted"
+                );
+                self.peers.record_event(&from, PeerEvent::InvalidMessage);
+                self.apply_peer_score(&from);
+            }
+        }
+    }
+
+    // ── Range sync message handling ───────────────────────────────────────────
+
+    fn handle_sync_message(
+        &mut self,
+        from: PeerId,
+        message: request_response::Message<RangeRequest, RangeResponse>,
+    ) {
+        match message {
+            request_response::Message::Request {
+                request, channel, ..
+            } => {
+                // Validate before emitting — reject malformed requests immediately.
+                if let Err(e) = request.validate(crate::config::DEFAULT_MAX_RANGE) {
+                    tracing::warn!(
+                        peer = %from,
+                        error = %e,
+                        "invalid range request — peer demoted"
+                    );
+                    self.peers.record_event(&from, PeerEvent::InvalidMessage);
+                    self.apply_peer_score(&from);
+                    return;
+                }
+                self.emit(NetworkEvent::RangeRequest { from, request, channel });
+            }
+
+            request_response::Message::Response { response, .. } => {
+                // Validate response size before processing.
+                if let Err(e) = response.validate_size(crate::config::DEFAULT_MAX_RESPONSE_BYTES) {
+                    tracing::warn!(
+                        peer = %from,
+                        error = %e,
+                        "range response too large — peer demoted"
+                    );
+                    self.peers.record_event(&from, PeerEvent::InvalidMessage);
+                    self.apply_peer_score(&from);
+                    return;
+                }
+                // Valid response received — positive signal.
+                self.peers.record_event(&from, PeerEvent::ValidBlock);
+                self.apply_peer_score(&from);
+
+                // Emit blocks individually so the consensus layer processes them.
+                for block in response.blocks {
+                    self.emit(NetworkEvent::BlockReceived { from, block });
+                }
+            }
+        }
+    }
+
+    // ── Command handling ──────────────────────────────────────────────────────
+
+    fn handle_command(&mut self, cmd: NetworkCommand) {
+        match cmd {
+            NetworkCommand::BroadcastBlock(block) => {
+                let msg = GossipMessage::NewBlock(block);
+                if let Err(e) = gossip::publish(
+                    self.swarm.behaviour_mut().gossipsub_mut(),
+                    &self.topics,
+                    &msg,
+                ) {
+                    // NoPeersSubscribedToTopic is expected during startup.
+                    tracing::debug!(error = %e, "BroadcastBlock publish failed (non-fatal)");
+                }
+            }
+
+            NetworkCommand::BroadcastTransaction(tx) => {
+                let msg = GossipMessage::NewTransaction(tx);
+                if let Err(e) = gossip::publish(
+                    self.swarm.behaviour_mut().gossipsub_mut(),
+                    &self.topics,
+                    &msg,
+                ) {
+                    tracing::debug!(error = %e, "BroadcastTransaction publish failed (non-fatal)");
+                }
+            }
+
+            NetworkCommand::RequestRange { peer, request } => {
+                self.swarm
+                    .behaviour_mut()
+                    .sync
+                    .send_request(&peer, request);
+            }
+
+            NetworkCommand::SendRangeResponse { channel, response } => {
+                if let Err(e) = self
+                    .swarm
+                    .behaviour_mut()
+                    .sync
+                    .send_response(channel, response)
+                {
+                    tracing::warn!(error = ?e, "SendRangeResponse failed (channel may have closed)");
+                }
+            }
+
+            NetworkCommand::Dial(addr) => {
+                if let Err(e) = self.swarm.dial(addr.clone()) {
+                    tracing::warn!(addr = %addr, error = ?e, "Dial command failed (non-fatal)");
+                }
+            }
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Emit a `NetworkEvent` to subscribers, dropping it if the channel is full.
+    ///
+    /// Uses `try_send` (non-async) to avoid holding `&self` across an await
+    /// point — `NetworkService` is not `Sync` (Swarm contains non-Sync types),
+    /// so `&self` cannot be held across `.await` in a `Send` future.
+    fn emit(&self, event: NetworkEvent) {
+        if let Err(e) = self.event_tx.try_send(event) {
+            tracing::warn!(
+                error = ?e,
+                "NetworkEvent dropped — event channel full \
+                 (consumer too slow; increase EVENT_CHANNEL_CAPACITY if persistent)"
+            );
+        }
+    }
+
+    /// Apply the peer's current app-specific score to gossipsub.
+    ///
+    /// Called after every [`PeerTable::record_event`] so gossipsub's mesh
+    /// management (pruning, grafting, graylist) stays in sync with our
+    /// observed misbehaviour signals (12-NETWORK_SYNC_SPEC §5).
+    fn apply_peer_score(&mut self, peer: &PeerId) {
+        if let Some(score) = self.peers.score(peer) {
+            // Returns false if scoring is not active (no PeerScoreParams set).
+            // This is expected for nodes without peer-scoring configured.
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .gossipsub_mut()
+                .set_application_score(peer, score);
+        }
+    }
+}
+
+// ── gossipsub_mut accessor ────────────────────────────────────────────────────
+
+/// Extension trait to give `LemmaBehaviour` a `gossipsub_mut()` accessor.
+///
+/// The `#[derive(NetworkBehaviour)]` macro makes the `gossipsub` field `pub`,
+/// so this is just a convenience method to avoid verbose field access at
+/// call sites and keep the borrow checker happy (takes `&mut self` once,
+/// returns the sub-behaviour reference).
+trait GossipsubMut {
+    fn gossipsub_mut(&mut self) -> &mut gossipsub::Behaviour;
+}
+
+impl GossipsubMut for LemmaBehaviour {
+    fn gossipsub_mut(&mut self) -> &mut gossipsub::Behaviour {
+        &mut self.gossipsub
+    }
+}
+
+#[cfg(test)]
+mod tests;
