@@ -18,16 +18,20 @@
 //! returns `Result`; the node binary handles the error and may trigger
 //! `force_epoch_close` (§6, B4) as a last resort.
 //!
-//! ## Pending (B4 — future sub-steps)
+//! ## B4 sub-steps
 //!
-//! - `proof.rs` — epoch-change proof build/verify (§4.4, closes 12 §3.3).
-//! - `recovery.rs` — `force_epoch_close` deterministic recovery (§6).
+//! - `proof.rs` ✅ — `verify_full` + `EpochChangeProof` + `verify_epoch_change` (§4.4, B4a).
+//! - `recovery.rs` ✅ — `force_epoch_close` deterministic recovery (§6, B4b).
 
 use lemma_core::{address::Address, error::AmountError};
 
 pub(crate) mod transition;
+pub mod proof;
+pub mod recovery;
 
 pub use transition::advance_epoch;
+pub use proof::{verify_full, verify_epoch_change, EpochChangeProof, ProofError};
+pub use recovery::{force_epoch_close, RecoveryError, RecoveryOutput};
 
 #[cfg(test)]
 mod tests;

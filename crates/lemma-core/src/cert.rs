@@ -1,0 +1,99 @@
+//! Quorum certificate — the 2f+1 voting-power commit record.
+//!
+//! A [`QuorumCert`] is the signed artifact that makes a block final under
+//! Lemma's BFT consensus. It is the shared type consumed by both:
+//! - `lemma-consensus` — to build and verify epoch-change proofs (§4.4, B4).
+//! - `lemma-network` — to propagate finality evidence (closes TODO in
+//!   `lemma-network::error::NetworkError::InvalidQuorumCert`).
+//!
+//! # Why in `lemma-core`
+//!
+//! `lemma-network` depends only on `lemma-core` (build order: network comes
+//! before consensus — see `docs/04-BUILD_GUIDE §7`). Shared blockchain types
+//! belong in `lemma-core` (AGENTS.md §2.4). Verification logic (requiring
+//! `StakeAggregator` from `lemma-consensus`) stays in `lemma-consensus`.
+//!
+//! # Determinism
+//!
+//! `signers` is a `BTreeMap<Address, Signature>` — deterministic iteration
+//! order (AGENTS.md §7.1). No `HashMap`.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::{address::Address, hash::Hash, signature::Signature};
+
+// ─── QuorumCert ───────────────────────────────────────────────────────────────
+
+/// A 2f+1 voting-power quorum certificate over a block header.
+///
+/// Produced by the Pulse commit rule when a leader block accumulates ≥ 2/3
+/// voting-power in valid signatures. This is the finality anchor that:
+/// - Proves a block is final (no forks possible under BFT with < f Byzantine).
+/// - Enables light-client verification (`docs/12-NETWORK_SYNC_SPEC §3.2`).
+/// - Forms the epoch-change proof chain (`docs/13-VALIDATOR_EPOCH_SPEC §4.4`).
+///
+/// Equivalent to CometBFT `Commit`, Sui `CertifiedCheckpointSummary`,
+/// Aptos `LedgerInfoWithSignatures`.
+///
+/// ## Verification
+///
+/// Call `lemma_consensus::cert::verify_quorum_cert` to verify the cert
+/// against a [`ValidatorSet`](crate::ValidatorSet). Signature verification
+/// uses the hybrid Ed25519+ML-DSA scheme (`lemma-crypto`) and is injected
+/// as a `BTreeMap<Address, bool>` per the B3-2 pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuorumCert {
+    /// Block height this certificate covers.
+    pub height: u64,
+
+    /// Blake3 digest of the certified [`BlockHeader`](crate::BlockHeader).
+    ///
+    /// Set by `lemma-crypto::hash(header)` — `lemma-consensus` does not
+    /// compute it directly (sig injection pattern, B3-2).
+    pub header_digest: Hash,
+
+    /// Per-signer signatures, keyed by validator operator address.
+    ///
+    /// `BTreeMap` for deterministic iteration (AGENTS.md §7.1). In a
+    /// valid cert, all entries satisfy:
+    /// - The signer is a member of the committee for this epoch.
+    /// - The signature is valid over `header_digest` (hybrid Ed25519+ML-DSA).
+    ///
+    /// The verification of both conditions is performed by
+    /// `lemma_consensus::cert::verify_quorum_cert` with injected results.
+    pub signers: BTreeMap<Address, Signature>,
+}
+
+impl QuorumCert {
+    /// Create a new quorum certificate.
+    ///
+    /// No validation is performed here — use
+    /// `lemma_consensus::cert::verify_quorum_cert` to verify the cert
+    /// against a validator set.
+    #[must_use]
+    pub fn new(
+        height: u64,
+        header_digest: Hash,
+        signers: BTreeMap<Address, Signature>,
+    ) -> Self {
+        Self { height, header_digest, signers }
+    }
+
+    /// Return the number of distinct signers in this certificate.
+    ///
+    /// **Note:** signer count carries no quorum semantics — quorum is
+    /// stake-weighted, not count-based. Use
+    /// `lemma_consensus::cert::verify_quorum_cert` for authoritative
+    /// quorum checks.
+    #[must_use]
+    pub fn signer_count(&self) -> usize {
+        self.signers.len()
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests;

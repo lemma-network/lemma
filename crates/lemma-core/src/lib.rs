@@ -11,6 +11,7 @@
 //! |--------|----------|
 //! | [`address`] | [`Address`], [`AddressType`] — 20-byte Bech32m identifiers |
 //! | [`amount`] | [`Amount`] — token quantity in Drop (1 LEM = 10¹⁸ Drop) |
+//! | [`cert`]   | [`QuorumCert`] — 2f+1 finality certificate (shared by consensus + network) |
 //! | [`block`] | [`Block`] — finalized block (header + transactions + receipts) |
 //! | [`error`] | Typed error enums for every domain |
 //! | [`genesis`] | [`GenesisConfig`] — chain bootstrap configuration |
@@ -31,6 +32,7 @@
 pub mod address;
 pub mod amount;
 pub mod block;
+pub mod cert;
 pub mod epoch;
 pub mod error;
 pub mod genesis;
@@ -56,6 +58,7 @@ pub use error::{
 };
 
 pub use block::Block;
+pub use cert::QuorumCert;
 pub use genesis::GenesisConfig;
 pub use header::BlockHeader;
 pub use transaction::{Log, Transaction, TransactionReceipt, TxType};

@@ -24,6 +24,7 @@
 //! | `commit`| `Commit` / `CommittedSubDag`, commit-chain digest (§5) |
 //! | `reputation` | `ReputationScores` / `LeaderSwapTable` (§6) |
 //! | `fee`   | Burn Fee Model: base-fee calc + distribution (§fee) |
+//! | `cert`      | `verify_quorum_cert` — 2f+1 stake-weighted cert verification (B4a) |
 //! | `rewards`   | Inflation mint + validator distribution (§7, B2) |
 //! | `slashing`  | Common slash mechanics, evidence, downtime, jail (§5, B3) |
 //!
@@ -77,6 +78,7 @@ pub const fn wave_of(round: u64) -> u64 {
 
 // ── Modules ───────────────────────────────────────────────────────────────────
 
+pub mod cert;
 pub mod commit;
 pub mod dag;
 pub mod epoch;
@@ -108,6 +110,11 @@ pub use rewards::{
     compute_epoch_inflation, distribute_rewards,
     RewardOutcome, RewardError,
     EPOCHS_PER_YEAR, INFLATION_SCHEDULE_BPS,
+};
+pub use cert::{verify_quorum_cert, CertError};
+pub use epoch::{
+    verify_full, verify_epoch_change, EpochChangeProof, ProofError,
+    force_epoch_close, RecoveryError, RecoveryOutput,
 };
 pub use slashing::{
     slash, SlashError,
