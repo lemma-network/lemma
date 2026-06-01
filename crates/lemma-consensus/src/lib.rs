@@ -74,5 +74,6 @@ pub mod stake;
 
 pub use dag::block::{CommitVote, DagBlock, DagBlockBody, DagBlockRef, Slot, TxBatchRef};
 pub use dag::graph::{Dag, InsertOutcome};
+pub use dag::threshold_clock::ThresholdClock;
 pub use error::ConsensusError;
 pub use stake::{StakeAggregator, Threshold};
