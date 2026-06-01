@@ -13,5 +13,20 @@ lemma-core = { path = "../lemma-core" }
 lemma-crypto = { path = "../lemma-crypto" }
 lemma-storage = { path = "../lemma-storage" }
 
+# Shield (src/shield/) — threshold encryption + aggregatable PVSS-DKG over BLS12-381.
+# Isolated here; the rest of the mempool is curve-agnostic (15-SHIELD_SPEC §5, §8).
+ark-bls12-381 = { workspace = true }
+ark-ec = { workspace = true }
+ark-ff = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+secret_sharing_and_dkg = { workspace = true }
+schnorr_pok = { workspace = true }
+dock_crypto_utils = { workspace = true }
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+blake2 = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }

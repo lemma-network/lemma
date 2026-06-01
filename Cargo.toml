@@ -87,6 +87,20 @@ decaf377 = { version = "=0.10.1", default-features = false }
 poseidon377 = "=1.2.0"
 decaf377-rdsa = "=0.11.0"
 
+# Shield (encrypted mempool — threshold encryption / aggregatable PVSS-DKG / resharing).
+# BLS12-381 pairing crypto, isolated in lemma-mempool/src/shield/ (15-SHIELD_SPEC).
+# PINNED to arkworks 0.4.x to share Veil's single ark-* train per process (15-SPEC §1.4, §9)
+# — one binary, no duplicate-ark ABI conflict. Licenses verified live 2026-06-02:
+# docknetwork crates = Apache-2.0; arkworks/AEAD/KDF = MIT/Apache (AGENTS §9.3 permissive-only).
+ark-bls12-381 = { version = "=0.4", default-features = false }
+ark-poly = { version = "=0.4.2", default-features = false }
+secret_sharing_and_dkg = "0.16.0"      # Shamir/Feldman/Pedersen VSS + lagrange_basis_at_0_for_all
+schnorr_pok = "0.23.0"                  # Schnorr PoK building blocks → compose Chaum-Pedersen DLEQ (§3)
+dock_crypto_utils = "0.23.0"            # ElGamal base, compute_random_oracle_challenge (Fiat-Shamir)
+chacha20poly1305 = "0.10"               # AEAD, RFC 8439 (§1.3)
+hkdf = "0.13"                           # HKDF-SHA256 symmetric-key derivation (§1.3)
+blake2 = "0.10"                         # Blake2b512 Fiat-Shamir challenge hash (§1.3)
+
 # RPC
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
