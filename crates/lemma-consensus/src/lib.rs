@@ -24,6 +24,7 @@
 //! | `commit`| `Commit` / `CommittedSubDag`, commit-chain digest (§5) |
 //! | `reputation` | `ReputationScores` / `LeaderSwapTable` (§6) |
 //! | `fee`   | Burn Fee Model: base-fee calc + distribution (§fee) |
+//! | `rewards` | Inflation mint + validator distribution (§7, B2) |
 //!
 //! Validator-set management, epoch transitions, slashing, and rewards live in
 //! later steps of this crate (`docs/13-VALIDATOR_EPOCH_SPEC.md`), reusing
@@ -82,6 +83,7 @@ pub mod error;
 pub mod fee;
 pub mod pulse;
 pub mod reputation;
+pub mod rewards;
 pub mod stake;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
@@ -100,3 +102,8 @@ pub use fee::{calculate_base_fee, distribute_fee, FeeDistribution, MIN_BASE_FEE_
 pub use epoch::{advance_epoch, EpochError, EpochOutput,
                 EPOCH_DURATION_SECONDS, UNBONDING_PERIOD_SECONDS,
                 GENESIS_MIN_VALIDATOR_STAKE_DROP};
+pub use rewards::{
+    compute_epoch_inflation, distribute_rewards,
+    RewardOutcome, RewardError,
+    EPOCHS_PER_YEAR, INFLATION_SCHEDULE_BPS,
+};

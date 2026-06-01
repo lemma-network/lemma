@@ -79,23 +79,40 @@ pub const GENESIS_MIN_VALIDATOR_STAKE_DROP: u128 =
 ///   `BlockHeader.next_validators_hash` (spec §4.4, closes 12 §3.3).
 /// - Replace the consensus driver's `LeaderSchedule` for epoch N+1.
 /// - Persist the new `Epoch` to chain state.
-#[must_use = "epoch output must be applied: hash into block header, schedule into driver"]
+/// - Update total supply accounting: `new_supply = old_supply + minted - burned_remainder`.
+#[must_use = "epoch output must be applied: hash into block header, schedule into driver, update supply"]
 #[derive(Debug, Clone)]
 pub struct EpochOutput {
     /// The new epoch (N+1) with its frozen committee.
     pub epoch: lemma_core::Epoch,
+
     /// Blake3 hash of `ValidatorSet(N+1)`.
     ///
     /// Write into the boundary block's `BlockHeader.next_validators_hash`
     /// (spec §4.4, closes 12 §3.3). Authorises the next committee; light
     /// clients walk this hash-chain to trust epoch N+1.
     pub next_validators_hash: lemma_core::hash::Hash,
+
     /// Pre-built leader schedule for epoch N+1.
     ///
     /// Recomputed from `ReputationScores` over epoch N's commits (spec §4.3,
     /// closes 07 §6). Replace the running driver's schedule after applying
     /// this epoch output.
     pub leader_schedule: crate::pulse::leader::LeaderSchedule,
+
+    /// Total LEM minted as inflation for epoch N (spec §7).
+    ///
+    /// Invariant: `minted = distributed_to_validators + burned_remainder`.
+    /// Caller updates total supply: `new_supply = old_supply + minted - burned_remainder`,
+    /// equivalently `new_supply = old_supply + distributed`.
+    pub minted: lemma_core::amount::Amount,
+
+    /// Truncation dust burned from the reward pool (DB-5, spec §7).
+    ///
+    /// Sub-Drip remainder from integer distribution — always
+    /// `< #active_validators × 10⁹ Drop` (< 1 Drip per validator per epoch).
+    /// Caller reduces total supply by this amount.
+    pub burned_remainder: lemma_core::amount::Amount,
 }
 
 // ── EpochError ────────────────────────────────────────────────────────────────
@@ -157,4 +174,12 @@ pub enum EpochError {
     /// Typically only surfaces if `EmptyNextCommittee` was not caught first.
     #[error("leader schedule construction failed: {0}")]
     ScheduleError(#[from] crate::ConsensusError),
+
+    /// Reward computation or distribution failed (spec §7, B2).
+    ///
+    /// Wraps [`crate::rewards::RewardError`]. Practically unreachable in
+    /// production for realistic supply levels; returned rather than panicked
+    /// per AGENTS.md §7.2 / Sui-stall lesson.
+    #[error("reward error: {0}")]
+    Reward(#[from] crate::rewards::RewardError),
 }

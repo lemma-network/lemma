@@ -28,6 +28,7 @@ use crate::{
     commit::Commit,
     dag::block::DagBlockRef,
     epoch::{advance_epoch, EpochError, EpochOutput, GENESIS_MIN_VALIDATOR_STAKE_DROP},
+    rewards::compute_epoch_inflation,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -97,7 +98,10 @@ fn make_epoch(number: u64, validators: &BTreeMap<Address, Validator>) -> Epoch {
     }
 }
 
-/// Run `advance_epoch` with sensible defaults (no tips, no commits).
+/// Run `advance_epoch` with zero total supply (→ zero inflation) and no commits.
+///
+/// `total_supply = Amount::zero()` means inflation = 0 → RewardOutcome{0,0} →
+/// no stake changes from rewards. All B1 assertions on stake/status remain valid.
 fn run_advance(
     epoch: &Epoch,
     validators: &mut BTreeMap<Address, Validator>,
@@ -446,4 +450,92 @@ fn delegated_stake_included_in_voting_power() {
     let power = out.epoch.validators.members[&addr(1)].power;
     assert_eq!(power.as_amount(), lem(25_000_000),
         "voting power must include delegated stake");
+}
+
+// ── B2: Reward integration tests ─────────────────────────────────────────────
+
+/// Inflation is computed and credited before stake settlement.
+/// Validator active stake must increase by ~minted amount after advance_epoch.
+#[test]
+fn advance_epoch_nonzero_supply_credits_inflation_to_active_stake() {
+    let supply = Amount::from_drop(1_000_000_000 * DROPS_PER_LEM); // 1B LEM
+    let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 25_000_000)]);
+    let initial_active = vs[&addr(1)].self_stake.active;
+    let epoch = make_epoch(0, &vs);
+
+    let out = advance_epoch(
+        &epoch, &mut vs, &[], supply, 1_000, 100, min_stake(),
+    ).unwrap();
+
+    let new_active = vs[&addr(1)].self_stake.active;
+    assert!(
+        new_active > initial_active,
+        "active stake must grow after inflation: initial={:?} new={:?}",
+        initial_active, new_active
+    );
+    // The credited amount equals the minted inflation (single validator gets all).
+    let credited = new_active.checked_sub(initial_active).unwrap();
+    assert_eq!(
+        credited.checked_add(out.burned_remainder).unwrap(),
+        out.minted,
+        "credited + burned_remainder must equal minted (invariant)"
+    );
+}
+
+/// EpochOutput.minted matches compute_epoch_inflation output exactly.
+#[test]
+fn advance_epoch_minted_matches_compute_epoch_inflation() {
+    let supply = Amount::from_drop(1_000_000_000 * DROPS_PER_LEM); // 1B LEM
+    let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 25_000_000)]);
+    let epoch = make_epoch(0, &vs); // epoch 0
+
+    let out = advance_epoch(
+        &epoch, &mut vs, &[], supply, 1_000, 100, min_stake(),
+    ).unwrap();
+
+    // advance_epoch closes epoch 0 → next_number = 1;
+    // compute_epoch_inflation uses current.number (0) for the rate.
+    let expected_minted = compute_epoch_inflation(supply, 0).unwrap();
+    assert_eq!(out.minted, expected_minted,
+        "EpochOutput.minted must equal compute_epoch_inflation(supply, epoch 0)");
+}
+
+/// With zero total supply, minted = 0 and burned_remainder = 0.
+#[test]
+fn advance_epoch_zero_supply_gives_zero_minted_zero_remainder() {
+    let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 25_000_000)]);
+    let epoch = make_epoch(0, &vs);
+    let out = run_advance(&epoch, &mut vs, 1_000).unwrap(); // uses Amount::zero() supply
+
+    assert!(out.minted.is_zero(), "zero supply → zero minted");
+    assert!(out.burned_remainder.is_zero(), "zero supply → zero burned_remainder");
+}
+
+/// Reward is distributed BEFORE stake settlement — auto-compounds into next epoch power.
+/// Reward credited to active → affects ValidatorSet(N+1) voting power.
+#[test]
+fn advance_epoch_reward_compounds_into_next_epoch_power() {
+    let supply = Amount::from_drop(1_000_000_000 * DROPS_PER_LEM); // 1B LEM
+
+    // One validator with exactly min_stake — would be at the eligibility edge.
+    let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 20_000_000)]);
+    let epoch = make_epoch(0, &vs);
+
+    let out_with_rewards = advance_epoch(
+        &epoch, &mut vs, &[], supply, 1_000, 100, min_stake(),
+    ).unwrap();
+
+    // The next committee's power must include the reward (it was credited before step 5).
+    let power_with = out_with_rewards.epoch.validators.members[&addr(1)].power.as_amount();
+
+    // Run again without rewards (zero supply) for comparison.
+    let mut vs2 = make_validators(&[(1, ValidatorStatus::Bonded, 20_000_000)]);
+    let epoch2 = make_epoch(0, &vs2);
+    let out_no_rewards = run_advance(&epoch2, &mut vs2, 1_000).unwrap();
+    let power_without = out_no_rewards.epoch.validators.members[&addr(1)].power.as_amount();
+
+    assert!(
+        power_with > power_without,
+        "next-epoch power must be higher when inflation is credited before committee recompute"
+    );
 }

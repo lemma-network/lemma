@@ -8,7 +8,7 @@
 //!
 //! | Step | Implemented here | Notes |
 //! |------|-----------------|-------|
-//! | 1–2 (rewards) | **B2 stub** | `_tips` param reserved; distribution no-op |
+//! | 1–2 (rewards) | ✅ `rewards::compute_epoch_inflation` + `distribute_rewards` | B2 done |
 //! | 3a (expire unbonding) | ✅ `settle_expired_unbonding` | Aptos bug-class guard |
 //! | 3b (activate) | ✅ `activate_pending_stake` | pending_active → active |
 //! | 4 (seat/remove) | ✅ `update_validator_status` | eligibility + unjail |
@@ -60,20 +60,24 @@ use super::{EpochError, EpochOutput};
 ///
 /// ## Parameters
 ///
-/// - `current`      — the epoch being closed (epoch N).
-/// - `validators`   — full validator state map; mutated in-place.
-/// - `commits`      — all commits produced in epoch N (for reputation scoring).
-/// - `_tips`        — accumulated priority tips (B2 stub: currently unused).
-/// - `block_time`   — consensus `block.time` of the boundary block (seconds).
-/// - `block_height` — height of the boundary block.
-/// - `min_stake`    — minimum self-stake for eligibility (governance parameter,
+/// - `current`        — the epoch being closed (epoch N).
+/// - `validators`     — full validator state map; mutated in-place.
+/// - `commits`        — all commits produced in epoch N (for reputation scoring).
+/// - `total_supply`   — tracked total supply at the start of epoch N's boundary
+///   (Drop units). Used to compute inflation for epoch N. Caller updates supply
+///   using `EpochOutput.minted` and `EpochOutput.burned_remainder`.
+///   **T2 decision**: priority tips are credited per-block to the block proposer
+///   during execution (`lemma-vm`, Phase 3) — NOT here at epoch boundary.
+/// - `block_time`     — consensus `block.time` of the boundary block (seconds).
+/// - `block_height`   — height of the boundary block.
+/// - `min_stake`      — minimum self-stake for eligibility (governance parameter,
 ///   injectable — NOT a constant; changed via governance proposal + boundary
 ///   application, spec §4.1 step 7).
 pub fn advance_epoch(
     current: &Epoch,
     validators: &mut BTreeMap<Address, Validator>,
     commits: &[Commit],
-    _tips: Amount, // B2 stub: reserved for F1 reward distribution (rewards.rs)
+    total_supply: Amount,
     block_time: u64,
     block_height: u64,
     min_stake: Amount,
@@ -83,9 +87,21 @@ pub fn advance_epoch(
         .checked_add(1)
         .ok_or(EpochError::EpochNumberOverflow { current: current.number })?;
 
-    // ── Steps 1–2: Rewards (B2 stub — no-op) ─────────────────────────────
-    // Rewards are computed and distributed BEFORE stake settlement (spec §4.1).
-    // B2 will replace this with F1 distribution from `rewards.rs`.
+    // ── Steps 1–2: Inflation mint + validator reward distribution ─────────
+    //
+    // Compute epoch inflation from total supply (DB-2 stepped schedule, spec §7).
+    // Distribute proportionally by epoch N's voting power (`current.validators`)
+    // to all Bonded validators. Credited to `self_stake.active` BEFORE stake
+    // settlement so rewards auto-compound into epoch N+1 power (Cosmos model).
+    //
+    // T2: priority tips are per-block proposer credits in lemma-vm (Phase 3).
+    // This step handles inflation only.
+    let minted =
+        crate::rewards::compute_epoch_inflation(total_supply, current.number)
+            .map_err(EpochError::Reward)?;
+    let reward_outcome =
+        crate::rewards::distribute_rewards(validators, &current.validators, minted)
+            .map_err(EpochError::Reward)?;
 
     // ── Step 3a: Expire pending_inactive BEFORE committee recompute ───────
     //
@@ -122,7 +138,13 @@ pub fn advance_epoch(
         validators: next_vset,
     };
 
-    Ok(EpochOutput { epoch, next_validators_hash, leader_schedule })
+    Ok(EpochOutput {
+        epoch,
+        next_validators_hash,
+        leader_schedule,
+        minted,
+        burned_remainder: reward_outcome.burned_remainder,
+    })
 }
 
 // ── Step 3a ───────────────────────────────────────────────────────────────────
