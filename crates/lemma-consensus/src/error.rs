@@ -47,6 +47,9 @@ use serde::{Deserialize, Serialize};
 /// - **`ByzantineInvariantBreach`** — two certified leaders at the same slot;
 ///   BFT assumption (`Byzantine < S/3`) violated. Node must halt + slash
 ///   (`docs/07-CONSENSUS_SPEC.md §4`, Decision 6c).
+/// - **`DecidedLeaderMissing`** — a decided leader's block vanished from the DAG
+///   before linearization; unrecoverable internal invariant (not slashable).
+///   Node must halt (`docs/07-CONSENSUS_SPEC.md §5`, CodeReviewer W3).
 ///
 /// # Coverage of spec §3 acceptance rules
 ///
@@ -212,6 +215,21 @@ pub enum ConsensusError {
         first: Hash,
         second: Hash,
     },
+
+    // ── Linearization — §5 ───────────────────────────────────────────────────
+
+    /// A leader decided by `try_decide` was absent from the DAG when the
+    /// linearizer went to flatten its sub-DAG.
+    ///
+    /// **Provably unreachable in normal operation**: GC (`set_last_committed_round`)
+    /// runs *after* a commit batch, so a decided leader's block cannot be dropped
+    /// mid-batch. Reaching this indicates state corruption or a driver bug.
+    /// The node must halt — but this is **not** a slashable peer offence (unlike
+    /// [`ConsensusError::ByzantineInvariantBreach`]), so it has its own variant
+    /// rather than a misleading zero-digest `ByzantineInvariantBreach`
+    /// (spec §5, CodeReviewer W3 refinement).
+    #[error("decided leader block absent from DAG at round {round} author {author}")]
+    DecidedLeaderMissing { round: u64, author: Address },
 }
 
 // ── Predicates ────────────────────────────────────────────────────────────────
@@ -242,6 +260,24 @@ impl ConsensusError {
     #[must_use]
     pub fn is_byzantine_breach(&self) -> bool {
         matches!(self, Self::ByzantineInvariantBreach { .. })
+    }
+
+    /// Returns `true` if this error requires the node to **halt** (unrecoverable
+    /// state corruption or BFT-invariant breach), as opposed to rejecting a
+    /// single block.
+    ///
+    /// Covers `ByzantineInvariantBreach` (slashable) and `DecidedLeaderMissing`
+    /// (non-slashable internal invariant). Both mean the node cannot safely
+    /// continue producing commits. Only `ByzantineInvariantBreach` warrants
+    /// slashing evidence — use [`is_byzantine_breach`] to distinguish.
+    ///
+    /// [`is_byzantine_breach`]: ConsensusError::is_byzantine_breach
+    #[must_use]
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            Self::ByzantineInvariantBreach { .. } | Self::DecidedLeaderMissing { .. }
+        )
     }
 
     /// Returns `true` if this rejection is caused by data that has not arrived

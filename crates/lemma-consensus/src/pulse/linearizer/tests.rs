@@ -215,6 +215,49 @@ fn commit_timestamp_returns_weighted_median_of_parents() {
     assert_eq!(ts, 300, "stake-weighted median of (100,200,300,400) = 300");
 }
 
+// ── commit_timestamp edge cases (W5) ─────────────────────────────────────────
+
+#[test]
+fn commit_timestamp_nonmember_parents_falls_back_to_last_ts() {
+    // Non-genesis leader (round 1) whose round-0 parents are all non-members
+    // relative to the timestamp-resolution vset. All parents skipped →
+    // samples empty → return last_commit_ts_ms.
+    let mut dag = Dag::new(1);
+
+    // Insert round-0 blocks from authors NOT in vset4 (addr(10), addr(11), addr(12), addr(13)).
+    // These can't be inserted via Dag (unknown author), so we simulate by inserting
+    // only round-0 genesis blocks from real members, then build a leader at round 1
+    // that references blocks from the real members. But to test the non-member
+    // path, we need the leader's ancestors to be non-members.
+    //
+    // Strategy: use a *different* vset (subset) for the leader's ancestry vs the
+    // vset used for timestamp resolution. Build round-0 blocks for a 4-member vset,
+    // then resolve timestamp against a *different* vset that doesn't include any of them.
+    let vset_for_insert = vset4(); // insert with this
+    let r0: Vec<DagBlockRef> = (1u8..=4)
+        .map(|a| insert_ok(&mut dag, block(0, a, vec![], 999), &vset_for_insert))
+        .collect();
+
+    // vset_for_timestamp has completely different members (addr(10)..addr(13)).
+    let power = VotingPower(Amount::from_drop(10));
+    let mut alt_members = BTreeMap::new();
+    for n in 10u8..=13 {
+        alt_members.insert(addr(n), Member { consensus_pubkey: dummy_key(), power });
+    }
+    let vset_alt = ValidatorSet {
+        epoch: 1,
+        members: alt_members,
+        total_power: Amount::from_drop(40),
+    };
+
+    let leader_block = block(1, 1, r0, 1_234); // round-1 leader
+    let ts = commit_timestamp(&leader_block, 5_000, &dag, &vset_alt).unwrap();
+    // All round-0 ancestors are addr(1)..addr(4), none in vset_alt → empty samples
+    // → fallback to last_commit_ts_ms = 5_000.
+    assert_eq!(ts, 5_000,
+        "non-member parents (empty samples) must fall back to last_commit_ts_ms");
+}
+
 // ── linearize_sub_dag ─────────────────────────────────────────────────────────
 
 #[test]
@@ -315,30 +358,54 @@ fn linearize_dedup_across_commits() {
 
 #[test]
 fn linearize_dfs_order_irrelevant_sort_is_deterministic() {
-    // Two differently-ordered ancestor lists must produce the same sorted output.
+    // Prove that DFS *visit order* is irrelevant — the terminal sort guarantees
+    // identical output regardless of which ancestor is popped from the stack first.
+    //
+    // We build two leaders with IDENTICAL block contents but DIFFERENT ancestor
+    // list orderings (vec![a1,a2,a3] vs vec![a3,a2,a1]). Since the DFS stack
+    // is fed from the ancestor list in order, these produce different DFS
+    // traversals. The output must still be identical (W4 fix).
     let vset = vset4();
-    let mut dag1 = Dag::new(1);
-    let mut dag2 = Dag::new(1);
+    let mut dag = Dag::new(1);
 
-    // Build same blocks in different insertion order.
-    let a1 = insert_ok(&mut dag1, block(0, 1, vec![], 0), &vset);
-    let a2 = insert_ok(&mut dag1, block(0, 2, vec![], 0), &vset);
-    let a3 = insert_ok(&mut dag1, block(0, 3, vec![], 0), &vset);
-    let l1 = insert_ok(&mut dag1, block(1, 1, vec![a1, a2, a3], 0), &vset);
+    // Foundation: 4 round-0 blocks, then chain upward.
+    let r0: Vec<DagBlockRef> = (1u8..=4)
+        .map(|a| insert_ok(&mut dag, block(0, a, vec![], 0), &vset))
+        .collect();
+    let r1: Vec<DagBlockRef> = (1u8..=4)
+        .map(|a| insert_ok(&mut dag, block(1, a, r0.clone(), 0), &vset))
+        .collect();
+    let r2: Vec<DagBlockRef> = (1u8..=4)
+        .map(|a| insert_ok(&mut dag, block(2, a, r1.clone(), 0), &vset))
+        .collect();
 
-    // dag2: insert in reverse author order.
-    insert_ok(&mut dag2, block(0, 3, vec![], 0), &vset);
-    insert_ok(&mut dag2, block(0, 2, vec![], 0), &vset);
-    insert_ok(&mut dag2, block(0, 1, vec![], 0), &vset);
-    // Leader block: same ref as l1 (same digest) but inserted in dag2.
-    let l2 = insert_ok(&mut dag2, block(1, 1, vec![a1, a2, a3], 0), &vset);
+    // Round-3 blocks (the ancestors we will reorder).
+    let a1 = insert_ok(&mut dag, block(3, 1, r2.clone(), 0), &vset);
+    let a2 = insert_ok(&mut dag, block(3, 2, r2.clone(), 0), &vset);
+    let a3 = insert_ok(&mut dag, block(3, 3, r2.clone(), 0), &vset);
+    let r3_all = vec![a1, a2, a3];
 
-    let mut c1 = BTreeSet::new();
-    let mut c2 = BTreeSet::new();
-    let r1 = linearize_sub_dag(&l1, &dag1, &mut c1);
-    let r2 = linearize_sub_dag(&l2, &dag2, &mut c2);
+    // Two leaders at round 4 with REVERSED ancestor list ordering.
+    // Different DFS traversal, same result expected.
+    let r3_rev: Vec<DagBlockRef> = r3_all.iter().rev().copied().collect();
+    let l_fwd = insert_ok(&mut dag, block(4, 1, r3_all.clone(), 0), &vset);
+    let l_rev = insert_ok(&mut dag, block(4, 2, r3_rev.clone(), 0), &vset);
 
-    assert_eq!(r1, r2, "insertion order must not affect linearized output");
+    // Linearize each independently with a fresh committed set.
+    let mut c_fwd = BTreeSet::new();
+    let r_fwd = linearize_sub_dag(&l_fwd, &dag, &mut c_fwd);
+
+    let mut c_rev = BTreeSet::new();
+    let r_rev = linearize_sub_dag(&l_rev, &dag, &mut c_rev);
+
+    // Sort output must be identical regardless of ancestor list order.
+    // (Only the leader refs differ — r_fwd contains l_fwd, r_rev contains l_rev —
+    // but all shared ancestors must appear in the same order in both.)
+    let shared_fwd: Vec<_> = r_fwd.iter().filter(|&&r| r != l_fwd).collect();
+    let shared_rev: Vec<_> = r_rev.iter().filter(|&&r| r != l_rev).collect();
+    assert_eq!(shared_fwd, shared_rev,
+        "shared ancestors must be in identical (round,author)-sorted order \
+         regardless of ancestor list ordering in the leader block (DFS order independence)");
 }
 
 // ── Linearizer state machine ───────────────────────────────────────────────────

@@ -116,9 +116,26 @@ impl Linearizer {
             };
 
             let Some(leader_block) = dag.block(leader_ref).cloned() else {
-                // Leader block not locally present — should not happen after
-                // a direct commit (the DAG accepted it), but defensive.
-                continue;
+                // Provably unreachable in normal operation: `try_decide` returns
+                // `Commit` only for a leader block that was *accepted* into the DAG
+                // (certified — cert check uses `dag.block()`). GC cannot have dropped
+                // it yet because `set_last_committed_round` is called *after* we
+                // process this batch (end of this function) — so the leader's round
+                // is always > gc_round at this point.
+                //
+                // If we ever reach here it means either the DAG state was mutated
+                // outside the normal flow, or a programming error in the driver.
+                // We surface this as a dedicated error (not a silent skip — that
+                // would corrupt the commit chain by dropping a decided leader,
+                // breaking the gapless-prefix invariant — and not a misleading
+                // ByzantineInvariantBreach — this is an internal invariant, not a
+                // detected equivocation; CodeReviewer W3 refinement).
+                debug_assert!(false,
+                    "decided leader block {leader_ref:?} not in DAG — invariant violated");
+                return Err(ConsensusError::DecidedLeaderMissing {
+                    round: leader_ref.round,
+                    author: leader_ref.author,
+                });
             };
 
             // 1. Linearize sub-DAG (DFS, dedup via self.committed).
@@ -232,9 +249,14 @@ fn linearize_sub_dag(
 /// Compute the consensus timestamp for a commit (spec §5.1).
 ///
 /// The timestamp is the **stake-weighted median** of the `timestamp_ms`
-/// values of the leader's round-`(L-1)` parents (strong parents = the
-/// round-`L-1` ancestors that form the 2f+1 strong-link quorum). The
-/// result is clamped to be ≥ `last_commit_ts_ms` (monotonic).
+/// values of the leader's round-`(L-1)` member ancestors. Spec §5.1 names
+/// these "strong parents"; because the leader passed DAG validity rule 5
+/// (strong-link quorum), its round-`(L-1)` ancestors collectively satisfy
+/// the 2f+1 quorum — so "all round-(L-1) member ancestors" and
+/// "strong-link quorum parents" are the same set given an accepted leader.
+/// Non-member ancestors (stake 0) are skipped (AGENTS §2, consistent with
+/// `ThresholdClock` and `check_strong_link_quorum`).
+/// The result is clamped to be ≥ `last_commit_ts_ms` (monotonic).
 ///
 /// **Not** the leader's own `timestamp_ms` (that is advisory only).
 ///
@@ -311,17 +333,19 @@ fn stake_weighted_median(
 ) -> Result<u64, ConsensusError> {
     debug_assert!(!samples.is_empty(), "caller must ensure non-empty samples");
 
-    // Total stake — checked (AGENTS §7.4).
+    // Total stake — checked (AGENTS §7.4). Single checked_add per iteration —
+    // canonical pattern per stake.rs:147, threshold_clock.rs:165 (W1 fix, C1 fix).
+    // Note: StakeAggregator is not reused here because we need a raw u128 sum
+    // for the median threshold computation, not a quorum-threshold predicate.
+    // A zero-address sentinel is used for StakeOverflow.author because this is
+    // an aggregate sum with no single offending author — an internal invariant
+    // violation if it occurs (the validator set's total_power is already bounded).
+    let sentinel = lemma_core::address::Address::from_public_key(&[0u8; 32]);
     let total = samples
         .iter()
         .try_fold(0u128, |acc, (stake, _)| {
             acc.checked_add(*stake)
-                .ok_or(ConsensusError::StakeOverflow {
-                    // Use zero address as sentinel — this is an internal
-                    // helper with no per-author context at this level.
-                    author: lemma_core::address::Address::from_public_key(&[0u8; 32]),
-                })?;
-            Ok::<u128, ConsensusError>(acc.checked_add(*stake).unwrap())
+                .ok_or(ConsensusError::StakeOverflow { author: sentinel })
         })?;
 
     // Sort by timestamp ASC — tie-break by timestamp value (total order on u64).
@@ -329,10 +353,12 @@ fn stake_weighted_median(
     sorted.sort_by_key(|(_, ts)| *ts);
 
     // Walk to find the crossing point (> total / 2).
+    // `accumulated` cannot overflow: it is bounded by `total` which was proven
+    // not to overflow above. Plain `+` is therefore safe (S1 fix).
     let threshold = total / 2;
     let mut accumulated: u128 = 0;
     for (stake, ts) in &sorted {
-        accumulated = accumulated.saturating_add(*stake);
+        accumulated += stake;
         if accumulated > threshold {
             return Ok(*ts);
         }

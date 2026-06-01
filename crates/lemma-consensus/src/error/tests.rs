@@ -21,7 +21,7 @@ use crate::error::ConsensusError;
 /// `#[non_exhaustive]` blocks exhaustive `match` in this (external test) module,
 /// so this count is the canary: bump it — and `all_variants()` — together
 /// whenever a variant is added or removed.
-const VARIANT_COUNT: usize = 8;
+const VARIANT_COUNT: usize = 11;
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
@@ -63,6 +63,14 @@ fn all_variants() -> Vec<ConsensusError> {
             second: hash_b(),
         },
         ConsensusError::StakeOverflow { author: addr() },
+        ConsensusError::EmptyCommittee { epoch: 1 },
+        ConsensusError::ByzantineInvariantBreach {
+            slot_round: 3,
+            slot_author: addr(),
+            first: hash_a(),
+            second: hash_b(),
+        },
+        ConsensusError::DecidedLeaderMissing { round: 4, author: addr() },
     ]
 }
 
@@ -201,6 +209,71 @@ fn epoch_mismatch_is_not_pending_data() {
         !future.is_pending_data(),
         "EpochMismatch must not be classified as pending-data"
     );
+}
+
+// ── is_byzantine_breach / is_fatal / is_empty_committee ───────────────────────
+
+#[test]
+fn is_byzantine_breach_true_only_for_byzantine_invariant_breach() {
+    let breach = ConsensusError::ByzantineInvariantBreach {
+        slot_round: 3,
+        slot_author: addr(),
+        first: hash_a(),
+        second: hash_b(),
+    };
+    assert!(breach.is_byzantine_breach());
+
+    for e in all_variants() {
+        if matches!(e, ConsensusError::ByzantineInvariantBreach { .. }) {
+            continue;
+        }
+        assert!(!e.is_byzantine_breach(),
+            "is_byzantine_breach unexpectedly true for: {e:?}");
+    }
+}
+
+#[test]
+fn is_fatal_true_for_breach_and_missing_leader() {
+    let breach = ConsensusError::ByzantineInvariantBreach {
+        slot_round: 3, slot_author: addr(), first: hash_a(), second: hash_b(),
+    };
+    let missing = ConsensusError::DecidedLeaderMissing { round: 4, author: addr() };
+    assert!(breach.is_fatal());
+    assert!(missing.is_fatal());
+
+    // All other variants are non-fatal (recoverable / single-block rejections).
+    for e in all_variants() {
+        if matches!(
+            e,
+            ConsensusError::ByzantineInvariantBreach { .. }
+                | ConsensusError::DecidedLeaderMissing { .. }
+        ) {
+            continue;
+        }
+        assert!(!e.is_fatal(), "is_fatal unexpectedly true for: {e:?}");
+    }
+}
+
+#[test]
+fn decided_leader_missing_is_fatal_but_not_byzantine() {
+    // DecidedLeaderMissing must halt the node (is_fatal) but NOT be slashed
+    // (is_byzantine_breach false — it's an internal invariant, not a peer offence).
+    let missing = ConsensusError::DecidedLeaderMissing { round: 4, author: addr() };
+    assert!(missing.is_fatal());
+    assert!(!missing.is_byzantine_breach());
+}
+
+#[test]
+fn is_empty_committee_true_only_for_empty_committee() {
+    let empty = ConsensusError::EmptyCommittee { epoch: 5 };
+    assert!(empty.is_empty_committee());
+    for e in all_variants() {
+        if matches!(e, ConsensusError::EmptyCommittee { .. }) {
+            continue;
+        }
+        assert!(!e.is_empty_committee(),
+            "is_empty_committee unexpectedly true for: {e:?}");
+    }
 }
 
 // ── Derived traits (slashing path relies on these) ────────────────────────────
