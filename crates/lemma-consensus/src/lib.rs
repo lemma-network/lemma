@@ -77,6 +77,7 @@ pub const fn wave_of(round: u64) -> u64 {
 
 pub mod commit;
 pub mod dag;
+pub mod epoch;
 pub mod error;
 pub mod fee;
 pub mod pulse;
@@ -96,3 +97,6 @@ pub use pulse::linearizer::Linearizer;
 pub use reputation::{LeaderSwapTable, ReputationScores};
 pub use stake::{StakeAggregator, Threshold};
 pub use fee::{calculate_base_fee, distribute_fee, FeeDistribution, MIN_BASE_FEE_DROP};
+pub use epoch::{advance_epoch, EpochError, EpochOutput,
+                EPOCH_DURATION_SECONDS, UNBONDING_PERIOD_SECONDS,
+                GENESIS_MIN_VALIDATOR_STAKE_DROP};
