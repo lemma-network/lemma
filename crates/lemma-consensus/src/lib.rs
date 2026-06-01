@@ -24,7 +24,8 @@
 //! | `commit`| `Commit` / `CommittedSubDag`, commit-chain digest (§5) |
 //! | `reputation` | `ReputationScores` / `LeaderSwapTable` (§6) |
 //! | `fee`   | Burn Fee Model: base-fee calc + distribution (§fee) |
-//! | `rewards` | Inflation mint + validator distribution (§7, B2) |
+//! | `rewards`   | Inflation mint + validator distribution (§7, B2) |
+//! | `slashing`  | Common slash mechanics, evidence, downtime, jail (§5, B3) |
 //!
 //! Validator-set management, epoch transitions, slashing, and rewards live in
 //! later steps of this crate (`docs/13-VALIDATOR_EPOCH_SPEC.md`), reusing
@@ -84,6 +85,7 @@ pub mod fee;
 pub mod pulse;
 pub mod reputation;
 pub mod rewards;
+pub mod slashing;
 pub mod stake;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
@@ -106,4 +108,9 @@ pub use rewards::{
     compute_epoch_inflation, distribute_rewards,
     RewardOutcome, RewardError,
     EPOCHS_PER_YEAR, INFLATION_SCHEDULE_BPS,
+};
+pub use slashing::{
+    slash, SlashError,
+    DOUBLE_SIGN_SLASH_BPS, DOWNTIME_SLASH_BPS, SHARE_WITHHOLDING_SLASH_BPS,
+    MAX_FRACTION_BPS, EVIDENCE_MAX_AGE_SECONDS,
 };
