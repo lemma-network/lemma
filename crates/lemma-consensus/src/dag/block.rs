@@ -317,6 +317,15 @@ impl DagBlock {
     pub fn is_genesis_round(&self) -> bool {
         self.round == 0
     }
+
+    /// Iterate over ancestors whose round equals `round`.
+    ///
+    /// Used by the commit rule (§4.2–§4.4) to scan voting-round and
+    /// decision-round ancestors without allocating a filtered collection.
+    /// The iterator borrows `self` and yields `&DagBlockRef`.
+    pub fn ancestors_at_round(&self, round: u64) -> impl Iterator<Item = &DagBlockRef> {
+        self.ancestors.iter().filter(move |a| a.round == round)
+    }
 }
 
 // ── Canonical digest ──────────────────────────────────────────────────────────

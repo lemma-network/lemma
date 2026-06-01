@@ -42,6 +42,9 @@ use serde::{Deserialize, Serialize};
 ///   (`docs/13-VALIDATOR_EPOCH_SPEC.md §5.2`).
 /// - **`StakeOverflow`** — checked-arithmetic overflow in `StakeAggregator`
 ///   (`docs/07-CONSENSUS_SPEC.md §1.1`).
+/// - **`ByzantineInvariantBreach`** — two certified leaders at the same slot;
+///   BFT assumption (`Byzantine < S/3`) violated. Node must halt + slash
+///   (`docs/07-CONSENSUS_SPEC.md §4`, Decision 6c).
 ///
 /// # Coverage of spec §3 acceptance rules
 ///
@@ -165,6 +168,35 @@ pub enum ConsensusError {
     /// is aborted rather than wrapping (AGENTS.md §7.4 — always `checked_*`).
     #[error("stake overflow accumulating stake for author {author}")]
     StakeOverflow { author: Address },
+
+    // ── Commit rule — §4 ─────────────────────────────────────────────────────
+
+    /// The BFT safety assumption (`Byzantine < S/3`) has been violated.
+    ///
+    /// This occurs when the commit rule detects **more than one certified leader
+    /// block** at the same slot — which is mathematically impossible unless
+    /// Byzantine stake ≥ S/3 (quorum intersection no longer holds). This is
+    /// **not** a recoverable consensus error: the committed order would be
+    /// ambiguous and unsafe. The node must halt and emit slashing evidence.
+    ///
+    /// `docs/07-CONSENSUS_SPEC.md §4` explicitly documents this as the one
+    /// exception to the no-panic rule (AGENTS.md §7.2: "only when mathematically
+    /// provable"). We surface it as a `Result` variant rather than `panic!`
+    /// so the node binary can emit slashing evidence and shut down gracefully
+    /// instead of crashing with an unhandled panic (Decision 6c).
+    ///
+    /// `slot_round` and `slot_author` identify the contested leader slot.
+    /// `first` and `second` are digests of the two conflicting certified blocks.
+    #[error(
+        "BFT invariant breach: two certified leaders at round {slot_round} \
+         author {slot_author}: {first} vs {second}"
+    )]
+    ByzantineInvariantBreach {
+        slot_round: u64,
+        slot_author: Address,
+        first: Hash,
+        second: Hash,
+    },
 }
 
 // ── Predicates ────────────────────────────────────────────────────────────────
@@ -178,6 +210,16 @@ impl ConsensusError {
     #[must_use]
     pub fn is_equivocation(&self) -> bool {
         matches!(self, Self::Equivocation { .. })
+    }
+
+    /// Returns `true` if this error represents a fatal BFT invariant breach.
+    ///
+    /// When `true`, the node MUST halt and emit slashing evidence — the committed
+    /// order would be unsafe if execution were to continue. Only the
+    /// `ByzantineInvariantBreach` variant qualifies (Decision 6c).
+    #[must_use]
+    pub fn is_byzantine_breach(&self) -> bool {
+        matches!(self, Self::ByzantineInvariantBreach { .. })
     }
 
     /// Returns `true` if this rejection is caused by data that has not arrived

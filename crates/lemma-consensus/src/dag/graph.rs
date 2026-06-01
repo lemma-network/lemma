@@ -199,6 +199,33 @@ impl Dag {
         self.blocks.contains_key(r)
     }
 
+    /// Compute the total stake of all accepted blocks at `round`.
+    ///
+    /// Used by the commit rule (§4.3) as an early-exit guard: if the total
+    /// stake of blocks at the decision round is below quorum, there can be no
+    /// certificate yet — no need to scan individual blocks.
+    ///
+    /// Returns `Err(ConsensusError::StakeOverflow)` if accumulation overflows
+    /// `u128` (AGENTS §7.4). Non-member authors (stake 0 by definition) are
+    /// silently skipped — consistent with `check_strong_link_quorum` and
+    /// `ThresholdClock::add_block` (AGENTS §2 one canonical way).
+    ///
+    /// # Errors
+    /// `ConsensusError::StakeOverflow` if the sum of voting powers overflows.
+    pub fn total_stake_at(
+        &self,
+        round: u64,
+        vset: &lemma_core::validator_set::ValidatorSet,
+    ) -> Result<crate::stake::StakeAggregator, crate::error::ConsensusError> {
+        let mut agg = crate::stake::StakeAggregator::quorum(vset.total_power);
+        for block in self.blocks_at_round(round) {
+            if let Some(member) = vset.members.get(&block.author) {
+                agg.add(block.author, member.power)?;
+            }
+        }
+        Ok(agg)
+    }
+
     /// Current epoch of this DAG.
     #[must_use]
     pub fn epoch(&self) -> u64 {
