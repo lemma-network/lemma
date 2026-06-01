@@ -42,6 +42,8 @@ use serde::{Deserialize, Serialize};
 ///   (`docs/13-VALIDATOR_EPOCH_SPEC.md §5.2`).
 /// - **`StakeOverflow`** — checked-arithmetic overflow in `StakeAggregator`
 ///   (`docs/07-CONSENSUS_SPEC.md §1.1`).
+/// - **`EmptyCommittee`** — validator set has no members; fatal configuration
+///   error at epoch boundary or genesis (spec §6, Decision 7a/W1).
 /// - **`ByzantineInvariantBreach`** — two certified leaders at the same slot;
 ///   BFT assumption (`Byzantine < S/3`) violated. Node must halt + slash
 ///   (`docs/07-CONSENSUS_SPEC.md §4`, Decision 6c).
@@ -169,6 +171,19 @@ pub enum ConsensusError {
     #[error("stake overflow accumulating stake for author {author}")]
     StakeOverflow { author: Address },
 
+    // ── Leader schedule — §6 ─────────────────────────────────────────────────
+
+    /// The validator set passed to [`LeaderSchedule`] has no members.
+    ///
+    /// This is a protocol invariant violation — all valid epochs have at least
+    /// one validator (genesis enforces this). Returning an error (not panicking)
+    /// follows Decision 6c: no panics in the consensus path (AGENTS §7.2).
+    /// The node binary should treat this as a fatal configuration error.
+    ///
+    /// [`LeaderSchedule`]: crate::pulse::leader::LeaderSchedule
+    #[error("leader schedule requires a non-empty validator set (epoch {epoch})")]
+    EmptyCommittee { epoch: u64 },
+
     // ── Commit rule — §4 ─────────────────────────────────────────────────────
 
     /// The BFT safety assumption (`Byzantine < S/3`) has been violated.
@@ -210,6 +225,13 @@ impl ConsensusError {
     #[must_use]
     pub fn is_equivocation(&self) -> bool {
         matches!(self, Self::Equivocation { .. })
+    }
+
+    /// Returns `true` if this error is a fatal configuration error: the
+    /// validator set is empty. Only `EmptyCommittee` qualifies.
+    #[must_use]
+    pub fn is_empty_committee(&self) -> bool {
+        matches!(self, Self::EmptyCommittee { .. })
     }
 
     /// Returns `true` if this error represents a fatal BFT invariant breach.

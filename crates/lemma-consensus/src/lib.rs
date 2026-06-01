@@ -46,6 +46,15 @@
 /// Used by the commit rule (§4.1) and leader-schedule (§6).
 pub const WAVE_LENGTH: u64 = 3;
 
+/// Leader offset for the base round-robin schedule (spec §6).
+///
+/// v1 single-leader profile uses offset `0`. Multi-leader pipelining
+/// (a tuning knob, not v1 mainnet) runs N [`LeaderSchedule`]s with
+/// distinct offsets `0..N` so different leaders are elected every round.
+///
+/// [`LeaderSchedule`]: pulse::leader::LeaderSchedule
+pub const LEADER_OFFSET: u64 = 0;
+
 /// Rounds retained before garbage collection.
 ///
 /// Blocks at `round <= last_committed_round - GC_DEPTH` are dropped from DAG
@@ -69,6 +78,7 @@ pub const fn wave_of(round: u64) -> u64 {
 pub mod dag;
 pub mod error;
 pub mod pulse;
+pub mod reputation;
 pub mod stake;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
@@ -78,4 +88,6 @@ pub use dag::graph::{Dag, InsertOutcome};
 pub use dag::threshold_clock::ThresholdClock;
 pub use error::ConsensusError;
 pub use pulse::committer::{LeaderStatus, try_decide};
+pub use pulse::leader::LeaderSchedule;
+pub use reputation::{LeaderSwapTable, ReputationScores};
 pub use stake::{StakeAggregator, Threshold};

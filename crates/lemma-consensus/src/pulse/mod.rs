@@ -14,5 +14,7 @@
 //! | `linearizer`| Sub-DAG flatten + total order §5 (Step 8) |
 
 pub mod committer;
+pub mod leader;
 
 pub use committer::{LeaderStatus, try_decide};
+pub use leader::LeaderSchedule;
