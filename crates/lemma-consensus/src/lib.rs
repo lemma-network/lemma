@@ -66,10 +66,12 @@ pub const fn wave_of(round: u64) -> u64 {
 
 // ── Modules ───────────────────────────────────────────────────────────────────
 
+pub mod dag;
 pub mod error;
 pub mod stake;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
+pub use dag::block::{CommitVote, DagBlock, DagBlockBody, DagBlockRef, Slot, TxBatchRef};
 pub use error::ConsensusError;
 pub use stake::{StakeAggregator, Threshold};
