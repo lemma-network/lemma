@@ -78,6 +78,7 @@ pub const fn wave_of(round: u64) -> u64 {
 pub mod commit;
 pub mod dag;
 pub mod error;
+pub mod fee;
 pub mod pulse;
 pub mod reputation;
 pub mod stake;
@@ -94,3 +95,4 @@ pub use pulse::leader::LeaderSchedule;
 pub use pulse::linearizer::Linearizer;
 pub use reputation::{LeaderSwapTable, ReputationScores};
 pub use stake::{StakeAggregator, Threshold};
+pub use fee::{calculate_base_fee, distribute_fee, FeeDistribution, MIN_BASE_FEE_DROP};
