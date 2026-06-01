@@ -73,5 +73,6 @@ pub mod stake;
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use dag::block::{CommitVote, DagBlock, DagBlockBody, DagBlockRef, Slot, TxBatchRef};
+pub use dag::graph::{Dag, InsertOutcome};
 pub use error::ConsensusError;
 pub use stake::{StakeAggregator, Threshold};
