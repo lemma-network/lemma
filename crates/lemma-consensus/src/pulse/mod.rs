@@ -15,6 +15,8 @@
 
 pub mod committer;
 pub mod leader;
+pub mod linearizer;
 
 pub use committer::{LeaderStatus, try_decide};
 pub use leader::LeaderSchedule;
+pub use linearizer::Linearizer;

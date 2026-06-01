@@ -75,6 +75,7 @@ pub const fn wave_of(round: u64) -> u64 {
 
 // ── Modules ───────────────────────────────────────────────────────────────────
 
+pub mod commit;
 pub mod dag;
 pub mod error;
 pub mod pulse;
@@ -87,7 +88,9 @@ pub use dag::block::{CommitVote, DagBlock, DagBlockBody, DagBlockRef, Slot, TxBa
 pub use dag::graph::{Dag, InsertOutcome};
 pub use dag::threshold_clock::ThresholdClock;
 pub use error::ConsensusError;
+pub use commit::Commit;
 pub use pulse::committer::{LeaderStatus, try_decide};
 pub use pulse::leader::LeaderSchedule;
+pub use pulse::linearizer::Linearizer;
 pub use reputation::{LeaderSwapTable, ReputationScores};
 pub use stake::{StakeAggregator, Threshold};
