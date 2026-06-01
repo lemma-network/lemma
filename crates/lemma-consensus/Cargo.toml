@@ -8,4 +8,9 @@ description = "DAG consensus for Lemma: Surge (DA), Pulse (ordering), PoS valida
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+blake3 = { workspace = true }
 lemma-core = { path = "../lemma-core" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }

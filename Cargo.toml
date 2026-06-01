@@ -54,6 +54,7 @@ rocksdb = "0.24"
 
 # Testing utilities
 tempfile = "3.10"
+proptest = "1"
 
 # Networking (0.56 is tokio-only — async-std removed; decisions-log 2026-05-30)
 # request-response + cbor: bounded pull-sync (/lemma/sync/1) via CBOR codec
