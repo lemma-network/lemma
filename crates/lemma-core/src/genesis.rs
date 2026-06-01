@@ -124,8 +124,10 @@ impl GenesisConfig {
     /// Returns [`CoreError::Block(BlockError::GasLimitZero)`](crate::error::BlockError::GasLimitZero)
     /// if `initial_gas_limit` is 0.
     ///
-    /// Note: `initial_base_fee == 0` is permitted — devnet chains may start
-    /// with zero base fee and let the Burn Fee Model ramp up from block 1.
+    /// Note: `initial_base_fee == 0` is permitted — chains may start with zero
+    /// base fee. `calculate_base_fee` (lemma-consensus) clamps output to
+    /// `MIN_BASE_FEE_DROP` (1 Drip), so the floor takes effect from block 1
+    /// regardless of the genesis seed value.
     /// # Errors
     ///
     /// - [`CoreError::Block(BlockError::GasLimitZero)`](crate::error::BlockError::GasLimitZero)
