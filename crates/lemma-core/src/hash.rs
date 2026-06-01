@@ -32,7 +32,12 @@ use crate::error::HashError;
 // `Debug` and `std::hash::Hash` are implemented manually below:
 // - `Debug`: to produce `Hash(<hex>)` instead of the default `Hash([u8; 32])` array format
 // - `std::hash::Hash`: to avoid name ambiguity between this struct and the `std::hash::Hash` trait
-#[derive(Clone, Copy, PartialEq, Eq)]
+//
+// `PartialOrd` and `Ord` are derived so `Hash` can be used as a `BTreeMap` key — needed by the
+// pool's priority index and any ordered-hash lookup in consensus/state code.
+// Ordering is lexicographic over the raw 32-byte payload — deterministic and consistent across all
+// nodes (same reasoning as `Address`; see address.rs).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Hash([u8; 32]);
 
 impl Hash {

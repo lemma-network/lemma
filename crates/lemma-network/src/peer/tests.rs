@@ -584,15 +584,21 @@ fn record_event_does_not_rewind_last_seen() {
 
 #[test]
 fn initial_score_is_between_min_and_max() {
-    assert!(INITIAL_APP_SCORE >= MIN_APP_SCORE);
-    assert!(INITIAL_APP_SCORE <= MAX_APP_SCORE);
+    // black_box prevents the compiler from folding these into `assert!(true)` and
+    // optimizing the check away. The assertions run at runtime so CI catches any
+    // constant change that violates the invariant.
+    // Note: f64 comparisons cannot be used in `const { assert!() }` blocks because
+    // `PartialOrd` is not a const trait — black_box is the correct tool here.
+    assert!(std::hint::black_box(INITIAL_APP_SCORE) >= MIN_APP_SCORE);
+    assert!(std::hint::black_box(INITIAL_APP_SCORE) <= MAX_APP_SCORE);
 }
 
 #[test]
 fn graylist_threshold_is_between_min_and_max() {
     // Threshold must be reachable (> MIN) and not trigger at start (< INITIAL).
-    assert!(DEFAULT_GRAYLIST_THRESHOLD > MIN_APP_SCORE);
-    assert!(DEFAULT_GRAYLIST_THRESHOLD < INITIAL_APP_SCORE);
+    // See black_box note in `initial_score_is_between_min_and_max`.
+    assert!(std::hint::black_box(DEFAULT_GRAYLIST_THRESHOLD) > MIN_APP_SCORE);
+    assert!(std::hint::black_box(DEFAULT_GRAYLIST_THRESHOLD) < INITIAL_APP_SCORE);
 }
 
 #[test]

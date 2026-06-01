@@ -138,6 +138,29 @@ fn unstake_tx() -> Transaction {
     .unwrap()
 }
 
+/// Minimal valid GovernanceVote transaction.
+///
+/// `data` carries a minimal non-empty payload standing in for a real
+/// `(proposal_id, choice)` ABI encoding — exact encoding is a Phase 3
+/// concern (governance system contract + Lem ABI). Any non-empty `data`
+/// satisfies the `requires_calldata` constraint.
+fn governance_vote_tx() -> Transaction {
+    Transaction::new(
+        tx_hash(),
+        sender(),
+        Some(recipient()), // governance system-contract address (placeholder)
+        2,
+        1,
+        Amount::zero(), // votes carry no LEM value
+        21_000,
+        gas_price(),
+        TxType::GovernanceVote,
+        vec![0x00, 0x00, 0x00, 0x01, 0x01], // stub: proposal_id=1, choice=1
+        Signature::Unsigned,
+    )
+    .unwrap()
+}
+
 // ── TxType — is_contract_deploy ───────────────────────────────────────────────
 
 #[test]
@@ -163,6 +186,11 @@ fn tx_type_is_contract_deploy_false_for_stake() {
 #[test]
 fn tx_type_is_contract_deploy_false_for_unstake() {
     assert!(!TxType::Unstake.is_contract_deploy());
+}
+
+#[test]
+fn tx_type_is_contract_deploy_false_for_governance_vote() {
+    assert!(!TxType::GovernanceVote.is_contract_deploy());
 }
 
 // ── TxType — requires_recipient ───────────────────────────────────────────────
@@ -192,6 +220,12 @@ fn tx_type_requires_recipient_true_for_unstake() {
     assert!(TxType::Unstake.requires_recipient());
 }
 
+#[test]
+fn tx_type_requires_recipient_true_for_governance_vote() {
+    // GovernanceVote is sent to the governance system-contract address.
+    assert!(TxType::GovernanceVote.requires_recipient());
+}
+
 // ── TxType — requires_calldata ────────────────────────────────────────────────
 
 #[test]
@@ -219,6 +253,12 @@ fn tx_type_requires_calldata_false_for_unstake() {
     assert!(!TxType::Unstake.requires_calldata());
 }
 
+#[test]
+fn tx_type_requires_calldata_true_for_governance_vote() {
+    // GovernanceVote carries (proposal_id: u64, choice: u8) in data — required.
+    assert!(TxType::GovernanceVote.requires_calldata());
+}
+
 // ── TxType — Display ──────────────────────────────────────────────────────────
 
 #[test]
@@ -244,6 +284,11 @@ fn tx_type_display_stake() {
 #[test]
 fn tx_type_display_unstake() {
     assert_eq!(TxType::Unstake.to_string(), "Unstake");
+}
+
+#[test]
+fn tx_type_display_governance_vote() {
+    assert_eq!(TxType::GovernanceVote.to_string(), "GovernanceVote");
 }
 
 // ── TxType — Serde ────────────────────────────────────────────────────────────
@@ -284,24 +329,20 @@ fn tx_type_unstake_roundtrips_through_json() {
 }
 
 #[test]
+fn tx_type_governance_vote_roundtrips_through_json() {
+    let json = serde_json::to_string(&TxType::GovernanceVote).unwrap();
+    let decoded: TxType = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, TxType::GovernanceVote);
+}
+
+#[test]
 fn tx_type_serializes_to_snake_case() {
-    assert_eq!(
-        serde_json::to_string(&TxType::Transfer).unwrap(),
-        "\"transfer\""
-    );
-    assert_eq!(
-        serde_json::to_string(&TxType::ContractCall).unwrap(),
-        "\"contract_call\""
-    );
-    assert_eq!(
-        serde_json::to_string(&TxType::ContractDeploy).unwrap(),
-        "\"contract_deploy\""
-    );
+    assert_eq!(serde_json::to_string(&TxType::Transfer).unwrap(), "\"transfer\"");
+    assert_eq!(serde_json::to_string(&TxType::ContractCall).unwrap(), "\"contract_call\"");
+    assert_eq!(serde_json::to_string(&TxType::ContractDeploy).unwrap(), "\"contract_deploy\"");
     assert_eq!(serde_json::to_string(&TxType::Stake).unwrap(), "\"stake\"");
-    assert_eq!(
-        serde_json::to_string(&TxType::Unstake).unwrap(),
-        "\"unstake\""
-    );
+    assert_eq!(serde_json::to_string(&TxType::Unstake).unwrap(), "\"unstake\"");
+    assert_eq!(serde_json::to_string(&TxType::GovernanceVote).unwrap(), "\"governance_vote\"");
 }
 
 // ── TxType — Clone / Copy / PartialEq / Hash ─────────────────────────────────
@@ -400,6 +441,11 @@ fn transaction_new_stake_with_valid_fields_succeeds() {
 #[test]
 fn transaction_new_unstake_with_valid_fields_succeeds() {
     assert_eq!(unstake_tx().tx_type, TxType::Unstake);
+}
+
+#[test]
+fn transaction_new_governance_vote_with_valid_fields_succeeds() {
+    assert_eq!(governance_vote_tx().tx_type, TxType::GovernanceVote);
 }
 
 // ── Transaction — validation failures ─────────────────────────────────────────
@@ -663,6 +709,11 @@ fn transaction_is_contract_deploy_false_for_unstake_type() {
     assert!(!unstake_tx().is_contract_deploy());
 }
 
+#[test]
+fn transaction_is_contract_deploy_false_for_governance_vote_type() {
+    assert!(!governance_vote_tx().is_contract_deploy());
+}
+
 // ── Transaction — validate happy path ────────────────────────────────────────
 
 #[test]
@@ -672,6 +723,7 @@ fn transaction_validate_on_constructed_transaction_returns_ok() {
     assert!(call_tx().validate().is_ok());
     assert!(stake_tx().validate().is_ok());
     assert!(unstake_tx().validate().is_ok());
+    assert!(governance_vote_tx().validate().is_ok());
 }
 
 // ── Transaction — Serde ───────────────────────────────────────────────────────

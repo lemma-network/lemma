@@ -29,12 +29,14 @@ fn test_block() -> Block {
 
 #[test]
 fn command_channel_capacity_is_nonzero() {
-    assert!(COMMAND_CHANNEL_CAPACITY > 0);
+    // `const { assert!() }` evaluates at compile time — a change to 0 is a compile
+    // error, not just a test failure. Correct tool for usize constant invariants.
+    const { assert!(COMMAND_CHANNEL_CAPACITY > 0); }
 }
 
 #[test]
 fn event_channel_capacity_is_nonzero() {
-    assert!(EVENT_CHANNEL_CAPACITY > 0);
+    const { assert!(EVENT_CHANNEL_CAPACITY > 0); }
 }
 
 // ── NetworkHandle — Clone ─────────────────────────────────────────────────────

@@ -5,7 +5,13 @@ edition = "2021"
 description = "Transaction mempool for Lemma: priority queue, validation, rate limiting, Express fast path"
 
 [dependencies]
+bincode = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tracing = { workspace = true }
 lemma-core = { path = "../lemma-core" }
+lemma-crypto = { path = "../lemma-crypto" }
+lemma-storage = { path = "../lemma-storage" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

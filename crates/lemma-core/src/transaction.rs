@@ -48,6 +48,31 @@ pub enum TxType {
     Stake,
     /// Withdraw previously staked LEM from a validator.
     Unstake,
+    /// Cast a vote on an on-chain governance proposal.
+    ///
+    /// # Phase staging
+    ///
+    /// The **`TxType` variant** exists from Phase 1 (Foundation) so that
+    /// the mempool, circuit-breaker, and serialization layers handle
+    /// governance transactions consistently from day one.
+    ///
+    /// The **governance execution logic** — proposals, vote tallying,
+    /// quorum thresholds, timelock enforcement, and the `@std/governance`
+    /// Lem standard library — is a **Phase 3 (Lem Language + Compiler)**
+    /// deliverable.  A Phase 1/2 node will accept, validate, and gossip
+    /// `GovernanceVote` transactions but has no executor yet. Until Phase 3
+    /// ships the governance system contract, admission of `GovernanceVote`
+    /// transactions should be gated at the mempool layer (the circuit breaker
+    /// or pool policy) to prevent accepting-but-not-executing transactions
+    /// from occupying block space without effect.
+    ///
+    /// # Wire format
+    ///
+    /// - `to`: the governance system-contract address (required).
+    /// - `data`: ABI-encoded `(proposal_id: u64, choice: u8)` vote payload
+    ///   (required, non-empty).
+    /// - `value`: typically zero (votes carry no LEM value).
+    GovernanceVote,
 }
 
 impl fmt::Display for TxType {
@@ -60,6 +85,7 @@ impl fmt::Display for TxType {
             Self::ContractDeploy => "ContractDeploy",
             Self::Stake => "Stake",
             Self::Unstake => "Unstake",
+            Self::GovernanceVote => "GovernanceVote",
         };
         f.write_str(name)
     }
@@ -77,8 +103,10 @@ impl TxType {
 
     /// Returns `true` if this type requires a non-`None` recipient address.
     ///
-    /// `ContractDeploy` is the only type that must NOT have a `to`.
-    /// All other types address an existing account or contract.
+    /// `ContractDeploy` is the only type that must NOT have a `to` —
+    /// the address is computed by the VM (CREATE formula).
+    /// All other types, including `GovernanceVote` (sent to the governance
+    /// system-contract address), require an explicit `to`.
     #[must_use]
     pub fn requires_recipient(&self) -> bool {
         // NOTE: update this match when adding new variants.
@@ -88,11 +116,12 @@ impl TxType {
     /// Returns `true` if this type requires non-empty `data`.
     ///
     /// `ContractCall` needs at least a 4-byte function selector.
-    /// `ContractDeploy` needs bytecode. `Transfer`, `Stake`, and `Unstake`
-    /// may have empty `data`.
+    /// `ContractDeploy` needs bytecode.
+    /// `GovernanceVote` carries `(proposal_id: u64, choice: u8)` — required.
+    /// `Transfer`, `Stake`, and `Unstake` may have empty `data`.
     #[must_use]
     pub fn requires_calldata(&self) -> bool {
-        matches!(self, Self::ContractCall | Self::ContractDeploy)
+        matches!(self, Self::ContractCall | Self::ContractDeploy | Self::GovernanceVote)
     }
 }
 
