@@ -38,6 +38,38 @@
 //! - All token / stake arithmetic uses `checked_*` (AGENTS.md §7.4).
 //! - No `f64` / `f32` anywhere in the commit path.
 
+// ── Protocol constants ────────────────────────────────────────────────────────
+
+/// A wave is exactly 3 rounds: leader round, voting round, decision round.
+///
+/// Verified against Mysticeti `commit.rs` (AGENTS.md §9.2).
+/// Used by the commit rule (§4.1) and leader-schedule (§6).
+pub const WAVE_LENGTH: u64 = 3;
+
+/// Rounds retained before garbage collection.
+///
+/// Blocks at `round <= last_committed_round - GC_DEPTH` are dropped from DAG
+/// state. Default chosen conservatively; tunable per-network in genesis
+/// (`docs/07-CONSENSUS_SPEC.md §1`, §9).
+pub const GC_DEPTH: u64 = 30;
+
+// ── Wave helpers ──────────────────────────────────────────────────────────────
+
+/// Map a DAG round to its wave number (`round / WAVE_LENGTH`).
+///
+/// Used throughout the commit rule (§4.1) and leader-schedule (§6).
+/// `const fn` so it can be used in constant expressions.
+#[must_use]
+pub const fn wave_of(round: u64) -> u64 {
+    round / WAVE_LENGTH
+}
+
+// ── Modules ───────────────────────────────────────────────────────────────────
+
 pub mod error;
+pub mod stake;
+
+// ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use error::ConsensusError;
+pub use stake::{StakeAggregator, Threshold};
