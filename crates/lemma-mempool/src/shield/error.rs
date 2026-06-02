@@ -161,6 +161,13 @@ pub enum ShieldError {
     #[error("PVSS transcript is invalid: tag/FFT/share pairing check failed (§4.3)")]
     InvalidTranscript,
 
+    /// DKG aggregation failed to reach ≥ 2/3 total weight of valid transcripts (§4.6).
+    ///
+    /// Returned by `run_dkg` when the sum of surviving valid dealers' weights is
+    /// less than ⌈2/3·W⌉. The epoch proceeds with the last good `Y` (§6) — never crashes.
+    #[error("DKG aggregation failed to reach 2/3 weight: have weight {have}, need {need}")]
+    DkgQuorumNotReached { have: u64, need: u64 },
+
     /// A Chaum–Pedersen DLEQ proof failed verification (§3.2).
     ///
     /// One or both of the Schnorr checks failed:

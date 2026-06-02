@@ -36,10 +36,10 @@
 
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective, G2Affine};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
-use ark_ff::{Field, PrimeField, Zero};
+use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use ark_std::UniformRand;
-use blake2::{Blake2b512, Digest};
+use blake2::Blake2b512;
 use schnorr_pok::discrete_log::{PokDiscreteLog, PokDiscreteLogProtocol};
 use schnorr_pok::pok_generalized_pedersen::compute_random_oracle_challenge;
 use std::collections::BTreeMap;
@@ -372,18 +372,8 @@ fn batch_share_challenges(
         ek.serialize_compressed(&mut transcript)
             .map_err(|e| ShieldError::Serialization(format!("{e:?}")))?;
     }
-    entries
-        .iter()
-        .enumerate()
-        .map(|(k, _)| {
-            let mut h = Blake2b512::new();
-            h.update(&transcript);
-            h.update((k as u64).to_le_bytes());
-            let digest = h.finalize();
-            // from_le_bytes_mod_order: 512 bits >> 255-bit r, bias negligible (§7.5).
-            Ok(Fr::from_le_bytes_mod_order(&digest))
-        })
-        .collect()
+    // Counter-mode Blake2b512 expansion (§7.5) — canonical implementation in fs.
+    Ok(crate::shield::fs::expand_challenges(&transcript, entries.len()))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

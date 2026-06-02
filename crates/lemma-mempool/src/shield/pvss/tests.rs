@@ -1,4 +1,4 @@
-//! Tests for `shield::pvss` — S5: deal + verify.
+//! Tests for `shield::pvss` — S5: deal + verify; S6: aggregate + recover_share.
 //!
 //! Test matrix (15-SHIELD_SPEC §11, PVSS row):
 //! - `deal_then_verify_accepts_valid_transcript` — happy path roundtrip.
@@ -21,12 +21,13 @@
 //! - `deal_stores_tau_in_transcript` — tau echoed back.
 //! - `deal_verify_with_larger_committee` — W=12, t=3.
 
-use ark_bls12_381::{Fr, G2Affine, G2Projective};
+use ark_bls12_381::{Fr, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{AffineRepr, CurveGroup};
+use ark_ff::Zero;
 use rand::{rngs::StdRng, SeedableRng};
 use std::collections::BTreeMap;
 
-use super::{deal, u1_generator, verify, PvssTranscript};
+use super::{aggregate, deal, recover_share, u1_generator, verify, PvssTranscript};
 use crate::shield::{
     committee::ShieldCommittee,
     params::WEIGHT_GRANULARITY_DROP,
@@ -347,4 +348,160 @@ fn deal_verify_with_larger_committee() {
     );
     assert_eq!(transcript.coeff_comms.len(), 4, "W=12 -> t=3 -> 4 coeff_comms");
     assert_eq!(transcript.enc_shares.len(), 12, "W=12 -> 12 enc_shares");
+}
+
+// ── aggregate (S6, §4.4) ──────────────────────────────────────────────────────
+
+#[test]
+fn aggregate_of_single_transcript_equals_itself() {
+    let (_, _, tr) = valid_setup();
+    let agg = aggregate(&[tr.clone()]).unwrap();
+    assert_eq!(agg.coeff_comms, tr.coeff_comms, "aggregate([tr]) coeff_comms must equal tr");
+    assert_eq!(agg.tag, tr.tag, "aggregate([tr]) tag must equal tr");
+    assert_eq!(agg.enc_shares, tr.enc_shares, "aggregate([tr]) enc_shares must equal tr");
+}
+
+#[test]
+fn aggregate_of_n_valid_passes_verify() {
+    let (committee, eks, _) = valid_setup();
+    let tau = test_tau();
+    let tr1 = deal(tau.clone(), &committee, &eks, &mut seeded_rng(1)).unwrap();
+    let tr2 = deal(tau.clone(), &committee, &eks, &mut seeded_rng(2)).unwrap();
+    let tr3 = deal(tau.clone(), &committee, &eks, &mut seeded_rng(3)).unwrap();
+    let agg = aggregate(&[tr1, tr2, tr3]).unwrap();
+    assert!(
+        verify(&tau, &agg, &committee, &eks).is_ok(),
+        "aggregate of valid transcripts must pass verify (§4.3 + GJMMST soundness)"
+    );
+}
+
+#[test]
+fn aggregate_y_equals_sum_of_f0() {
+    // Y = F_0 of aggregate == Σ F_0^{(n)} (§4.4).
+    let (committee, eks, _) = valid_setup();
+    let tau = test_tau();
+    let tr1 = deal(tau.clone(), &committee, &eks, &mut seeded_rng(10)).unwrap();
+    let tr2 = deal(tau.clone(), &committee, &eks, &mut seeded_rng(20)).unwrap();
+    let expected_y: G1Affine = (G1Projective::from(tr1.coeff_comms[0])
+        + G1Projective::from(tr2.coeff_comms[0]))
+    .into_affine();
+    let agg = aggregate(&[tr1, tr2]).unwrap();
+    assert_eq!(agg.coeff_comms[0], expected_y, "Y = F_0 must equal Σ F_0^{{(n)}}");
+}
+
+#[test]
+fn aggregate_rejects_empty_input() {
+    let err = aggregate(&[]).unwrap_err();
+    assert_eq!(err, ShieldError::InvalidTranscript, "empty slice must be rejected");
+}
+
+#[test]
+fn aggregate_rejects_mismatched_tau() {
+    let (committee, eks, _) = valid_setup();
+    let tr1 = deal(test_tau(), &committee, &eks, &mut seeded_rng(1)).unwrap();
+    let tr2 = deal(b"different-tau".to_vec(), &committee, &eks, &mut seeded_rng(2)).unwrap();
+    let err = aggregate(&[tr1, tr2]).unwrap_err();
+    assert_eq!(err, ShieldError::InvalidTranscript, "tau mismatch must be rejected");
+}
+
+#[test]
+fn aggregate_rejects_mismatched_coeff_comms_length() {
+    let (_, _, mut tr1) = valid_setup();
+    let tr2 = tr1.clone();
+    // Give tr1 an extra coefficient commitment (degree mismatch).
+    tr1.coeff_comms.push(G1Affine::generator());
+    let err = aggregate(&[tr1, tr2]).unwrap_err();
+    assert_eq!(err, ShieldError::InvalidTranscript, "degree mismatch must be rejected");
+}
+
+#[test]
+fn aggregate_rejects_mismatched_enc_shares_keyset() {
+    let (_, _, mut tr1) = valid_setup();
+    let tr2 = tr1.clone();
+    // Remove a share from tr1 and insert with a bogus key → different keyset.
+    let first = *tr1.enc_shares.keys().next().unwrap();
+    let val = tr1.enc_shares.remove(&first).unwrap();
+    tr1.enc_shares.insert(255, val); // 255 not in 1..=6 keyset
+    let err = aggregate(&[tr1, tr2]).unwrap_err();
+    assert_eq!(err, ShieldError::InvalidTranscript, "enc_shares keyset mismatch must be rejected");
+}
+
+// ── recover_share (S6, §4.5) ──────────────────────────────────────────────────
+
+#[test]
+fn recover_share_produces_correct_z_values() {
+    // Z_{i,ω} = [dk_inv] Ŷ_{i,ω}  ⟹  [dk] Z = Ŷ  (verify by re-encryption).
+    let (committee, _eks, tr) = valid_setup();
+    let (_, dks) = test_epoch_keys(&committee);
+    let (_, share_ids) = committee.iter().next().unwrap();
+    let dk = dks[0];
+    let z_map = recover_share(&dk, &tr, share_ids).unwrap();
+    for (omega, z) in &z_map {
+        let y_hat = tr.enc_shares[omega];
+        let re_enc: G2Affine = (G2Projective::from(*z) * dk).into_affine();
+        assert_eq!(re_enc, y_hat, "re-encryption of Z must recover original Ŷ (ω={omega})");
+    }
+}
+
+#[test]
+fn recover_share_rejects_zero_key() {
+    let (_, _, tr) = valid_setup();
+    let err = recover_share(&Fr::zero(), &tr, &[1]).unwrap_err();
+    assert_eq!(err, ShieldError::InvalidKey, "dk_i=0 must be rejected (not invertible)");
+}
+
+#[test]
+fn recover_share_rejects_missing_share_id() {
+    let (_, _, tr) = valid_setup();
+    let dk = Fr::from(1u64);
+    // Share ID 255 is not in the W=6 transcript (1..=6).
+    let err = recover_share(&dk, &tr, &[255]).unwrap_err();
+    assert_eq!(
+        err,
+        ShieldError::InvalidTranscript,
+        "missing share ID must return InvalidTranscript"
+    );
+}
+
+#[test]
+fn recover_share_round_trip_with_combine() {
+    // Full end-to-end: deal → aggregate → recover_share → combine → plaintext.
+    use crate::shield::{
+        ciphertext::ShieldAad,
+        domain::ShieldDomain,
+        tpke::{combine, encrypt, CombineShare},
+    };
+
+    let (committee, eks, _) = valid_setup(); // W=6, t=1
+    let tau = test_tau();
+    let (_, dks) = test_epoch_keys(&committee);
+
+    // Two dealers contribute; aggregate to get the epoch secret.
+    let tr1 = deal(tau.clone(), &committee, &eks, &mut seeded_rng(10)).unwrap();
+    let tr2 = deal(tau.clone(), &committee, &eks, &mut seeded_rng(20)).unwrap();
+    let agg = aggregate(&[tr1, tr2]).unwrap();
+    let y: G1Affine = agg.coeff_comms[0];
+
+    // Encrypt a message under Y.
+    let aad = ShieldAad { chain_id: 1, epoch: 1, submitter_nonce: 0 };
+    let plaintext = b"shield-round-trip";
+    let ct = encrypt(&y, aad, plaintext).unwrap();
+
+    // All validators recover their Z shares from the aggregated transcript.
+    let domain = ShieldDomain::new(committee.total_weight()).unwrap();
+    let combine_shares: Vec<CombineShare> = committee
+        .iter()
+        .enumerate()
+        .map(|(idx, (_, share_ids))| {
+            let z_map = recover_share(&dks[idx], &agg, share_ids).unwrap();
+            CombineShare { validator_index: idx as u16, z_shares: z_map.into_iter().collect() }
+        })
+        .collect();
+
+    let decrypted = combine(&ct, &combine_shares, &committee, &domain).unwrap();
+    assert_eq!(
+        decrypted.as_slice(),
+        plaintext.as_slice(),
+        "combine must recover the original plaintext"
+    );
 }

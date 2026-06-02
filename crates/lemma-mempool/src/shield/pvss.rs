@@ -6,7 +6,7 @@
 //! | Sub-step | Functions |
 //! |----------|-----------|
 //! | S5 ✅ | [`deal`], [`verify`], [`PvssTranscript`], [`u1_generator`] |
-//! | S6 | `aggregate`, `recover_share` — not yet implemented |
+//! | S6 ✅ | [`aggregate`], [`recover_share`] |
 //!
 //! ## Clean-room provenance (DB-11)
 //!
@@ -29,20 +29,12 @@
 //! `deal` uses CSPRNG (off-consensus, dealer-local, same rule as `encrypt`).
 
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
-use ark_ec::{
-    hashing::{curve_maps::wb::WBMap, map_to_curve_hasher::MapToCurveBasedHasher, HashToCurve},
-    pairing::Pairing,
-    AffineRepr, CurveGroup,
-};
-use ark_ff::{field_hashers::DefaultFieldHasher, PrimeField, Zero};
-// ark_poly::EvaluationDomain — reserved for S6 aggregate (G-FFT optimization).
-// Not used in S5 deal/verify (we use O(W·t) Horner with integer evaluation points).
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
+use ark_ff::{Field, Zero};
 use ark_serialize::CanonicalSerialize;
 use ark_std::UniformRand;
-use blake2::{Blake2b512, Digest};
 use secret_sharing_and_dkg::common::ShareId;
-use sha2_v010::Sha256 as Sha256v10;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::shield::{
     committee::ShieldCommittee,
@@ -66,14 +58,9 @@ use crate::shield::{
 ///
 /// [`ShieldError::HashToCurve`] — RFC 9380 map failed (practically unreachable).
 pub fn u1_generator() -> Result<G2Affine, ShieldError> {
-    type G2Hasher = MapToCurveBasedHasher<
-        G2Projective,
-        DefaultFieldHasher<Sha256v10, 128>,
-        WBMap<ark_bls12_381::g2::Config>,
-    >;
-    let hasher =
-        G2Hasher::new(DST_PVSS_U1).map_err(|e| ShieldError::HashToCurve(format!("{e:?}")))?;
-    hasher.hash(&[]).map_err(|e| ShieldError::HashToCurve(format!("{e:?}")))
+    // DST_PVSS_U1 is frozen (FZ-4) — changing it is a hard fork.
+    // Empty message: the DST carries all entropy needed for an independent generator.
+    crate::shield::fs::hash_to_g2_with_dst(DST_PVSS_U1, &[])
 }
 
 // ── PvssTranscript ────────────────────────────────────────────────────────────
@@ -346,6 +333,139 @@ pub fn verify(
     }
 }
 
+// ── aggregate (S6) ────────────────────────────────────────────────────────────
+
+/// Aggregate `N` individually-verified single-dealer PVSS transcripts into one
+/// (15-SHIELD_SPEC §4.4, GJMMST Aggregatable-DKG soundness).
+///
+/// Element-wise group addition in 𝔾₁ and 𝔾₂:
+///
+/// ```text
+/// F_j      = Σ_{n=1}^{N} F_j^{(n)}        (𝔾₁, t+1 elements)
+/// û₂       = Σ_{n=1}^{N} û₂^{(n)}          (𝔾₂)
+/// Ŷ_{i,ω}  = Σ_{n=1}^{N} Ŷ_{i,ω}^{(n)}   (𝔾₂, per ShareId)
+/// ```
+///
+/// The result is a valid PVSS transcript for the **summed polynomial** `f = Σ f^{(n)}`.
+/// No single dealer knows the group secret `a_0 = Σ a_0^{(n)}`.
+/// The epoch public key `Y = F_0 = [Σ a_0^{(n)}] G ∈ 𝔾₁`.
+///
+/// **Soundness (GJMMST)**: each summand must be verified via `verify` (§4.3)
+/// **before** inclusion; the driver (`dkg.rs`) enforces this. A dealer cannot
+/// contribute an inconsistent share without failing the per-transcript check
+/// (which the aggregate's §4.3 re-check would also catch — belt and suspenders).
+///
+/// Accumulation is done in projective coordinates (no intermediate `into_affine`
+/// conversions — AGENTS §16.1) and converted to affine once at the end.
+///
+/// # Errors
+///
+/// [`ShieldError::InvalidTranscript`] — any of:
+/// - `transcripts` is empty.
+/// - Any transcript has a different `tau` than the first.
+/// - Any transcript has a different `coeff_comms.len()` (degree mismatch).
+/// - Any transcript has a different `enc_shares` ShareId keyset.
+pub fn aggregate(transcripts: &[PvssTranscript]) -> Result<PvssTranscript, ShieldError> {
+    // Must have at least one transcript.
+    let first = transcripts.first().ok_or(ShieldError::InvalidTranscript)?;
+    let t_plus_1 = first.coeff_comms.len();
+    let expected_keys: BTreeSet<ShareId> = first.enc_shares.keys().copied().collect();
+
+    // Initialise projective accumulators from the first transcript.
+    let mut agg_comms: Vec<G1Projective> =
+        first.coeff_comms.iter().map(|p| G1Projective::from(*p)).collect();
+    let mut agg_tag = G2Projective::from(first.tag);
+    let mut agg_shares: BTreeMap<ShareId, G2Projective> =
+        first.enc_shares.iter().map(|(&id, p)| (id, G2Projective::from(*p))).collect();
+
+    // Accumulate remaining transcripts element-wise.
+    for tr in &transcripts[1..] {
+        // Structural guards — all inputs must be for the same committee/epoch.
+        if tr.tau != first.tau {
+            return Err(ShieldError::InvalidTranscript);
+        }
+        if tr.coeff_comms.len() != t_plus_1 {
+            return Err(ShieldError::InvalidTranscript);
+        }
+        let keys: BTreeSet<ShareId> = tr.enc_shares.keys().copied().collect();
+        if keys != expected_keys {
+            return Err(ShieldError::InvalidTranscript);
+        }
+
+        // F_j += F_j^{(n)}  (𝔾₁)
+        for (j, p) in tr.coeff_comms.iter().enumerate() {
+            agg_comms[j] += G1Projective::from(*p);
+        }
+        // û₂ += û₂^{(n)}  (𝔾₂)
+        agg_tag += G2Projective::from(tr.tag);
+        // Ŷ_{i,ω} += Ŷ_{i,ω}^{(n)}  (𝔾₂)
+        for (&id, p) in &tr.enc_shares {
+            // keyset equality verified above — every id is guaranteed present.
+            *agg_shares.get_mut(&id).expect("keyset verified") += G2Projective::from(*p);
+        }
+    }
+
+    // Convert projective → affine once (AGENTS §16.1).
+    Ok(PvssTranscript {
+        tau: first.tau.clone(),
+        coeff_comms: agg_comms.iter().map(|p| p.into_affine()).collect(),
+        tag: agg_tag.into_affine(),
+        enc_shares: agg_shares.into_iter().map(|(id, p)| (id, p.into_affine())).collect(),
+    })
+}
+
+// ── recover_share (S6) ────────────────────────────────────────────────────────
+
+/// Recover this validator's TPKE group-element key shares from the aggregated
+/// PVSS transcript (15-SHIELD_SPEC §4.5).
+///
+/// ```text
+/// Z_{i,ω} = [dk_i^{-1}] Ŷ_{i,ω} ∈ 𝔾₂
+/// ```
+///
+/// Undoes the `ek_i = [dk_i]H` encryption on each share, revealing the
+/// polynomial evaluation `[f(ω)]H` that TPKE `combine` requires (§2.5).
+/// The output `Z` values are the `z_shares` field of [`crate::shield::tpke::CombineShare`].
+///
+/// **Settlement-path safety (§6)**: never panics. `dk_i = 0` is explicitly
+/// caught and returned as [`ShieldError::InvalidKey`] before any division.
+///
+/// # Arguments
+///
+/// * `dk_i` — this validator's private epoch decryption key (must be non-zero).
+/// * `transcript` — the aggregated PVSS transcript (call `aggregate` first).
+/// * `share_ids` — the ShareIds assigned to this validator (`committee.share_ids_of(&addr)`).
+///
+/// # Errors
+///
+/// - [`ShieldError::InvalidKey`] — `dk_i == 0` (not invertible in 𝔽_r).
+/// - [`ShieldError::InvalidTranscript`] — a required `ShareId` is absent from the transcript.
+pub fn recover_share(
+    dk_i: &Fr,
+    transcript: &PvssTranscript,
+    share_ids: &[ShareId],
+) -> Result<BTreeMap<ShareId, G2Affine>, ShieldError> {
+    // Settlement-path safety: zero key → explicit error, never panic (§6, §7.2).
+    if dk_i.is_zero() {
+        return Err(ShieldError::InvalidKey);
+    }
+    // `inverse()` returns `None` only if dk_i == 0, which we guarded above.
+    let dk_inv = dk_i.inverse().expect("non-zero checked");
+
+    share_ids
+        .iter()
+        .map(|&omega| {
+            let y_hat = transcript
+                .enc_shares
+                .get(&omega)
+                .ok_or(ShieldError::InvalidTranscript)?;
+            // Z_{i,ω} = [dk_i^{-1}] Ŷ_{i,ω}
+            let z: G2Affine = (G2Projective::from(*y_hat) * dk_inv).into_affine();
+            Ok((omega, z))
+        })
+        .collect()
+}
+
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// Evaluate polynomial `f(x) = Σ a_j x^j` at integer point `x` (cast to `Fr`).
@@ -403,15 +523,7 @@ fn pvss_fiat_shamir_challenges(
         }
     }
 
-    (0..count)
-        .map(|k| {
-            let mut h = Blake2b512::new();
-            h.update(&tr);
-            h.update((k as u64).to_le_bytes());
-            let digest = h.finalize();
-            Ok(Fr::from_le_bytes_mod_order(&digest))
-        })
-        .collect()
+    Ok(crate::shield::fs::expand_challenges(&tr, count))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

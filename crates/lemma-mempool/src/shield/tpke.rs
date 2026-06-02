@@ -24,10 +24,9 @@
 
 use ark_bls12_381::{Bls12_381, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
-use ark_ff::{PrimeField, Zero};
+use ark_ff::Zero;
 use ark_serialize::CanonicalSerialize;
 use ark_std::UniformRand;
-use blake2::{Blake2b512, Digest};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305,
@@ -60,33 +59,14 @@ use crate::shield::{
 /// **sha2_v010 note**: uses `sha2_v010::Sha256` (sha2 0.10) because
 /// `arkworks DefaultFieldHasher` requires `digest 0.10` trait bounds.
 pub(crate) fn hash_to_g2(u: &G1Affine, aad: &ShieldAad) -> Result<G2Affine, ShieldError> {
-    use ark_bls12_381::g2;
-    use ark_ec::hashing::{
-        curve_maps::wb::WBMap,
-        map_to_curve_hasher::MapToCurveBasedHasher,
-        HashToCurve,
-    };
-    use ark_ff::field_hashers::DefaultFieldHasher;
-    use sha2_v010::Sha256 as Sha256v10;
-
-    type G2Hasher = MapToCurveBasedHasher<
-        G2Projective,
-        DefaultFieldHasher<Sha256v10, 128>,
-        WBMap<g2::Config>,
-    >;
-
-    // Message = compressed U bytes ‖ canonical aad bytes.
-    // Deterministic: ark_serialize compressed encoding is canonical; aad.to_bytes()
-    // is a fixed BE encoding. Same (U, aad) → same message → same G2 point (§7).
+    // Message = compressed U ‖ canonical aad bytes.
+    // Deterministic: compressed encoding is canonical; aad.to_bytes() is fixed-size BE.
+    // Same (U, aad) → same message → same G2 point on every node (§7).
     let mut message = Vec::new();
     u.serialize_compressed(&mut message)
         .map_err(|e| ShieldError::Serialization(format!("{e:?}")))?;
     message.extend_from_slice(&aad.to_bytes());
-
-    let hasher =
-        G2Hasher::new(DST_H2G2).map_err(|e| ShieldError::HashToCurve(format!("{e:?}")))?;
-
-    hasher.hash(&message).map_err(|e| ShieldError::HashToCurve(format!("{e:?}")))
+    crate::shield::fs::hash_to_g2_with_dst(DST_H2G2, &message)
 }
 
 // ── derive_key_nonce ──────────────────────────────────────────────────────────
@@ -459,19 +439,9 @@ pub(crate) fn fiat_shamir_challenges(
         transcript.extend_from_slice(&ct.to_bytes()?);
     }
 
-    // Derive one scalar per ciphertext: counter-mode Blake2b512 over transcript.
-    cts.iter()
-        .enumerate()
-        .map(|(j, _)| {
-            let mut h = Blake2b512::new();
-            h.update(&transcript);
-            h.update((j as u64).to_le_bytes()); // counter in LE (arbitrary, fixed)
-            let digest = h.finalize();
-            // from_le_bytes_mod_order: reduces the 64-byte digest modulo r.
-            // Deterministic and bias-negligible (512 bits >> 255-bit r).
-            Ok(ark_bls12_381::Fr::from_le_bytes_mod_order(&digest))
-        })
-        .collect()
+    // Derive one scalar per ciphertext via counter-mode Blake2b512 (§7.5).
+    // Delegated to `fs::expand_challenges` — single canonical implementation.
+    Ok(crate::shield::fs::expand_challenges(&transcript, cts.len()))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
