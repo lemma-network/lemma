@@ -34,7 +34,7 @@
 use ed25519_dalek::{Signer as _, Verifier as _};
 use pqcrypto_mldsa::mldsa65;
 use pqcrypto_traits::sign::{
-    DetachedSignature as _, PublicKey as PqPublicKeyTrait,
+    DetachedSignature as _, PublicKey as PqPublicKeyTrait, SecretKey as PqSecretKeyTrait,
 };
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -239,7 +239,108 @@ impl KeyPair {
     pub fn sign_to_lemma(&self, message: &[u8]) -> Signature {
         self.sign(message).to_lemma_signature()
     }
+
+    // ── Keystore persistence ──────────────────────────────────────────────────
+
+    /// Serialize this keypair to raw bytes for keystore storage.
+    ///
+    /// Layout: `ed25519_sk (32B) ‖ mldsa65_sk (4032B) ‖ mldsa65_pk (1952B)`
+    /// Total: [`KEYSTORE_BYTE_LEN`] = 6016 bytes.
+    ///
+    /// ## ⚠️ Security warning — Phase 1 / devnet only
+    ///
+    /// The returned bytes are **unencrypted**. Any process with read access
+    /// to the keystore file can reconstruct the full signing capability.
+    /// Suitable for devnet/testnet development; mainnet keystores MUST
+    /// be encrypted with a password-derived key (KDF).
+    ///
+    /// This is a recorded Technical Debt item — see `living-notes.md`
+    /// "Keystore encryption — devnet only".
+    ///
+    /// ## Why store ML-DSA-65 pk alongside sk
+    ///
+    /// `pqcrypto 0.1.x` cannot re-derive the public key from the secret key
+    /// after generation (C library limitation). Both must be stored together.
+    #[must_use]
+    pub fn to_keystore_bytes(&self) -> Vec<u8> {
+        let ed_sk_bytes = self.classical.to_bytes(); // [u8; 32]
+        // PqSecretKeyTrait + PqPublicKeyTrait provide as_bytes() for ML-DSA types.
+        let ml_sk_bytes = PqSecretKeyTrait::as_bytes(&self.quantum_sk); // 4032 bytes
+        let ml_pk_bytes = PqPublicKeyTrait::as_bytes(&self.quantum_pk); // 1952 bytes
+
+        let mut out = Vec::with_capacity(KEYSTORE_BYTE_LEN);
+        out.extend_from_slice(&ed_sk_bytes);
+        out.extend_from_slice(ml_sk_bytes);
+        out.extend_from_slice(ml_pk_bytes);
+        out
+    }
+
+    /// Reconstruct a [`KeyPair`] from keystore bytes produced by
+    /// [`to_keystore_bytes`](Self::to_keystore_bytes).
+    ///
+    /// # Errors
+    ///
+    /// - [`CryptoError::InvalidKeystoreLength`] — bytes are not exactly
+    ///   [`KEYSTORE_BYTE_LEN`] long (truncated, wrong file, or public-key-only file).
+    /// - [`CryptoError::InvalidKeystoreKeyMaterial`] — bytes are the right length
+    ///   but the Ed25519 or ML-DSA-65 material is cryptographically invalid
+    ///   (corrupted keystore).
+    pub fn from_keystore_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+
+        if bytes.len() != KEYSTORE_BYTE_LEN {
+            return Err(CryptoError::InvalidKeystoreLength {
+                expected: KEYSTORE_BYTE_LEN,
+                got: bytes.len(),
+            });
+        }
+
+        // Split into three segments.
+        let (ed_bytes, rest)     = bytes.split_at(ED_SK_LEN);
+        let (ml_sk_bytes, ml_pk_bytes) = rest.split_at(ML_SK_LEN);
+
+        // Reconstruct Ed25519 signing key (contains both scalar + verifying key).
+        let ed_array: &[u8; ED_SK_LEN] = ed_bytes.try_into()
+            .expect("slice has exact length ED_SK_LEN — split_at guarantees this");
+        let classical = ed25519_dalek::SigningKey::from_bytes(ed_array);
+
+        // Re-derive address from the Ed25519 public key.
+        let address = Address::from_public_key(classical.verifying_key().as_bytes());
+
+        // Reconstruct ML-DSA-65 secret key (PqSecretKeyTrait::from_bytes).
+        let quantum_sk = <mldsa65::SecretKey as PqSecretKeyTrait>::from_bytes(ml_sk_bytes)
+            .map_err(|e| CryptoError::InvalidKeystoreKeyMaterial {
+                reason: format!("ML-DSA-65 secret key: {e}"),
+            })?;
+
+        // Reconstruct ML-DSA-65 public key (PqPublicKeyTrait::from_bytes).
+        let quantum_pk = <mldsa65::PublicKey as PqPublicKeyTrait>::from_bytes(ml_pk_bytes)
+            .map_err(|e| CryptoError::InvalidKeystoreKeyMaterial {
+                reason: format!("ML-DSA-65 public key: {e}"),
+            })?;
+
+        Ok(Self { classical, quantum_sk, quantum_pk, address })
+    }
 }
+
+// ── Keystore layout constants ─────────────────────────────────────────────────
+
+/// Length of an Ed25519 secret key (signing scalar), in bytes.
+const ED_SK_LEN: usize = 32;
+
+/// Length of an ML-DSA-65 secret key, in bytes.
+const ML_SK_LEN: usize = 4032;
+
+/// Length of an ML-DSA-65 public key, in bytes.
+const ML_PK_LEN: usize = 1952;
+
+/// Total byte length of a Lemma keystore produced by
+/// [`KeyPair::to_keystore_bytes`].
+///
+/// Layout: `ed25519_sk (32B) ‖ mldsa65_sk (4032B) ‖ mldsa65_pk (1952B)` = 6016 bytes.
+///
+/// Used by [`KeyPair::from_keystore_bytes`] to validate the input length
+/// and by consumers (e.g. `lemma-cli`) to pre-allocate read buffers.
+pub const KEYSTORE_BYTE_LEN: usize = ED_SK_LEN + ML_SK_LEN + ML_PK_LEN;
 
 // ─── verify ──────────────────────────────────────────────────────────────────
 

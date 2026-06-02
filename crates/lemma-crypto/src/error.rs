@@ -125,6 +125,28 @@ pub enum CryptoError {
     /// The underlying `bincode::Error` is converted on construction.
     #[error("serialization failed: {reason}")]
     SerializationFailed { reason: String },
+
+    // ── Keystore ──────────────────────────────────────────────────────────────
+
+    /// Keystore bytes are the wrong length for a Lemma hybrid keypair.
+    ///
+    /// A valid keystore produced by [`KeyPair::to_keystore_bytes`] is always
+    /// exactly [`KEYSTORE_BYTE_LEN`](crate::keypair::KEYSTORE_BYTE_LEN) bytes.
+    /// A different length indicates a truncated file, wrong format, or
+    /// an accidentally supplied public-key file.
+    #[error(
+        "invalid keystore length: expected {expected} bytes, got {got} \
+         (is this a valid lemma keystore file?)"
+    )]
+    InvalidKeystoreLength { expected: usize, got: usize },
+
+    /// Key material inside a keystore file is cryptographically invalid.
+    ///
+    /// Indicates corruption or a manually edited file. The keystore was the
+    /// right length but the Ed25519 or ML-DSA-65 bytes could not be parsed
+    /// into valid keys.
+    #[error("invalid keystore key material: {reason}")]
+    InvalidKeystoreKeyMaterial { reason: String },
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

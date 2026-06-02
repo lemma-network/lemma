@@ -2,16 +2,23 @@
 name = "lemma-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Lemma CLI: wallet, compile, deploy, call, devnet, faucet"
+description = "Lemma CLI: wallet keygen, balance queries, and devnet tooling"
 
 [[bin]]
 name = "lemma"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-clap = { workspace = true }
+anyhow     = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+clap       = { workspace = true }
 serde_json = { workspace = true }
-lemma-core = { path = "../lemma-core" }
+thiserror  = { workspace = true }
+lemma-core    = { path = "../lemma-core" }
+lemma-crypto  = { path = "../lemma-crypto" }
+lemma-storage = { path = "../lemma-storage" }
+
+[dev-dependencies]
+tempfile   = { workspace = true }
+lemma-node = { path = "../lemma-node" }

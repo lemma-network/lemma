@@ -21,5 +21,5 @@ pub mod signing;
 
 pub use error::CryptoError;
 pub use hashing::{hash, hash_bytes, keccak256, sha256};
-pub use keypair::{verify, HybridSignature, KeyPair, PublicKey};
+pub use keypair::{verify, HybridSignature, KeyPair, PublicKey, KEYSTORE_BYTE_LEN};
 pub use signing::{compute_tx_hash, sign_transaction, verify_transaction};

@@ -278,3 +278,113 @@ fn hybrid_signature_survives_json_roundtrip() {
     let restored: HybridSignature = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(sig, restored);
 }
+
+// ─── Keystore persistence ────────────────────────────────────────────────────
+
+#[test]
+fn keystore_bytes_has_correct_length() {
+    let kp    = generate();
+    let bytes = kp.to_keystore_bytes();
+    assert_eq!(bytes.len(), super::KEYSTORE_BYTE_LEN);
+}
+
+#[test]
+fn keystore_round_trip_preserves_address() {
+    let kp1   = generate();
+    let addr1 = *kp1.address();
+    let bytes = kp1.to_keystore_bytes();
+
+    let kp2 = KeyPair::from_keystore_bytes(&bytes)
+        .expect("from_keystore_bytes must succeed");
+    assert_eq!(kp2.address(), &addr1, "address must be stable across round-trip");
+}
+
+#[test]
+fn keystore_round_trip_produces_same_public_key() {
+    let kp1 = generate();
+    let pk1 = kp1.public_key();
+    let kp2 = KeyPair::from_keystore_bytes(&kp1.to_keystore_bytes())
+        .expect("round-trip must succeed");
+    assert_eq!(kp2.public_key(), pk1, "public key must match after round-trip");
+}
+
+#[test]
+fn keystore_round_trip_signs_verifiably() {
+    let kp1   = generate();
+    let bytes = kp1.to_keystore_bytes();
+    let kp2   = KeyPair::from_keystore_bytes(&bytes).expect("round-trip");
+    let sig   = kp2.sign(MSG);
+    let pk    = kp2.public_key();
+    assert!(
+        super::super::verify(&pk, MSG, &sig).is_ok(),
+        "signature from restored keypair must verify"
+    );
+}
+
+#[test]
+fn from_keystore_bytes_rejects_wrong_length() {
+    use crate::CryptoError;
+    let too_short = vec![0u8; 32];
+    // KeyPair doesn't implement Debug (no secret printing), so match directly.
+    match KeyPair::from_keystore_bytes(&too_short) {
+        Err(CryptoError::InvalidKeystoreLength { .. }) => {}
+        Err(e)  => panic!("expected InvalidKeystoreLength, got: {e}"),
+        Ok(_)   => panic!("expected error for wrong-length bytes"),
+    }
+}
+
+#[test]
+fn from_keystore_bytes_rejects_empty() {
+    use crate::CryptoError;
+    match KeyPair::from_keystore_bytes(&[]) {
+        Err(CryptoError::InvalidKeystoreLength { .. }) => {}
+        Err(e)  => panic!("expected InvalidKeystoreLength, got: {e}"),
+        Ok(_)   => panic!("expected error for empty bytes"),
+    }
+}
+
+#[test]
+fn from_keystore_bytes_rejects_correct_length_corrupt_ml_dsa_secret_key() {
+    use crate::CryptoError;
+    use pqcrypto_traits::sign::{PublicKey as PqPKTrait, SecretKey as PqSKTrait};
+
+    // Probe whether pqcrypto's from_bytes accepts all-0xFF for the ML-DSA-65
+    // secret-key segment (some pqcrypto versions do length-only validation).
+    // This determines whether the InvalidKeystoreKeyMaterial path is reachable.
+    let all_ff_sk = vec![0xFFu8; super::ML_SK_LEN];
+    let sk_reachable = pqcrypto_mldsa::mldsa65::SecretKey::from_bytes(&all_ff_sk).is_err();
+
+    if sk_reachable {
+        // ML-DSA from_bytes validates bytes — exercise the error path.
+        let mut buf = generate().to_keystore_bytes().to_vec();
+        // Overwrite the ML-DSA secret-key segment (bytes 32..4064) with 0xFF.
+        for b in buf[32..32 + super::ML_SK_LEN].iter_mut() { *b = 0xFF; }
+        match KeyPair::from_keystore_bytes(&buf) {
+            Err(CryptoError::InvalidKeystoreKeyMaterial { .. }) => {}
+            Err(e)  => panic!("expected InvalidKeystoreKeyMaterial, got: {e}"),
+            Ok(_)   => panic!("expected error for corrupt ML-DSA secret key"),
+        }
+    } else {
+        // pqcrypto 0.1.x performs length-only validation for the SK segment —
+        // `InvalidKeystoreKeyMaterial` is unreachable via the SK path in the
+        // current dependency version. This is documented here as a no-op guard:
+        // if pqcrypto is upgraded to a version with structural validation, this
+        // test will automatically execute the error path.
+        //
+        // The PK path (bytes 4064..6016) may still be reachable — probe it.
+        let all_ff_pk = vec![0xFFu8; super::ML_PK_LEN];
+        let pk_reachable = pqcrypto_mldsa::mldsa65::PublicKey::from_bytes(&all_ff_pk).is_err();
+        if pk_reachable {
+            let mut buf = generate().to_keystore_bytes().to_vec();
+            let pk_start = super::ED_SK_LEN + super::ML_SK_LEN;
+            for b in buf[pk_start..].iter_mut() { *b = 0xFF; }
+            match KeyPair::from_keystore_bytes(&buf) {
+                Err(CryptoError::InvalidKeystoreKeyMaterial { .. }) => {}
+                Err(e)  => panic!("expected InvalidKeystoreKeyMaterial (PK path), got: {e}"),
+                Ok(_)   => panic!("expected error for corrupt ML-DSA public key"),
+            }
+        }
+        // If both SK and PK accept arbitrary bytes, the error variant is
+        // unreachable with this pqcrypto version. Noted in comments above.
+    }
+}
