@@ -17,7 +17,7 @@ use lemma_core::{
     amount::{Amount, DROPS_PER_LEM},
     hash::Hash,
     signature::Signature,
-    validator::{ConsensusKey, Stake, Validator, ValidatorStatus, VotingPower},
+    validator::{ConsensusKey, Stake, Validator, ValidatorStatus},
     validator_set::{Member, ValidatorSet},
     Epoch, QuorumCert,
 };
@@ -61,22 +61,6 @@ fn make_validator(n: u8, active_lem: u128) -> Validator {
         commission_bps: 0,
         jailed_until: None,
     }
-}
-
-fn make_vset(members: &[(u8, u128)]) -> ValidatorSet {
-    let map: BTreeMap<_, _> = members
-        .iter()
-        .map(|&(b, p)| {
-            (addr(b), Member {
-                consensus_pubkey: ConsensusKey::from_bytes(vec![b; 32], vec![b; 32]),
-                power: VotingPower(lem(p)),
-            })
-        })
-        .collect();
-    let total = map.values().fold(Amount::zero(), |a, m| {
-        a.checked_add(m.power.as_amount()).unwrap()
-    });
-    ValidatorSet { epoch: 0, members: map, total_power: total }
 }
 
 fn make_epoch(number: u64, validators: &BTreeMap<Address, Validator>) -> Epoch {

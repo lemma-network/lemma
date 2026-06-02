@@ -211,7 +211,8 @@ fn distribute_credits_to_self_stake_active() {
     let vset = make_vset(&[(1, 20_000_000)]);
     let mut vs = make_validators_for_vset(&[(1, 20_000_000)]);
 
-    distribute_rewards(&mut vs, &vset, pool).unwrap();
+    // Outcome unused here — this test asserts the mutation to self_stake.active.
+    let _ = distribute_rewards(&mut vs, &vset, pool).unwrap();
 
     let new_active = vs[&addr(1)].self_stake.active;
     assert_eq!(
@@ -333,7 +334,8 @@ fn distribute_deterministic_same_input_same_output() {
     let run = || {
         let vset = make_vset(specs);
         let mut vs = make_validators_for_vset(specs);
-        distribute_rewards(&mut vs, &vset, pool).unwrap();
+        // Outcome unused — this test asserts determinism via the mutated balances.
+        let _ = distribute_rewards(&mut vs, &vset, pool).unwrap();
         // Return all active balances (sorted by address — BTreeMap order).
         vs.values().map(|v| v.self_stake.active.as_drop()).collect::<Vec<_>>()
     };
