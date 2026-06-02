@@ -1,7 +1,8 @@
 //! Tests for [`NodeConfig`].
 //!
 //! Covers: JSON load (happy + missing-file + malformed), validate (valid +
-//! empty-data-dir + empty-genesis-path), round-trip serialisation.
+//! empty-data-dir + empty-genesis-path + zero-interval + bad-multiaddr),
+//! network field defaults, round-trip serialisation.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -23,6 +24,8 @@ fn valid_config() -> NodeConfig {
         data_dir:          PathBuf::from("/tmp/lemma-data"),
         genesis_path:      PathBuf::from("/tmp/genesis.json"),
         block_interval_ms: 500,
+        listen_addr:       "/ip4/0.0.0.0/tcp/0".to_string(),
+        bootstrap_peers:   vec![],
     }
 }
 
@@ -105,6 +108,72 @@ fn validate_rejects_zero_block_interval() {
     let cfg = NodeConfig { block_interval_ms: 0, ..valid_config() };
     let err = cfg.validate().expect_err("zero interval must error");
     assert!(matches!(err, NodeError::Config(_)));
+}
+
+// ── network fields ────────────────────────────────────────────────────────────
+
+#[test]
+fn load_applies_default_listen_addr_when_absent() {
+    let json = r#"{"data_dir":"/tmp/d","genesis_path":"/tmp/g.json"}"#;
+    let f = write_config_file(json);
+    let cfg = NodeConfig::load(f.path()).expect("valid JSON must parse");
+    assert_eq!(cfg.listen_addr, "/ip4/0.0.0.0/tcp/0");
+}
+
+#[test]
+fn load_applies_empty_bootstrap_peers_when_absent() {
+    let json = r#"{"data_dir":"/tmp/d","genesis_path":"/tmp/g.json"}"#;
+    let f = write_config_file(json);
+    let cfg = NodeConfig::load(f.path()).expect("valid JSON must parse");
+    assert!(cfg.bootstrap_peers.is_empty());
+}
+
+#[test]
+fn load_accepts_explicit_listen_addr() {
+    let json = r#"{"data_dir":"/tmp/d","genesis_path":"/tmp/g.json","listen_addr":"/ip4/0.0.0.0/tcp/30303"}"#;
+    let f = write_config_file(json);
+    let cfg = NodeConfig::load(f.path()).expect("valid JSON must parse");
+    assert_eq!(cfg.listen_addr, "/ip4/0.0.0.0/tcp/30303");
+}
+
+#[test]
+fn validate_rejects_invalid_listen_addr() {
+    let cfg = NodeConfig {
+        listen_addr: "not-a-multiaddr".to_string(),
+        ..valid_config()
+    };
+    let err = cfg.validate().expect_err("invalid multiaddr must error");
+    let msg = err.to_string();
+    assert!(matches!(err, NodeError::Config(_)));
+    assert!(msg.contains("listen_addr"), "got: {msg}");
+}
+
+#[test]
+fn validate_rejects_invalid_bootstrap_peer() {
+    let cfg = NodeConfig {
+        bootstrap_peers: vec!["not-a-multiaddr".to_string()],
+        ..valid_config()
+    };
+    let err = cfg.validate().expect_err("invalid bootstrap peer must error");
+    let msg = err.to_string();
+    assert!(matches!(err, NodeError::Config(_)));
+    assert!(msg.contains("bootstrap peer"), "got: {msg}");
+}
+
+#[test]
+fn validate_accepts_valid_listen_addr_fixed_port() {
+    let cfg = NodeConfig {
+        listen_addr: "/ip4/0.0.0.0/tcp/30303".to_string(),
+        ..valid_config()
+    };
+    cfg.validate().expect("valid fixed-port listen_addr must pass");
+}
+
+#[test]
+fn parsed_listen_addr_returns_multiaddr() {
+    let cfg = valid_config();
+    let addr = cfg.parsed_listen_addr();
+    assert_eq!(addr.to_string(), "/ip4/0.0.0.0/tcp/0");
 }
 
 // ── round-trip ────────────────────────────────────────────────────────────────

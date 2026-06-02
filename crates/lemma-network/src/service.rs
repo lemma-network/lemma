@@ -198,6 +198,24 @@ impl NetworkHandle {
         self.send(NetworkCommand::BroadcastTransaction(tx)).await
     }
 
+    /// Send a range response back through an open request-response channel.
+    ///
+    /// The `channel` comes from a [`NetworkEvent::RangeRequest`] event; the
+    /// node fetches blocks from storage and calls this to reply. The channel
+    /// is consumed — calling this more than once for the same request is a
+    /// no-op on the second call (the channel will be closed).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn send_range_response(
+        &self,
+        channel: request_response::ResponseChannel<crate::messages::RangeResponse>,
+        response: crate::messages::RangeResponse,
+    ) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::SendRangeResponse { channel, response }).await
+    }
+
     /// Dial a bootstrap or peer address.
     ///
     /// # Errors

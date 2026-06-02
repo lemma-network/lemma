@@ -27,6 +27,8 @@ lemma-storage   = { path = "../lemma-storage" }
 lemma-crypto    = { path = "../lemma-crypto" }
 lemma-mempool   = { path = "../lemma-mempool" }
 lemma-consensus = { path = "../lemma-consensus" }
+lemma-network   = { path = "../lemma-network" }
+libp2p          = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

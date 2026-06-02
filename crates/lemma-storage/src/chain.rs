@@ -252,7 +252,18 @@ impl<'a> ChainStore<'a> {
         if from > to {
             return Ok(vec![]);
         }
-        let mut blocks = Vec::with_capacity((to - from + 1) as usize);
+        // Defense-in-depth allocation cap: even if the caller passes an
+        // unbounded range, we never pre-allocate more than MAX_RANGE_CAPACITY
+        // slots. The network layer validates RangeRequest width ≤ 256
+        // (DEFAULT_MAX_RANGE) before calling this, but `get_range` is `pub`
+        // so future callers might not. Saturate to the cap rather than risk
+        // a ~18-exabyte with_capacity on `from=0, to=u64::MAX`
+        // (AGENTS.md §15.2 — validate at the boundary).
+        const MAX_RANGE_CAPACITY: usize = 512; // 2× DEFAULT_MAX_RANGE — generous but bounded
+        let capacity = usize::try_from(to - from + 1)
+            .unwrap_or(MAX_RANGE_CAPACITY)
+            .min(MAX_RANGE_CAPACITY);
+        let mut blocks = Vec::with_capacity(capacity);
         for height in from..=to {
             match self.get_block_by_height(height)? {
                 Some(block) => blocks.push(block),

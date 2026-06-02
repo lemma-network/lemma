@@ -262,7 +262,7 @@ async fn run_produces_blocks_until_shutdown() {
     let db_task = db.clone();
     let mp_task = mempool.clone();
     let handle  = tokio::spawn(async move {
-        run(db_task, mp_task, cfg, Address::zero(), rx).await
+        run(db_task, mp_task, cfg, Address::zero(), None, rx).await
     });
 
     // Poll until tip reaches height 3 (or timeout after 5 s).
@@ -300,7 +300,7 @@ async fn run_skips_tick_on_build_error_and_continues() {
     let db_task  = db.clone();
     let mp_task  = mempool.clone();
     let handle   = tokio::spawn(async move {
-        run(db_task, mp_task, cfg, Address::zero(), rx).await
+        run(db_task, mp_task, cfg, Address::zero(), None, rx).await
     });
 
     // Let it tick a few times (all will warn+skip), then shut down.
@@ -313,4 +313,45 @@ async fn run_skips_tick_on_build_error_and_continues() {
         ChainStore::new(&db).latest_height().unwrap().is_none(),
         "no blocks should be produced when chain is uninitialised"
     );
+}
+
+// ── block_tx channel emission ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn run_emits_committed_blocks_on_block_tx_channel() {
+    // Verify the channel seam: each produced block is sent on block_tx.
+    let (db, _dir) = open_temp_db();
+    seed_genesis(&db);
+    let db = Arc::new(db);
+
+    let mempool       = Arc::new(RwLock::new(Mempool::new(64)));
+    let cfg           = ProducerConfig { block_interval_ms: 1 };
+    let (tx, rx)      = watch::channel(false);
+    let (block_tx, mut block_rx) = tokio::sync::mpsc::channel(16);
+
+    let db_task = db.clone();
+    let mp_task = mempool.clone();
+    let handle  = tokio::spawn(async move {
+        run(db_task, mp_task, cfg, Address::zero(), Some(block_tx), rx).await
+    });
+
+    // Wait until at least 2 blocks are received on the channel.
+    let mut received = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while received < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for 2 blocks on block_tx (got {received})"
+        );
+        match tokio::time::timeout(Duration::from_millis(10), block_rx.recv()).await {
+            Ok(Some(_)) => received += 1,
+            Ok(None)    => break, // sender dropped
+            Err(_)      => {}    // timeout — retry
+        }
+    }
+
+    assert!(received >= 2, "must receive at least 2 blocks on block_tx channel");
+
+    tx.send(true).expect("shutdown must succeed");
+    handle.await.expect("task must not panic").expect("run must return Ok");
 }

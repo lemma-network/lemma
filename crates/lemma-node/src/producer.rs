@@ -36,9 +36,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use lemma_consensus::calculate_base_fee;
 use lemma_core::{
@@ -188,7 +188,23 @@ pub fn commit_block(chain: &ChainStore<'_>, block: &Block, hash: Hash) -> Result
 /// Run the single-node block producer until `shutdown` is signalled.
 ///
 /// Fires every [`ProducerConfig::block_interval_ms`], calling
-/// [`build_next_block`] → [`commit_block`] → mempool tick in sequence.
+/// [`build_next_block`] → [`commit_block`] → mempool tick → emit on
+/// `block_tx` in sequence.
+///
+/// ## Committed-block channel (`block_tx`)
+///
+/// After each successful `commit_block`, the producer emits the committed
+/// `Block` onto `block_tx` (if `Some`). A separate [`run_block_broadcaster`]
+/// task drains this channel and gossips the block to peers via the network.
+///
+/// The producer does **not** hold a `NetworkHandle` — the dependency goes
+/// one way: node-layer wiring owns both the producer and the network handle;
+/// only the committed-block channel crosses the boundary (AGENTS §8).
+///
+/// This mirrors the Sui Mysticeti `CoreSignals` pattern: the consensus core
+/// emits onto a channel; subscribers handle dissemination independently.
+/// The channel seam survives into Phase 2 unchanged — the DAG consensus
+/// driver replaces the timer loop but keeps the same `block_tx` output.
 ///
 /// ## Error policy
 ///
@@ -199,6 +215,9 @@ pub fn commit_block(chain: &ChainStore<'_>, block: &Block, hash: Hash) -> Result
 ///   write means chain-state integrity is compromised; the caller should
 ///   restart or alert. (Matches the Sui-stall lesson: don't silently swallow
 ///   settlement-path failures — AGENTS.md §9.3 rule 6.)
+/// - **Channel send errors** (`block_tx.send` fails): logged as `DEBUG` and
+///   ignored — the broadcaster may have exited first (e.g. during shutdown).
+///   Non-fatal: gossip delivery is best-effort.
 ///
 /// ## Shutdown
 ///
@@ -209,13 +228,15 @@ pub fn commit_block(chain: &ChainStore<'_>, block: &Block, hash: Hash) -> Result
 /// ## Phase 2 hook
 ///
 /// Replace `build_next_block` with a variant that accepts a validated tx
-/// batch and calls `lemma-vm`. The `Arc<RwLock<Mempool>>` and `Arc<LemmaDb>`
-/// handles already have the right shape.
+/// batch and calls `lemma-vm`. The `block_tx` channel seam is preserved.
+/// A SEPARATE channel for `DagBlock` gossip (the P2P unit in Phase 2) is
+/// added alongside — mirroring Sui's dual-channel pattern.
 pub async fn run(
     db: Arc<LemmaDb>,
     mempool: Arc<RwLock<Mempool>>,
     cfg: ProducerConfig,
     proposer: Address,
+    block_tx: Option<mpsc::Sender<Block>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), NodeError> {
     let mut interval =
@@ -243,6 +264,27 @@ pub async fn run(
 
                 // Persist — sole-writer path; failures are fatal for the producer.
                 commit_block(&chain, &block, hash)?;
+
+                // Emit committed block for network dissemination (best-effort).
+                // The broadcaster task drains this channel and gossips to peers.
+                if let Some(tx) = &block_tx {
+                    match tx.try_send(block) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            // Broadcaster has exited (shutdown in progress) — non-fatal.
+                            debug!(height, "block_tx closed — broadcaster gone, skipping gossip");
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            // Broadcaster is lagging the producer — block dropped from gossip.
+                            // Increase BLOCK_CHANNEL_CAPACITY or investigate broadcast stalls.
+                            warn!(
+                                height,
+                                "block_tx full — committed block NOT gossiped (broadcaster lagging); \
+                                 increase BLOCK_CHANNEL_CAPACITY if persistent"
+                            );
+                        }
+                    }
+                }
 
                 // Drive per-block mempool maintenance (rate-limiter prune,
                 // local fee-market tick) — same as a full node would do.

@@ -6,6 +6,7 @@
 
 use lemma_core::error::{BlockError, CoreError};
 use lemma_crypto::error::CryptoError;
+use lemma_network::NetworkError;
 use lemma_storage::StorageError;
 
 /// All errors that can occur during Lemma node startup and operation.
@@ -35,6 +36,13 @@ pub enum NodeError {
     /// exhaustive error propagation.
     #[error("crypto: {0}")]
     Crypto(#[from] CryptoError),
+
+    /// P2P network error from `lemma-network`.
+    ///
+    /// Surfaced during network service startup (swarm construction, listen,
+    /// gossip subscription) or command dispatch.
+    #[error("network: {0}")]
+    Network(#[from] NetworkError),
 
     /// Node configuration is invalid or could not be loaded from disk.
     #[error("config: {0}")]
