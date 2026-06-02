@@ -7,6 +7,7 @@
 //! |----------|-----------|
 //! | S5 ✅ | [`deal`], [`verify`], [`PvssTranscript`], [`u1_generator`] |
 //! | S6 ✅ | [`aggregate`], [`recover_share`] |
+//! | S7 (helper) | `verify_share_pairing` — shared §4.3 step-2–4 impl (DRY for PSS) |
 //!
 //! ## Clean-room provenance (DB-11)
 //!
@@ -227,110 +228,97 @@ pub fn verify(
         return Err(ShieldError::InvalidTranscript);
     }
 
-    // ── Phase 4: Evaluate commitment polynomial → batched share pairing ──────────
+    // ── Phase 4: Commitment expansion + batched share pairing (§4.3 steps 2–4) ──
     //
-    // Evaluation points: **integer share IDs 1..=W cast to Fr** (same as deal).
-    //
-    // Why integers (not FFT roots of unity):
-    //   - S4 combine uses `lagrange_basis_at_0_for_all` with integer share IDs.
-    //     For combine to correctly reconstruct f(0), the polynomial must be
-    //     evaluated at the same integer points used in Lagrange interpolation.
-    //   - Using FFT roots of unity would require matching Lagrange coefficients for
-    //     roots, which the existing docknetwork library doesn't do.
-    //   - The "FFT expand" note in §4.3 step 2 describes the *algorithmic pattern*;
-    //     the concrete integer evaluation points are defined by the S4 implementation.
-    //   - domain.rs explicitly: "integers cast to 𝔽_r — NOT the FFT roots of unity".
-    //
-    // A_k = commitment polynomial C evaluated at integer k+1:
-    //   C(x) = Σ_j F_j · x^j   (each F_j = [a_j]G ∈ 𝔾₁)
-    //   A_k = C(k+1) = Σ_j [a_j·(k+1)^j] G = [f(k+1)] G
-    //
-    // Computed via Horner's method in 𝔾₁: O(W·t), correct for W ≤ 1000 (§16.3).
+    // Delegated to `verify_share_pairing` — the shared helper is also used by
+    // `pss::verify_reshare` (AGENTS §2.1 DRY). See its doc for full algorithm
+    // notes: integer eval points (DB-15), Horner in 𝔾₁, FS multi-pairing, §7.
+    verify_share_pairing(transcript, committee, eks)
+}
+
+// ── verify_share_pairing (shared DRY helper) ──────────────────────────────────
+
+/// Execute §4.3 steps 2–4: Horner commitment expansion + batched FS multi-pairing.
+///
+/// **Called by:**
+/// - [`verify`] — regular PVSS (after Phase-1 tau + Phase-2/3 degenerate/tag checks).
+/// - [`pss::verify_reshare`] — zero-secret PSS (after tau + zero-assertion checks).
+///
+/// ## Algorithm
+///
+/// 1. **Horner expansion**: `A_ω = Σ_j [a_j·ω^j] G ∈ 𝔾₁` for each share ID ω = 1..=W
+///    (integer eval points, DB-15 — matches S4 combine's Lagrange basis).
+/// 2. **Fiat–Shamir**: `α_{i,ω} ∈ 𝔽_r` via counter-mode Blake2b512 (`fs::expand_challenges`).
+/// 3. **Multi-pairing**: `∏ e(-G, [α]Ŷ) · e([α]A, ek_i) == 1` (negation trick, §7.5).
+///
+/// ## Determinism (§7)
+///
+/// BTreeMap iteration → canonical address order; no floats, HashMap, or SystemTime.
+/// Byte-identical on every honest node for the same `(transcript, committee, eks)`.
+pub(crate) fn verify_share_pairing(
+    transcript: &PvssTranscript,
+    committee: &ShieldCommittee,
+    eks: &BTreeMap<u16, G2Affine>,
+) -> Result<(), ShieldError> {
+    let g = G1Affine::generator();
     let w = committee.total_weight() as usize;
 
-    // For each share ID ω = k+1 (k = 0..W-1), compute A_ω = [f(ω)]G ∈ 𝔾₁.
-    let a_evals: Vec<(ShareId, G1Affine)> = (0..w)
+    // Step 1: Horner commitment expansion — A_ω = [f(ω)]G for ω = 1..=W.
+    // Integer share IDs (DB-15); NOT FFT roots-of-unity (see verify for rationale).
+    let a_map: BTreeMap<ShareId, G1Affine> = (0..w)
         .map(|k| {
-            let omega = (k + 1) as u16; // share_id; safe: k < W ≤ u16::MAX
+            let omega = (k + 1) as u16; // 1-indexed share ID; safe: k < W ≤ u16::MAX
             let x = Fr::from(u64::from(omega));
-            // Horner: F_{t-1} + x·(F_{t-2} + x·(…(F_1 + x·F_0)…))
             let a_k: G1Affine = transcript
                 .coeff_comms
                 .iter()
                 .rev()
-                .fold(G1Projective::zero(), |acc, &fj| {
-                    acc * x + G1Projective::from(fj)
-                })
+                .fold(G1Projective::zero(), |acc, &fj| acc * x + G1Projective::from(fj))
                 .into_affine();
             (omega, a_k)
         })
         .collect();
 
-    // Build lookup: share_id → A_k (for fast access during committee iteration).
-    let a_map: BTreeMap<ShareId, G1Affine> = a_evals.into_iter().collect();
-
-    // Step 4c: Build Fiat–Shamir challenges α_{i,ω} for each (validator, share).
-    // Transcript = sorted (share_id ‖ Ŷ_{i,ω} ‖ A_{k} ‖ ek_i) — deterministic (§7.5).
+    // Step 2: Fiat–Shamir challenges (deterministic, §7.5).
     let alphas = pvss_fiat_shamir_challenges(transcript, committee, eks, &a_map)?;
 
-    // Step 4d: Batched multi-pairing (negation trick, mirrors verify_share_batch):
-    //   ∏ e(-G, [α]Ŷ) · e([α]A, ek_i) == 1
-    // Accumulate as:
-    //   neg_g_side: Σ [α_{i,ω}] Ŷ_{i,ω}  (accumulated 𝔾₂, paired with -G)
-    //   per_validator: BTreeMap<u16, Σ [α_{i,ω}] A_{i,ω}> (𝔾₁ MSM per ek_i)
-    let mut neg_yhat_acc = G2Projective::zero(); // Σ [α] Ŷ — paired with -G
-    let mut per_val_a: BTreeMap<u16, G1Projective> = BTreeMap::new(); // Σ [α] A per validator
-
-    // alpha_iter is keyed by (validator_index, share_id) in sorted order (BTreeMap).
+    // Step 3: Batched multi-pairing — ∏ e(-G, [α]Ŷ) · e([α]A, ek_i) == 1.
+    let mut neg_yhat_acc = G2Projective::zero();
+    let mut per_val_a: BTreeMap<u16, G1Projective> = BTreeMap::new();
     let mut alpha_iter = alphas.into_iter();
+
     for (validator_idx, (_, share_ids)) in committee.iter().enumerate() {
         let validator_idx = validator_idx as u16;
-        // Verify ek_i exists.
         let ek_i = eks.get(&validator_idx).ok_or(ShieldError::InvalidTranscript)?;
         if ek_i.is_zero() || !ek_i.is_in_correct_subgroup_assuming_on_curve() {
             return Err(ShieldError::InvalidTranscript);
         }
-
         for &omega in share_ids {
             let alpha = alpha_iter.next().ok_or(ShieldError::InvalidTranscript)?;
-
-            let y_hat = transcript
-                .enc_shares
-                .get(&omega)
-                .ok_or(ShieldError::InvalidTranscript)?;
+            let y_hat =
+                transcript.enc_shares.get(&omega).ok_or(ShieldError::InvalidTranscript)?;
             if y_hat.is_zero() || !y_hat.is_in_correct_subgroup_assuming_on_curve() {
                 return Err(ShieldError::InvalidTranscript);
             }
-
             let a_k = a_map.get(&omega).ok_or(ShieldError::InvalidTranscript)?;
-
-            // Σ [α] Ŷ  (negated G side)
             neg_yhat_acc += G2Projective::from(*y_hat) * alpha;
-            // Σ [α] A_{i,ω}  (per validator, paired with ek_i)
             *per_val_a.entry(validator_idx).or_insert(G1Projective::zero()) +=
                 G1Projective::from(*a_k) * alpha;
         }
     }
 
-    // Build multi-pairing inputs.
     let mut g1_inputs: Vec<G1Affine> = Vec::with_capacity(per_val_a.len() + 1);
     let mut g2_inputs: Vec<G2Affine> = Vec::with_capacity(per_val_a.len() + 1);
-
     for (vidx, a_acc) in &per_val_a {
         let ek_i = eks.get(vidx).ok_or(ShieldError::InvalidTranscript)?;
         g1_inputs.push(a_acc.into_affine());
         g2_inputs.push(*ek_i);
     }
-    // Negation: e(-G, Σ [α] Ŷ_{i,ω})
     g1_inputs.push(-g);
     g2_inputs.push(neg_yhat_acc.into_affine());
 
     let result = Bls12_381::multi_pairing(g1_inputs, g2_inputs);
-    if result.is_zero() {
-        Ok(())
-    } else {
-        Err(ShieldError::InvalidTranscript)
-    }
+    if result.is_zero() { Ok(()) } else { Err(ShieldError::InvalidTranscript) }
 }
 
 // ── aggregate (S6) ────────────────────────────────────────────────────────────
@@ -472,7 +460,7 @@ pub fn recover_share(
 ///
 /// Uses Horner's method: O(t) multiplications, no allocation.
 /// Integer `x` is cast to `Fr::from(x)` (1-indexed share IDs, §4.0).
-fn eval_poly(coeffs: &[Fr], x: u16) -> Fr {
+pub(crate) fn eval_poly(coeffs: &[Fr], x: u16) -> Fr {
     let x_fr = Fr::from(u64::from(x));
     coeffs.iter().rev().fold(Fr::zero(), |acc, &a| acc * x_fr + a)
 }

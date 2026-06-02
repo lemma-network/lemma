@@ -43,6 +43,19 @@ pub const DST_H2F: &[u8] = b"LEMMA-SHIELD-H2F-v1";
 /// transcripts become unverifiable. Never change without a governance process.
 pub const DST_PVSS_U1: &[u8] = b"LEMMA-SHIELD-PVSS-U1-v1";
 
+/// Domain-separation tag for zero-secret resharing (PSS) PVSS transcripts (S7).
+///
+/// The node layer constructs the full resharing `tau` as
+/// `epoch_N_bytes ‖ epoch_N+1_bytes ‖ DST_PVSS_RESHARE` before calling
+/// `pss::deal_reshare`. The distinct DST prevents cross-protocol confusion
+/// between normal PVSS transcripts (S5/S6) and zero-secret resharing
+/// transcripts (S7): a dealer cannot submit a resharing transcript in a
+/// normal DKG round, or vice versa, without failing the tau check.
+///
+/// **Frozen**: changing this DST is a hard fork — all in-progress resharing
+/// rounds on the live chain would be invalidated.
+pub const DST_PVSS_RESHARE: &[u8] = b"LEMMA-SHIELD-PVSS-RESHARE-v1";
+
 // ── HKDF constants (symmetric key derivation) ─────────────────────────────────
 
 /// HKDF-SHA256 salt (fixed, compiled in).

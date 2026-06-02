@@ -42,7 +42,7 @@
 //! | `pvss` | S6 ✅ | `aggregate` + `recover_share` |
 //! | `dkg` | S6 ✅ | `DkgOutput` + `run_dkg` — BFT-native DKG driver |
 //! | `fs` | S6 (internal) | Shared Fiat–Shamir + hash-to-curve helpers (DRY, §2.1) |
-//! | `pss` | S7 | Per-epoch zero-secret resharing |
+//! | `pss` | S7 ✅ | `deal_reshare` + `verify_reshare` + `combine_shares` — PSS crypto |
 //!
 //! See `docs/15-SHIELD_SPEC.md` for the full cryptographic specification.
 //! See `docs/11-MEMPOOL_SHIELD_SPEC.md` for mempool integration and launch posture.
@@ -54,6 +54,7 @@ pub mod domain;
 pub mod error;
 pub(crate) mod fs;
 pub mod params;
+pub mod pss;
 pub mod pvss;
 pub mod share;
 pub mod tpke;
@@ -61,6 +62,7 @@ pub mod tpke;
 pub use ciphertext::{Ciphertext, ShieldAad};
 pub use dkg::{run_dkg, DkgOutput};
 pub use error::ShieldError;
+pub use pss::{combine_shares, deal_reshare, verify_reshare};
 pub use pvss::{aggregate, deal, recover_share, verify as verify_pvss, PvssTranscript};
 pub use share::{DecryptionShare, ShareProof};
 pub use tpke::{combine, CombineShare};

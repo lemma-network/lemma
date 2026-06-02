@@ -161,6 +161,16 @@ pub enum ShieldError {
     #[error("PVSS transcript is invalid: tag/FFT/share pairing check failed (§4.3)")]
     InvalidTranscript,
 
+    /// A resharing transcript's constant term is non-zero — the dealer tried to change `Y` (§5.4).
+    ///
+    /// `verify_reshare` requires `F_0 == 𝒪 ∧ û₂ == 𝒪`. A non-identity constant-term
+    /// commitment in a resharing round means the dealer contributed a non-zero secret,
+    /// which would shift the epoch key `Y`. This is either an attack or a protocol
+    /// error; the transcript is unconditionally rejected and the dealer is slashable
+    /// (13-VALIDATOR_EPOCH §5.4).
+    #[error("resharing transcript has non-zero constant term: F_0 ≠ 𝒪 or û₂ ≠ 𝒪 (§5.4)")]
+    ReshareAlteredKey,
+
     /// DKG aggregation failed to reach ≥ 2/3 total weight of valid transcripts (§4.6).
     ///
     /// Returned by `run_dkg` when the sum of surviving valid dealers' weights is
