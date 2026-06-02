@@ -463,3 +463,46 @@ fn storage_key_collision_different_addresses_same_slot() {
         Some(b"val_22".to_vec()),
     );
 }
+
+// ── into_db ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn into_db_returns_underlying_db_after_account_writes() {
+    // Arrange: write an account then reclaim the DB handle.
+    let (db, _dir) = open_db();
+    let mut ws = WorldState::new(db);
+    ws.put_account(&addr(0xAB), &account_with_balance(1_000))
+        .expect("put_account must succeed");
+    let root = ws.state_root();
+
+    // Act: consume WorldState, recover the DB.
+    let db = ws.into_db();
+
+    // Assert: the DB is still functional — we can open a new WorldState on
+    // the recovered handle and read the account we wrote earlier.
+    let ws2 = WorldState::with_state_root(db, root.expect("root must be Some after put"));
+    let acct = ws2
+        .get_account(&addr(0xAB))
+        .expect("get_account must succeed")
+        .expect("account must exist");
+    assert_eq!(acct.balance, Amount::from_drop(1_000));
+}
+
+#[test]
+fn into_db_on_empty_state_returns_functional_db() {
+    // Arrange: no accounts written.
+    let (db, _dir) = open_db();
+    let ws = WorldState::new(db);
+    assert!(ws.state_root().is_none());
+
+    // Act: reclaim DB without any writes.
+    let db = ws.into_db();
+
+    // Assert: DB is still functional for direct metadata writes.
+    db.put(crate::db::CF_METADATA, b"test_key", b"test_val")
+        .expect("put to metadata CF must succeed");
+    let val = db
+        .get(crate::db::CF_METADATA, b"test_key")
+        .expect("get from metadata CF must succeed");
+    assert_eq!(val, Some(b"test_val".to_vec()));
+}

@@ -19,6 +19,8 @@
 
 use thiserror::Error;
 
+use crate::address::Address;
+
 // ─── Address ─────────────────────────────────────────────────────────────────
 
 /// Errors that can occur when parsing or encoding a Lemma [`Address`](crate::Address).
@@ -205,6 +207,29 @@ pub enum ValidatorError {
     /// A genesis validator has zero active stake.
     #[error("genesis validator {address} has zero active stake")]
     ZeroGenesisStake { address: String },
+
+    /// Voting-power accumulation overflowed while building a `ValidatorSet`.
+    ///
+    /// Surfaced by [`ValidatorSet::from_active_validators`] when either
+    /// `Validator::voting_power()` or the running `total_power` sum overflows
+    /// `u128`. Practically unreachable given the LEM supply cap, but propagated
+    /// as `Result` per AGENTS.md §7.4 (no silent overflow).
+    #[error("voting-power overflow for validator {address}: {source}")]
+    PowerOverflow {
+        /// The validator whose power contribution caused the overflow.
+        address: Address,
+        /// Underlying arithmetic error.
+        #[source]
+        source: AmountError,
+    },
+
+    /// The active-validator set is empty for `epoch`.
+    ///
+    /// Returned by [`ValidatorSet::from_active_validators`] when no validator
+    /// passes the `is_active()` filter. The caller must handle this — the
+    /// chain cannot progress without a committee.
+    #[error("epoch {epoch}: no active validators — committee would be empty")]
+    EmptyValidatorSet { epoch: u64 },
 }
 
 // ─── Top-level ────────────────────────────────────────────────────────────────

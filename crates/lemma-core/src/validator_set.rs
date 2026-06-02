@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     address::Address,
     amount::Amount,
+    error::{CoreError, ValidatorError},
     hash::Hash,
-    validator::{ConsensusKey, VotingPower},
+    validator::{ConsensusKey, Validator, VotingPower},
 };
 
 // ─── Member ──────────────────────────────────────────────────────────────────
@@ -70,6 +71,59 @@ pub struct ValidatorSet {
 }
 
 impl ValidatorSet {
+    /// Build a [`ValidatorSet`] for `epoch` from the active members of `validators`.
+    ///
+    /// **Canonical constructor** — used by both `lemma-consensus::epoch::transition`
+    /// (epoch-boundary settlement) and `lemma-node::genesis_boot` (genesis block).
+    /// Extracting one implementation here prevents divergence in filtering logic
+    /// and overflow handling (AGENTS.md §2.4).
+    ///
+    /// ## Filter
+    ///
+    /// Only validators that pass [`Validator::is_active`] (Bonded, not tombstoned,
+    /// not jailed) are included. This matches `advance_epoch` step 5 exactly —
+    /// the genesis committee and every subsequent epoch committee use the same
+    /// criterion, maintaining the hash-chain from genesis.
+    ///
+    /// ## Overflow
+    ///
+    /// Voting-power accumulation uses checked arithmetic (AGENTS.md §7.4). Overflow
+    /// is propagated as [`CoreError::Validator(ValidatorError::PowerOverflow)`] —
+    /// never silently swallowed.
+    ///
+    /// # Errors
+    ///
+    /// - [`CoreError::Validator(ValidatorError::PowerOverflow)`] — `Validator::voting_power()`
+    ///   or the running `total_power` sum overflowed.
+    /// - [`CoreError::Validator(ValidatorError::EmptyValidatorSet)`] — no validator
+    ///   passed the `is_active()` filter.
+    pub fn from_active_validators(
+        epoch: u64,
+        validators: &BTreeMap<Address, Validator>,
+    ) -> Result<Self, CoreError> {
+        let mut members = BTreeMap::new();
+        let mut total_power = Amount::zero();
+
+        for (addr, v) in validators {
+            if !v.is_active() {
+                continue;
+            }
+            let power = v.voting_power().map_err(|e| {
+                CoreError::Validator(ValidatorError::PowerOverflow { address: *addr, source: e })
+            })?;
+            total_power = total_power.checked_add(power.as_amount()).map_err(|e| {
+                CoreError::Validator(ValidatorError::PowerOverflow { address: *addr, source: e })
+            })?;
+            members.insert(*addr, Member { consensus_pubkey: v.consensus_pubkey.clone(), power });
+        }
+
+        if members.is_empty() {
+            return Err(CoreError::Validator(ValidatorError::EmptyValidatorSet { epoch }));
+        }
+
+        Ok(ValidatorSet { epoch, members, total_power })
+    }
+
     /// Compute the Blake3 hash of this validator set.
     ///
     /// Hashes the canonically-sorted `(address, consensus_pubkey, power)` tuples.

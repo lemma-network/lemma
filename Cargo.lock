@@ -2027,8 +2027,15 @@ name = "lemma-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bincode",
  "clap",
  "lemma-core",
+ "lemma-crypto",
+ "lemma-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",

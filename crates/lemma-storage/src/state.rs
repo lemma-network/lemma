@@ -99,6 +99,17 @@ impl WorldState {
         Self { db, state_root: Some(state_root) }
     }
 
+    /// Consume this `WorldState` and return the underlying [`LemmaDb`].
+    ///
+    /// Used by the genesis boot path: after all genesis accounts have been
+    /// written (and [`state_root`] captured), the caller reclaims the DB
+    /// handle to write the genesis block and chain metadata atomically.
+    ///
+    /// [`state_root`]: WorldState::state_root
+    pub fn into_db(self) -> LemmaDb {
+        self.db
+    }
+
     // ── State root ────────────────────────────────────────────────────────────
 
     /// The current state trie root, or `None` if no accounts have been written.

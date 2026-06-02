@@ -24,7 +24,7 @@ use lemma_core::{
     address::Address,
     amount::Amount,
     validator::{Validator, ValidatorStatus},
-    validator_set::{Member, ValidatorSet},
+    validator_set::ValidatorSet,
     Epoch,
 };
 
@@ -271,27 +271,21 @@ fn build_next_validator_set(
     epoch_number: u64,
     validators: &BTreeMap<Address, Validator>,
 ) -> Result<ValidatorSet, EpochError> {
-    let mut members = BTreeMap::new();
-    let mut total_power = Amount::zero();
-
-    for (addr, v) in validators {
-        if !v.is_active() {
-            continue;
+    use lemma_core::error::{CoreError, ValidatorError};
+    // Delegate to the canonical constructor in lemma-core (AGENTS §2.4 / §2.2).
+    // One implementation shared with genesis_boot; filter, overflow handling,
+    // and total_power accumulation are identical on every call path.
+    ValidatorSet::from_active_validators(epoch_number, validators).map_err(|e| match e {
+        CoreError::Validator(ValidatorError::PowerOverflow { address, source }) => {
+            EpochError::PowerOverflow { address, source }
         }
-        let power = v
-            .voting_power()
-            .map_err(|e| EpochError::PowerOverflow { address: *addr, source: e })?;
-        total_power = total_power
-            .checked_add(power.as_amount())
-            .map_err(|e| EpochError::PowerOverflow { address: *addr, source: e })?;
-        members.insert(*addr, Member { consensus_pubkey: v.consensus_pubkey.clone(), power });
-    }
-
-    if members.is_empty() {
-        return Err(EpochError::EmptyNextCommittee { next_epoch: epoch_number });
-    }
-
-    Ok(ValidatorSet { epoch: epoch_number, members, total_power })
+        CoreError::Validator(ValidatorError::EmptyValidatorSet { epoch }) => {
+            EpochError::EmptyNextCommittee { next_epoch: epoch }
+        }
+        // Safety: from_active_validators only returns PowerOverflow or
+        // EmptyValidatorSet — all other CoreError variants are unreachable here.
+        _ => unreachable!("ValidatorSet::from_active_validators returned unexpected error"),
+    })
 }
 
 // ── Step 6 ────────────────────────────────────────────────────────────────────
