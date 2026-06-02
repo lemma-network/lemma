@@ -29,6 +29,7 @@
 use ark_bls12_381::Fr;
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use secret_sharing_and_dkg::common::{lagrange_basis_at_0_for_all, ShareId};
+use std::collections::BTreeSet;
 
 use crate::shield::ShieldError;
 
@@ -157,23 +158,38 @@ impl ShieldDomain {
     /// This is the function called at combine-time (S4) with the contributing
     /// validators' share IDs. Results are in the same order as `subset`.
     ///
+    /// Subset validation (closed from S1 CodeReviewer W1):
+    /// - Rejects share ID `0` (share IDs are 1-indexed; the library errors on 0
+    ///   but we guard at our boundary too).
+    /// - Rejects share IDs `> W` (out of range for this committee's domain).
+    /// - Rejects duplicates (the library returns silently *wrong* Lagrange
+    ///   coefficients for duplicate x-coordinates — no panic, just bad math).
+    ///
     /// # Errors
     ///
-    /// [`ShieldError::Lagrange`] if `lagrange_basis_at_0_for_all` errors
-    /// (only occurs if `subset` contains a 0 — which Shield never produces).
-    ///
-    /// # TODO(shield): subset validation — CodeReviewer W1
-    ///
-    /// At S4 (combine), add validation before calling the library:
-    ///
-    /// - Reject ShareId 0 (library errors, but guard at our boundary too)
-    /// - Reject IDs > W (out of range)
-    /// - Reject duplicates (library returns wrong coefficients silently — no
-    ///   panic, but the result is mathematically invalid)
-    ///
-    /// Validation: build a `BTreeSet<ShareId>`, check no dups, check range.
+    /// [`ShieldError::Lagrange`] if any of the above conditions hold, or if
+    /// `lagrange_basis_at_0_for_all` returns an error.
     pub fn lagrange_coeffs_for(&self, subset: Vec<ShareId>) -> Result<Vec<Fr>, ShieldError> {
-        // TODO(shield): add subset validation here when S4 (combine) is built — see W1 above.
+        // Validate subset before calling the library (S1 CodeReviewer W1 closed here).
+        let mut seen: BTreeSet<ShareId> = BTreeSet::new();
+        for &id in &subset {
+            if id == 0 {
+                return Err(ShieldError::Lagrange(
+                    "share ID 0 is invalid (share IDs are 1-indexed)".into(),
+                ));
+            }
+            if u64::from(id) > self.share_count {
+                return Err(ShieldError::Lagrange(format!(
+                    "share ID {id} out of range (domain size W={})",
+                    self.share_count
+                )));
+            }
+            if !seen.insert(id) {
+                return Err(ShieldError::Lagrange(format!(
+                    "duplicate share ID {id} — would produce invalid Lagrange coefficients"
+                )));
+            }
+        }
         lagrange_basis_at_0_for_all::<Fr>(subset)
             .map_err(|e| ShieldError::Lagrange(format!("{e:?}")))
     }

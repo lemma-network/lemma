@@ -12,7 +12,7 @@ use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{Field, UniformRand, Zero};
 
 use super::{
-    decryption_share, verify_share, verify_share_batch, DecryptionShare, ShareProof,
+    decryption_share, verify_share, verify_share_batch,
 };
 use crate::shield::{
     ciphertext::ShieldAad,

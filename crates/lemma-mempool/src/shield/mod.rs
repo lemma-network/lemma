@@ -56,3 +56,4 @@ pub mod tpke;
 pub use ciphertext::{Ciphertext, ShieldAad};
 pub use error::ShieldError;
 pub use share::{DecryptionShare, ShareProof};
+pub use tpke::{combine, CombineShare};

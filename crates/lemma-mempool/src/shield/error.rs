@@ -111,7 +111,17 @@ pub enum ShieldError {
     #[error("hash-to-curve failed: {0}")]
     HashToCurve(String),
 
-    // ── S3: decryption shares + Chaum–Pedersen DLEQ proof ────────────────────
+    // ── S3–S4: decryption shares + combine ───────────────────────────────────
+
+    /// Fewer than `p+1` contributing shares for `combine` (§2.5, §4.2).
+    ///
+    /// `p = ⌊2W/3⌋` (privacy threshold). Decryption requires weight `≥ p+1`
+    /// (i.e. more than 2/3 of the total committee weight). This error is a
+    /// **deterministic defer** — the caller waits for more shares to arrive or
+    /// treats the ciphertext as unrecoverable for this epoch.
+    /// Never panics (15-SHIELD_SPEC §8, AGENTS §7.2).
+    #[error("insufficient decryption shares: have weight {have}, need {need} (= p+1)")]
+    InsufficientShares { have: u64, need: u64 },
 
     /// Validator epoch decryption key `dk_i` is zero (has no multiplicative inverse).
     ///

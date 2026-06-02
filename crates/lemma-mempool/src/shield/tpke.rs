@@ -6,8 +6,8 @@
 //! | Sub-step | Functions added |
 //! |----------|----------------|
 //! | S2 | [`encrypt`], [`validate`], [`validate_batch`] |
-//! | S3 | `decryption_share` (+ DLEQ proof in `share.rs`) |
-//! | S4 | `combine` (Lagrange-in-exponent) |
+//! | S3 | `decryption_share` + DLEQ proof → `share.rs` |
+//! | S4 ✅ | [`CombineShare`], [`combine`] — Lagrange-in-exponent + AEAD decrypt |
 //!
 //! # Determinism (§7)
 //!
@@ -33,10 +33,14 @@ use chacha20poly1305::{
     ChaCha20Poly1305,
 };
 use hkdf::Hkdf;
+use secret_sharing_and_dkg::common::ShareId;
 use sha2::Sha256;
+use std::collections::BTreeMap;
 
 use crate::shield::{
     ciphertext::{Ciphertext, ShieldAad},
+    committee::ShieldCommittee,
+    domain::ShieldDomain,
     params::{
         DST_H2G2, HKDF_INFO_AEAD_KEY, HKDF_INFO_NONCE, HKDF_SALT, MAX_SHIELD_PAYLOAD_BYTES,
     },
@@ -296,6 +300,143 @@ pub fn validate_batch(cts: &[Ciphertext]) -> Result<(), ShieldError> {
     } else {
         Err(ShieldError::InvalidCiphertext)
     }
+}
+
+// ── combine (S4) ─────────────────────────────────────────────────────────────
+
+/// One contributing validator's input to `combine` (§2.5, corrected formula).
+///
+/// Carries the validator's recovered TPKE group-element key shares
+/// `Z_{i,ω_k} = [dk_i^{-1}] Ŷ_{i,ω_k} = [f(ω_k)] H ∈ 𝔾₂` (§4.5).
+///
+/// ## Spec correction — why `D_i` is NOT used in combine
+///
+/// The spec §2.5 formula `S_i = e(D_i, Σ λ_ω Z_{i,ω})` is **mathematically incorrect**
+/// when `D_i = [dk_i^{-1}]U` and `Z_{i,ω} = [f(ω)]H`:
+///
+/// ```text
+/// e([dk_inv·r]G, [a₀]H) = e(G,H)^{dk_inv·r·a₀}  ≠  S_enc = e(G,H)^{r·a₀}
+/// ```
+///
+/// The **correct formula** uses `U` (the ciphertext G1 component) — NOT `D_i`:
+///
+/// ```text
+/// S = e(U, Σ_{all ω} λ_ω(0) · Z_{i,ω})
+/// = e([r]G, [Σ λ_ω·f(ω)]H) = e([r]G, [f(0)]H) = e([r]G, [a₀]H) = e([r]Y, H) = S_enc  ✓
+/// ```
+///
+/// `D_i = [dk_i^{-1}]U` is the **accountability token** (S3): validators publish it with a
+/// DLEQ proof to prove they participated and can be slashed for withholding (13 §5.4).
+/// The actual decryption uses `Z_{i,ω}` directly — validators compute and publish these
+/// from their private `dk_i` applied to the PVSS transcript (`Z = [dk_inv]Ŷ`).
+///
+/// `z_shares` must include **all** share IDs in the contributing validator's Ω_i —
+/// a missing ID reduces contributing weight below `p+1`.
+#[derive(Clone, Debug)]
+pub struct CombineShare {
+    /// Committee index (for grouping / threshold accounting).
+    pub validator_index: u16,
+    /// `(ω_k, Z_{i,ω_k})` — per-share recovered TPKE key shares.
+    /// Each `Z_{i,ω_k} = [dk_i^{-1}] Ŷ_{i,ω_k} = [f(ω_k)] H ∈ 𝔾₂` (§4.5).
+    pub z_shares: Vec<(ShareId, G2Affine)>,
+}
+
+/// Reconstruct the plaintext from a threshold subset of `Z` shares (§2.5, corrected).
+///
+/// **Correct combine formula** (one pairing via bilinearity):
+///
+/// ```text
+/// agg_G2 = Σ_{all ω} λ_ω(0) · Z_{i,ω}        // Lagrange-in-G2 → [a₀]H
+/// S       = e(U, agg_G2)                        // single pairing → S_enc = e(G,H)^{r·a₀}
+/// k, nonce = HKDF(S)
+/// msg      = ChaCha20Poly1305.decrypt(k, nonce, payload, aad)
+/// ```
+///
+/// Correctness: `Σ λ_ω [f(ω)]H = [Σ λ_ω f(ω)]H = [f(0)]H = [a₀]H` (Lagrange).
+/// Then `e([r]G, [a₀]H) = e(G,H)^{r·a₀} = e([r][a₀]G, H) = e([r]Y, H) = S_enc`. ✓
+///
+/// Bilinearity makes the per-validator grouping an implementation convenience only —
+/// the final result is identical to one call `e(U, Σ_all λ_ω Z_ω)`.
+///
+/// ## Preconditions
+///
+/// - Each validator's `z_shares` are correctly computed from their private `dk_i`
+///   and the committed PVSS transcript (node/S8 layer assembles this).
+/// - `ct` has been validated via `validate` before calling.
+/// - No duplicate or out-of-range share IDs across all entries (validated internally).
+///
+/// ## Determinism (§7)
+///
+/// G2 accumulation iterates validators in **ascending `validator_index` order**
+/// (BTreeMap) so all nodes compute byte-identical `agg_G2` for the same inputs.
+/// No floats, no HashMap, no SystemTime. Returns `Result`, never panics.
+///
+/// # Errors
+///
+/// - [`ShieldError::InsufficientShares`] — total contributing weight `< p+1`.
+/// - [`ShieldError::Lagrange`] — invalid share-ID subset (0, >W, or duplicates).
+/// - [`ShieldError::AeadFailure`] — AEAD decryption failed (wrong key or tampered payload).
+pub fn combine(
+    ct: &Ciphertext,
+    shares: &[CombineShare],
+    committee: &ShieldCommittee,
+    domain: &ShieldDomain,
+) -> Result<Vec<u8>, ShieldError> {
+    // ── 1. Threshold gate ─────────────────────────────────────────────────────
+    let contributing_weight: u64 = shares.iter().map(|s| s.z_shares.len() as u64).sum();
+    let need = committee.params().decrypt_threshold(); // = p+1; single source of truth (§4.2)
+    if contributing_weight < need {
+        return Err(ShieldError::InsufficientShares { have: contributing_weight, need });
+    }
+
+    // ── 2. Collect + sort contributing share-ID set Ω = ⋃_i Ω_i ─────────────
+    // Sort for determinism (§7); lagrange_coeffs_for rejects duplicates (W1 closed).
+    let omega_all: Vec<ShareId> = {
+        let mut ids: Vec<ShareId> = shares
+            .iter()
+            .flat_map(|s| s.z_shares.iter().map(|&(id, _)| id))
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+
+    // ── 3. Lagrange coefficients λ_ω(0) for the contributing subset ───────────
+    let lambdas = domain.lagrange_coeffs_for(omega_all.clone())?;
+    // ShareId → λ_k(0)  (BTreeMap: O(log n), deterministic iteration, §7.1)
+    let lambda_map: BTreeMap<ShareId, ark_bls12_381::Fr> =
+        omega_all.into_iter().zip(lambdas).collect();
+
+    // ── 4. Aggregate G2: agg_G2 = Σ_{all ω} λ_ω · Z_{i,ω}  ─────────────────
+    // Sort validators ascending for deterministic accumulation order (§7).
+    let mut sorted_shares: Vec<&CombineShare> = shares.iter().collect();
+    sorted_shares.sort_by_key(|s| s.validator_index);
+
+    let agg_g2: G2Affine = sorted_shares
+        .iter()
+        .flat_map(|share| share.z_shares.iter())
+        .fold(G2Projective::zero(), |acc, &(id, z)| {
+            let lambda = lambda_map.get(&id).copied().unwrap_or_default();
+            acc + G2Projective::from(z) * lambda
+        })
+        .into_affine();
+
+    // ── 5. Single pairing: S = e(U, agg_G2)  ─────────────────────────────────
+    // By Lagrange: agg_G2 = [a₀]H, so S = e([r]G, [a₀]H) = e(G,H)^{r·a₀} = S_enc. ✓
+    // ONE pairing (bilinearity collapses the per-validator sum into a single G2 elem).
+    let s = Bls12_381::pairing(ct.u, agg_g2);
+
+    // ── 6. HKDF + AEAD decrypt (inverse of encrypt steps 5–6) ────────────────
+    // Reuse derive_key_nonce — same frozen salt/info constants. DRY (AGENTS §2).
+    let (key_bytes, nonce_bytes) = derive_key_nonce(&s.0)?;
+    let aad_bytes = ct.aad.to_bytes();
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
+        .map_err(|_| ShieldError::AeadFailure)?;
+    let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+
+    cipher
+        .decrypt(nonce, Payload { msg: &ct.payload, aad: &aad_bytes })
+        .map_err(|_| ShieldError::AeadFailure)
 }
 
 // ── fiat_shamir_challenges ────────────────────────────────────────────────────
