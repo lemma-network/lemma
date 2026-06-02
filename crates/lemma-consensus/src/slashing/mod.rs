@@ -6,9 +6,17 @@
 //! - **`jail.rs`** (B3b): `tombstone` / `jail` state transitions §5.2/§5.5.
 //! - **`liveness.rs`** (B3c): downtime sliding-window bit-array §5.5.
 //!
-//! Shield share-withholding (§5.4) is **deferred** — `ferveo` is GPL-3.0
-//! (decisions-log), blocking the DKG dependency. `SHARE_WITHHOLDING_SLASH_BPS`
-//! is defined for completeness; the caller-side implementation is not yet built.
+//! Shield share-withholding (§5.4): `SHARE_WITHHOLDING_SLASH_BPS` is defined here
+//! and `slash()`/`jail()` are the per-validator primitives it uses. The Shield
+//! crypto is **built** (in-tree, ferveo GPL rejected — decisions-log DB-11, no
+//! longer a blocker). The **caller** that aggregates withholding evidence and
+//! invokes `slash`/`jail` is built at the `lemma-node` layer (DB-12, living-notes
+//! W-2): consensus is crypto-free and cannot depend on `lemma-mempool` (AGENTS §8),
+//! so the node computes the withholder set and injects it. Two distinct duties feed
+//! this slash — see 13-VALIDATOR_EPOCH §5.4:
+//!   - **Duty A** (dealer non-contribution at DKG/reshare): `shield::withholding_set`.
+//!   - **Duty B** (decryption-share non-release for a finalized ciphertext, evidence/
+//!     accusation-driven via this module's `evidence` infra): node-layer, not yet wired.
 //!
 //! ## Design decisions (B3)
 //!
@@ -56,9 +64,11 @@ pub const DOWNTIME_SLASH_BPS: u16 = 100;
 ///
 /// **10%** of infraction-epoch voting power. Results in finite jail.
 ///
-/// ⚠️ **Currently unreachable** — Shield DKG (`ferveo`) is GPL-3.0
-/// (decisions-log), blocking §5.4. Constant defined for completeness;
-/// the evidence-handling caller is not yet built.
+/// The Shield crypto this slashes against is **built** (in-tree DKG/PSS, ferveo
+/// rejected — DB-11; no longer a blocker). The caller that aggregates withholding
+/// evidence and invokes [`slash`] + [`jail`][crate::slashing::jail::jail] is built
+/// at the `lemma-node` layer (DB-12, living-notes W-2), because `lemma-consensus`
+/// is crypto-free and cannot depend on `lemma-mempool` (AGENTS §8).
 pub const SHARE_WITHHOLDING_SLASH_BPS: u16 = 1_000;
 
 /// Maximum valid slash fraction in basis points (100% = full stake).
