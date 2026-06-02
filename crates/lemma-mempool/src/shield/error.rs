@@ -68,6 +68,48 @@ pub enum ShieldError {
     /// is 0. Included for defensive error handling.
     #[error("Lagrange basis computation failed: {0}")]
     Lagrange(String),
+
+    // ── S2: ciphertext + TPKE encrypt/validate ────────────────────────────────
+
+    /// A submitted or deserialized ciphertext failed the pairing validity check.
+    ///
+    /// Either `e(U, H_𝔾₂(U,aad)) ≠ e(G,W)` (malformed) or a deserialized
+    /// point failed the subgroup membership check. The ciphertext is rejected
+    /// at ingress; the submitter must re-submit a well-formed ciphertext.
+    /// Never panics — always returns this error (15-SHIELD_SPEC §6).
+    #[error("ciphertext is invalid: pairing validity or subgroup check failed")]
+    InvalidCiphertext,
+
+    /// The ciphertext payload exceeds the maximum permitted size.
+    ///
+    /// Checked at ingress (DoS pre-check) before any crypto operation.
+    /// The submitter must reduce the plaintext to ≤ `max` bytes.
+    #[error("payload length {len} exceeds maximum {max} bytes")]
+    PayloadTooLarge { len: usize, max: usize },
+
+    /// An arkworks serialization or deserialization error.
+    ///
+    /// Wraps errors from `ark_serialize` operations (point encoding/decoding,
+    /// field element serialization for HKDF input). The string carries
+    /// the `Debug` representation of the original `SerializationError`.
+    #[error("serialization error: {0}")]
+    Serialization(String),
+
+    /// AEAD encryption or decryption failed.
+    ///
+    /// ChaCha20Poly1305 errors are opaque (no plaintext details exposed).
+    /// For decryption, this indicates a tampered ciphertext or wrong key.
+    /// For encryption, this is practically unreachable.
+    #[error("AEAD encryption/decryption failed")]
+    AeadFailure,
+
+    /// Hash-to-curve (RFC 9380) failed to map bytes to a `𝔾₂` point.
+    ///
+    /// Wraps the `HashToCurveError` from `ark_ec::hashing`. Practically
+    /// unreachable in Shield's usage (any byte string maps successfully).
+    /// Included for defensive error handling.
+    #[error("hash-to-curve failed: {0}")]
+    HashToCurve(String),
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

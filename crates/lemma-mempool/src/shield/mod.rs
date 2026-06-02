@@ -45,9 +45,12 @@
 //! See `docs/15-SHIELD_SPEC.md` for the full cryptographic specification.
 //! See `docs/11-MEMPOOL_SHIELD_SPEC.md` for mempool integration and launch posture.
 
+pub mod ciphertext;
 pub mod committee;
 pub mod domain;
 pub mod error;
 pub mod params;
+pub mod tpke;
 
+pub use ciphertext::{Ciphertext, ShieldAad};
 pub use error::ShieldError;
