@@ -92,7 +92,7 @@ decaf377-rdsa = "=0.11.0"
 # PINNED to arkworks 0.4.x to share Veil's single ark-* train per process (15-SPEC §1.4, §9)
 # — one binary, no duplicate-ark ABI conflict. Licenses verified live 2026-06-02:
 # docknetwork crates = Apache-2.0; arkworks/AEAD/KDF = MIT/Apache (AGENTS §9.3 permissive-only).
-ark-bls12-381 = { version = "=0.4", default-features = false }
+ark-bls12-381 = { version = "=0.4", features = ["curve"] }  # "curve" enables Fr/G1/G2 (required for Shield TPKE)
 ark-poly = { version = "=0.4.2", default-features = false }
 secret_sharing_and_dkg = "0.16.0"      # Shamir/Feldman/Pedersen VSS + lagrange_basis_at_0_for_all
 schnorr_pok = "0.23.0"                  # Schnorr PoK building blocks → compose Chaum-Pedersen DLEQ (§3)
