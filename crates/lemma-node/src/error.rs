@@ -44,6 +44,15 @@ pub enum NodeError {
     #[error("network: {0}")]
     Network(#[from] NetworkError),
 
+    /// Block structural verification failed during range-sync.
+    ///
+    /// Indicates a peer served a block that failed structural integrity checks
+    /// (parent_hash mismatch, height gap, hash self-inconsistency, or intra-block
+    /// invariants). The block is discarded and the peer may be demoted.
+    /// Not fatal — the sync driver retries from a different peer.
+    #[error("verify: {0}")]
+    Verify(String),
+
     /// Node configuration is invalid or could not be loaded from disk.
     #[error("config: {0}")]
     Config(String),

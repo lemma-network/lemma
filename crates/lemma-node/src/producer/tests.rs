@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{Mutex, watch, RwLock};
 
 use lemma_core::{
     address::Address,
@@ -259,10 +259,11 @@ async fn run_produces_blocks_until_shutdown() {
     let cfg      = ProducerConfig { block_interval_ms: 1 }; // 1 ms → fast test
     let (tx, rx) = watch::channel(false);
 
-    let db_task = db.clone();
-    let mp_task = mempool.clone();
-    let handle  = tokio::spawn(async move {
-        run(db_task, mp_task, cfg, Address::zero(), None, rx).await
+    let db_task    = db.clone();
+    let mp_task    = mempool.clone();
+    let write_lock = Arc::new(Mutex::new(()));
+    let handle     = tokio::spawn(async move {
+        run(db_task, mp_task, cfg, Address::zero(), None, write_lock, rx).await
     });
 
     // Poll until tip reaches height 3 (or timeout after 5 s).
@@ -297,10 +298,11 @@ async fn run_skips_tick_on_build_error_and_continues() {
     let cfg      = ProducerConfig { block_interval_ms: 1 };
     let (tx, rx) = watch::channel(false);
 
-    let db_task  = db.clone();
-    let mp_task  = mempool.clone();
-    let handle   = tokio::spawn(async move {
-        run(db_task, mp_task, cfg, Address::zero(), None, rx).await
+    let db_task    = db.clone();
+    let mp_task    = mempool.clone();
+    let write_lock = Arc::new(Mutex::new(()));
+    let handle     = tokio::spawn(async move {
+        run(db_task, mp_task, cfg, Address::zero(), None, write_lock, rx).await
     });
 
     // Let it tick a few times (all will warn+skip), then shut down.
@@ -329,10 +331,11 @@ async fn run_emits_committed_blocks_on_block_tx_channel() {
     let (tx, rx)      = watch::channel(false);
     let (block_tx, mut block_rx) = tokio::sync::mpsc::channel(16);
 
-    let db_task = db.clone();
-    let mp_task = mempool.clone();
-    let handle  = tokio::spawn(async move {
-        run(db_task, mp_task, cfg, Address::zero(), Some(block_tx), rx).await
+    let db_task    = db.clone();
+    let mp_task    = mempool.clone();
+    let write_lock = Arc::new(Mutex::new(()));
+    let handle     = tokio::spawn(async move {
+        run(db_task, mp_task, cfg, Address::zero(), Some(block_tx), write_lock, rx).await
     });
 
     // Wait until at least 2 blocks are received on the channel.

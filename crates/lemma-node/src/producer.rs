@@ -36,7 +36,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -50,6 +50,8 @@ use lemma_core::{
 };
 use lemma_mempool::pool::Mempool;
 use lemma_storage::{ChainStore, LemmaDb};
+
+use crate::sync::compute_block_hash;
 
 use crate::error::NodeError;
 
@@ -161,11 +163,11 @@ pub fn build_next_block(
     //   gas_used == Σ receipt.gas_used      (0 == 0 ✓)
     let block = Block::new(header, vec![], vec![])?;
 
-    // Serialize once; hash_bytes reuses those bytes for CF_BLOCK_HASH storage
-    // (same pattern as genesis_boot — avoids double serialization).
-    let bytes = bincode::serialize(&block)
+    // Compute the canonical block hash (AGENTS §2.2: one canonical hash path).
+    // compute_block_hash is the single definition; calling it here ensures the
+    // producer and the range-sync consumer always derive identical hashes.
+    let hash = compute_block_hash(&block)
         .map_err(|e| NodeError::Serialization(e.to_string()))?;
-    let hash = lemma_crypto::hash_bytes(&bytes);
 
     Ok((block, hash))
 }
@@ -225,6 +227,13 @@ pub fn commit_block(chain: &ChainStore<'_>, block: &Block, hash: Hash) -> Result
 /// trigger a clean shutdown. The producer finishes the in-progress tick
 /// before returning `Ok(())`.
 ///
+/// ## Write-lock contract
+///
+/// `write_lock` is shared with the range-sync consumer (`run_network_dispatch`).
+/// Both acquire it before calling `put_block` to prevent a tip-race
+/// (see `chain.rs` §Tip race under concurrent writers). The lock is held only
+/// for the duration of one RocksDB write batch — negligible overhead.
+///
 /// ## Phase 2 hook
 ///
 /// Replace `build_next_block` with a variant that accepts a validated tx
@@ -237,6 +246,7 @@ pub async fn run(
     cfg: ProducerConfig,
     proposer: Address,
     block_tx: Option<mpsc::Sender<Block>>,
+    write_lock: Arc<Mutex<()>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), NodeError> {
     let mut interval =
@@ -262,8 +272,13 @@ pub async fn run(
 
                 let height = block.height();
 
-                // Persist — sole-writer path; failures are fatal for the producer.
-                commit_block(&chain, &block, hash)?;
+                // Persist under the shared write-lock (serializes with the
+                // range-sync consumer's apply_synced_block writes).
+                // The lock is held only for one RocksDB write batch.
+                {
+                    let _guard = write_lock.lock().await;
+                    commit_block(&chain, &block, hash)?;
+                }
 
                 // Emit committed block for network dissemination (best-effort).
                 // The broadcaster task drains this channel and gossips to peers.

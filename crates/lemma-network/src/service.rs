@@ -198,6 +198,25 @@ impl NetworkHandle {
         self.send(NetworkCommand::BroadcastTransaction(tx)).await
     }
 
+    /// Send a bounded range request to a specific peer (partition-heal path).
+    ///
+    /// The response arrives as one or more [`NetworkEvent::BlockReceived`]
+    /// events (the network service fans out each block individually).
+    /// Call [`RangeRequest::validate`] before dispatching — an unchecked range
+    /// is a memory-exhaustion vector on the responding peer
+    /// (12-NETWORK_SYNC_SPEC §2.2, AGENTS.md §15.2).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn request_range(
+        &self,
+        peer: PeerId,
+        request: crate::messages::RangeRequest,
+    ) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::RequestRange { peer, request }).await
+    }
+
     /// Send a range response back through an open request-response channel.
     ///
     /// The `channel` comes from a [`NetworkEvent::RangeRequest`] event; the
