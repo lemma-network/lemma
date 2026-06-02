@@ -110,6 +110,37 @@ pub enum ShieldError {
     /// Included for defensive error handling.
     #[error("hash-to-curve failed: {0}")]
     HashToCurve(String),
+
+    // ── S3: decryption shares + Chaum–Pedersen DLEQ proof ────────────────────
+
+    /// Validator epoch decryption key `dk_i` is zero (has no multiplicative inverse).
+    ///
+    /// `dk_i = 0` is computationally unreachable for an honestly generated keypair
+    /// (`dk_i` is sampled uniformly from `𝔽_r \ {0}`) but is validated defensively:
+    /// a zero key has no inverse, so `D_i = [dk_i^{-1}] U` is undefined.
+    #[error("validator decryption key dk_i is zero (not invertible in 𝔽_r)")]
+    InvalidKey,
+
+    /// A decryption share failed the pairing validity check (§2.4).
+    ///
+    /// Either `e(D_i, ek_i) ≠ e(U, H)` (share does not correspond to the ciphertext
+    /// and published epoch key) or the pairing tie `e(cm_i, ek_i) ≠ e(G, H)` fails.
+    /// Validators that produce invalid shares are slashable (13-VALIDATOR_EPOCH §5.4).
+    /// Never panics — always returns this error (15-SHIELD_SPEC §8, AGENTS §7.2).
+    #[error("decryption share is invalid: pairing check failed (§2.4)")]
+    InvalidShare,
+
+    /// A Chaum–Pedersen DLEQ proof failed verification (§3.2).
+    ///
+    /// One or both of the Schnorr checks failed:
+    /// - `[s]U ≠ t_U + [c]D_i`  (discrete log in base `U`)
+    /// - `[s]G ≠ t_G + [c]cm_i` (discrete log in base `G`)
+    ///
+    /// A failing DLEQ proof means the share does not come from the same `dk_i^{-1}`
+    /// that was committed to in `cm_i` — i.e. the validator is cheating or the share
+    /// is corrupted. Slashable per 13-VALIDATOR_EPOCH §5.4.
+    #[error("decryption share DLEQ proof is invalid: Schnorr check failed (§3.2)")]
+    InvalidProof,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

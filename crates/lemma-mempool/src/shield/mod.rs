@@ -35,9 +35,9 @@
 //! | `params` | S1 | [`ShieldParams`] + frozen DST/HKDF constants |
 //! | `committee` | S1 | [`ShieldCommittee`] + Ω_i stake-weighted partition |
 //! | `domain` | S1 | [`ShieldDomain`] — fixed FFT domain + Lagrange cache |
-//! | `ciphertext` | S2 | `Ciphertext` wire layout + AEAD + subgroup checks |
-//! | `tpke` | S2–S4 | encrypt / validate / decryption_share / combine |
-//! | `share` | S3 | `DecryptionShare` + Chaum–Pedersen DLEQ |
+    //! | `ciphertext` | S2 | `Ciphertext` wire layout + AEAD + subgroup checks |
+    //! | `tpke` | S2, S4 | encrypt / validate / combine |
+    //! | `share` | S3 ✅ | `DecryptionShare` + `decryption_share` + `verify_share` + `verify_share_batch` |
 //! | `pvss` | S5–S6 | PVSS transcript + FFT verify + aggregate |
 //! | `dkg` | S6 | BFT-native DKG driver |
 //! | `pss` | S7 | Per-epoch zero-secret resharing |
@@ -50,7 +50,9 @@ pub mod committee;
 pub mod domain;
 pub mod error;
 pub mod params;
+pub mod share;
 pub mod tpke;
 
 pub use ciphertext::{Ciphertext, ShieldAad};
 pub use error::ShieldError;
+pub use share::{DecryptionShare, ShareProof};
