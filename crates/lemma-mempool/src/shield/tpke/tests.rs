@@ -219,9 +219,18 @@ fn validate_rejects_zero_w() {
 }
 
 #[test]
-fn from_bytes_rejects_off_subgroup_g2_point() {
-    // TODO(shield): replace with a genuine off-subgroup G2 vector at S5/S6.
-    // For now: zero point confirms the zero-guard fires (guard chain reachable).
+fn guard_chain_fires_on_degenerate_point() {
+    // Tests the zero-point branch of the guard chain in `validate`.
+    // The guard checks: is_zero() || !is_in_correct_subgroup_assuming_on_curve().
+    // A zero 𝔾₂ point triggers is_zero(), so the guard fires before the subgroup check.
+    //
+    // Coverage note (S2-subgroup debt, living-notes.md):
+    // A genuine off-subgroup 𝔾₂ vector (non-zero, on curve, wrong subgroup) cannot
+    // be constructed through arkworks' safe public API — cofactor clearing happens
+    // automatically on deserialization and in all standard constructors.
+    // The subgroup branch (`!is_in_correct_subgroup_assuming_on_curve()`) therefore
+    // requires a low-level unsafe construction or an externally-sourced raw byte vector.
+    // TODO(shield): add a genuine off-subgroup 𝔾₂ byte vector test — issue #3.
     use crate::shield::ciphertext::Ciphertext;
     let ct = Ciphertext {
         u: G1Affine::generator(),
@@ -229,8 +238,11 @@ fn from_bytes_rejects_off_subgroup_g2_point() {
         aad: test_aad(),
         payload: vec![0u8; 16],
     };
-    assert_eq!(validate(&ct).unwrap_err(), ShieldError::InvalidCiphertext,
-        "guard chain (zero + subgroup) must fire on degenerate points");
+    assert_eq!(
+        validate(&ct).unwrap_err(),
+        ShieldError::InvalidCiphertext,
+        "guard chain must fire on zero 𝔾₂ point (degenerate ciphertext)"
+    );
 }
 
 #[test]

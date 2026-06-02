@@ -32,3 +32,4 @@ sha2_v010 = { workspace = true }  # sha2 0.10 for arkworks hash-to-curve (DB-13)
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rand = { workspace = true }

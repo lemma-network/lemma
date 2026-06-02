@@ -140,6 +140,27 @@ pub enum ShieldError {
     #[error("decryption share is invalid: pairing check failed (§2.4)")]
     InvalidShare,
 
+    // ── S5: PVSS deal + verify ────────────────────────────────────────────────
+
+    /// A PVSS transcript failed the §4.3 constant-term tag, FFT share, or
+    /// batched multi-pairing correctness check.
+    ///
+    /// Returned by `pvss::verify` for any of:
+    /// - Tag mismatch: `e(F_0, û₁) ≠ e(G, û₂)` — dealer's constant-term
+    ///   commitment is inconsistent with the correctness tag (§4.3 step 1).
+    /// - FFT/share check: batched pairing `∏ e(-G,[α]Ŷ)·e([α]A,ek_i) ≠ 1`
+    ///   — an encrypted share `Ŷ_{i,ω}` is inconsistent with the polynomial
+    ///   commitment expansion (§4.3 step 4).
+    /// - Degenerate point: any `F_j`, `û₂`, or `Ŷ_{i,ω}` is the identity or
+    ///   off the prime-order subgroup (guard chain per S2 lesson).
+    /// - Tau mismatch: transcript `tau` does not match the expected epoch label
+    ///   (cross-epoch replay rejection, §4.1).
+    ///
+    /// A dealer whose transcript fails `verify` is subject to the share-withholding
+    /// slashing predicate (13-VALIDATOR_EPOCH §5.4). Never panics (§7.2).
+    #[error("PVSS transcript is invalid: tag/FFT/share pairing check failed (§4.3)")]
+    InvalidTranscript,
+
     /// A Chaum–Pedersen DLEQ proof failed verification (§3.2).
     ///
     /// One or both of the Schnorr checks failed:

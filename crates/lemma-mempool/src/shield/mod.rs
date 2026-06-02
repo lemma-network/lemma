@@ -38,7 +38,8 @@
     //! | `ciphertext` | S2 | `Ciphertext` wire layout + AEAD + subgroup checks |
     //! | `tpke` | S2, S4 | encrypt / validate / combine |
     //! | `share` | S3 ✅ | `DecryptionShare` + `decryption_share` + `verify_share` + `verify_share_batch` |
-//! | `pvss` | S5–S6 | PVSS transcript + FFT verify + aggregate |
+//! | `pvss` | S5 ✅ | `PvssTranscript` + `deal` + `verify` + `u1_generator` |
+//! | `pvss` | S6 | aggregate + recover_share (not yet implemented) |
 //! | `dkg` | S6 | BFT-native DKG driver |
 //! | `pss` | S7 | Per-epoch zero-secret resharing |
 //!
@@ -50,10 +51,12 @@ pub mod committee;
 pub mod domain;
 pub mod error;
 pub mod params;
+pub mod pvss;
 pub mod share;
 pub mod tpke;
 
 pub use ciphertext::{Ciphertext, ShieldAad};
 pub use error::ShieldError;
+pub use pvss::{deal, verify as verify_pvss, PvssTranscript};
 pub use share::{DecryptionShare, ShareProof};
 pub use tpke::{combine, CombineShare};

@@ -32,6 +32,17 @@ pub const DST_H2G2: &[u8] = b"LEMMA-SHIELD-H2G2-v1";
 /// Used for Fiat-Shamir hash-to-field challenges (15-SPEC §1.3).
 pub const DST_H2F: &[u8] = b"LEMMA-SHIELD-H2F-v1";
 
+/// Hash-to-𝔾₂ DST for the independent PVSS correctness-tag generator `û₁`.
+///
+/// `û₁` = `H_𝔾₂(DST_PVSS_U1)` — a second independent 𝔾₂ generator used
+/// only in PVSS: `û₂ = [a_0]û₁` is the correctness tag binding the dealer's
+/// constant term `a_0` (15-SHIELD_SPEC §4.1, FZ-4). Independence from the
+/// standard generator `H = 𝔾₂::generator()` is guaranteed by the distinct DST.
+///
+/// **Frozen FZ-4**: changing this DST is a hard fork — all existing PVSS
+/// transcripts become unverifiable. Never change without a governance process.
+pub const DST_PVSS_U1: &[u8] = b"LEMMA-SHIELD-PVSS-U1-v1";
+
 // ── HKDF constants (symmetric key derivation) ─────────────────────────────────
 
 /// HKDF-SHA256 salt (fixed, compiled in).

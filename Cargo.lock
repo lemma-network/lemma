@@ -1995,6 +1995,7 @@ dependencies = [
  "lemma-core",
  "lemma-crypto",
  "lemma-storage",
+ "rand 0.8.6",
  "schnorr_pok",
  "secret_sharing_and_dkg",
  "serde",
