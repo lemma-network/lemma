@@ -180,10 +180,10 @@ impl Stake {
     #[must_use]
     pub fn zero() -> Self {
         Self {
-            active:           Amount::zero(),
-            pending_active:   Amount::zero(),
+            active: Amount::zero(),
+            pending_active: Amount::zero(),
             pending_inactive: Vec::new(),
-            inactive:         Amount::zero(),
+            inactive: Amount::zero(),
         }
     }
 

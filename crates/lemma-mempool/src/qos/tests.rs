@@ -9,7 +9,9 @@
 
 use lemma_core::{amount::DROPS_PER_LEM, Amount};
 
-use crate::qos::{priority_score, stake_bonus, saturating_u128_to_u64, MAX_STAKE_BONUS, STAKE_UNIT};
+use crate::qos::{
+    priority_score, saturating_u128_to_u64, stake_bonus, MAX_STAKE_BONUS, STAKE_UNIT,
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -72,7 +74,10 @@ fn stake_bonus_above_cap_returns_max() {
 fn stake_bonus_max_u128_does_not_panic() {
     // u128::MAX stake → saturates, returns MAX_STAKE_BONUS.
     let p = stake_bonus(Amount::from_drop(u128::MAX));
-    assert_eq!(p, MAX_STAKE_BONUS, "u128::MAX stake must saturate to cap, got {p}");
+    assert_eq!(
+        p, MAX_STAKE_BONUS,
+        "u128::MAX stake must saturate to cap, got {p}"
+    );
 }
 
 // ── saturating_u128_to_u64 — unit tests ──────────────────────────────────────
@@ -138,7 +143,7 @@ fn priority_sub_unit_stake_adds_no_bonus() {
 #[test]
 fn priority_higher_gas_price_yields_higher_priority() {
     let stake = one_lem();
-    let low  = priority_score(Amount::from_drop(100), stake);
+    let low = priority_score(Amount::from_drop(100), stake);
     let high = priority_score(Amount::from_drop(200), stake);
     assert!(high > low, "higher gas_price must yield higher priority");
 }
@@ -154,9 +159,15 @@ fn priority_higher_stake_yields_higher_or_equal_priority() {
 #[test]
 fn priority_stake_at_cap_not_higher_than_above_cap() {
     let gas = Amount::from_drop(1_000);
-    let at_cap    = priority_score(gas, Amount::from_drop(MAX_STAKE_BONUS as u128 * STAKE_UNIT));
-    let above_cap = priority_score(gas, Amount::from_drop(MAX_STAKE_BONUS as u128 * STAKE_UNIT * 2));
-    assert_eq!(at_cap, above_cap, "above-cap stake must not increase priority beyond cap");
+    let at_cap = priority_score(gas, Amount::from_drop(MAX_STAKE_BONUS as u128 * STAKE_UNIT));
+    let above_cap = priority_score(
+        gas,
+        Amount::from_drop(MAX_STAKE_BONUS as u128 * STAKE_UNIT * 2),
+    );
+    assert_eq!(
+        at_cap, above_cap,
+        "above-cap stake must not increase priority beyond cap"
+    );
 }
 
 // ── Ordering guarantees ───────────────────────────────────────────────────────
@@ -165,16 +176,22 @@ fn priority_stake_at_cap_not_higher_than_above_cap() {
 fn priority_same_gas_staked_ranks_higher_than_unstaked() {
     let gas = Amount::from_drop(1_000);
     let unstaked = priority_score(gas, Amount::zero());
-    let staked   = priority_score(gas, one_lem());
-    assert!(staked > unstaked, "staked account must rank higher when gas_price is equal");
+    let staked = priority_score(gas, one_lem());
+    assert!(
+        staked > unstaked,
+        "staked account must rank higher when gas_price is equal"
+    );
 }
 
 #[test]
 fn priority_same_stake_higher_gas_price_wins() {
     let stake = lem(10);
-    let low_gas  = priority_score(Amount::from_drop(100), stake);
+    let low_gas = priority_score(Amount::from_drop(100), stake);
     let high_gas = priority_score(Amount::from_drop(200), stake);
-    assert!(high_gas > low_gas, "higher gas_price must win when stake is equal");
+    assert!(
+        high_gas > low_gas,
+        "higher gas_price must win when stake is equal"
+    );
 }
 
 #[test]
@@ -209,7 +226,10 @@ fn priority_u128_max_gas_does_not_panic() {
 #[test]
 fn priority_u128_max_stake_does_not_panic() {
     let p = priority_score(Amount::zero(), Amount::from_drop(u128::MAX));
-    assert_eq!(p, MAX_STAKE_BONUS, "u128::MAX stake must saturate to MAX_STAKE_BONUS");
+    assert_eq!(
+        p, MAX_STAKE_BONUS,
+        "u128::MAX stake must saturate to MAX_STAKE_BONUS"
+    );
 }
 
 #[test]
@@ -225,5 +245,9 @@ fn priority_near_u64_max_gas_plus_bonus_saturates() {
     // gas near u64::MAX + any bonus should saturate, not wrap.
     let gas_near_max = Amount::from_drop(u64::MAX as u128 - 1);
     let p = priority_score(gas_near_max, one_lem());
-    assert_eq!(p, u64::MAX, "near-max gas + bonus must saturate to u64::MAX");
+    assert_eq!(
+        p,
+        u64::MAX,
+        "near-max gas + bonus must saturate to u64::MAX"
+    );
 }

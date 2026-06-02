@@ -72,7 +72,10 @@ pub(crate) fn check_gc_boundary(block_round: u64, gc_round: u64) -> Result<(), C
     if block_round == 0 || block_round > gc_round {
         Ok(())
     } else {
-        Err(ConsensusError::BelowGcBoundary { round: block_round, gc_round })
+        Err(ConsensusError::BelowGcBoundary {
+            round: block_round,
+            gc_round,
+        })
     }
 }
 
@@ -154,14 +157,16 @@ pub(crate) fn check_no_equivocation(
 /// Used by `Dag::insert` to build the `waiting_for` reverse index for
 /// suspended blocks (rule 4). Separate from `check_*` because rule 4 requires
 /// ALL missing ancestors (not just the first) to build the wakeup index.
-pub(crate) fn collect_missing_ancestors<F>(
-    block: &DagBlock,
-    contains: F,
-) -> Vec<DagBlockRef>
+pub(crate) fn collect_missing_ancestors<F>(block: &DagBlock, contains: F) -> Vec<DagBlockRef>
 where
     F: Fn(&DagBlockRef) -> bool,
 {
-    block.ancestors.iter().filter(|a| !contains(a)).copied().collect()
+    block
+        .ancestors
+        .iter()
+        .filter(|a| !contains(a))
+        .copied()
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

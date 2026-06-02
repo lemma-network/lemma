@@ -130,11 +130,7 @@ impl StakeAggregator {
     /// - `Err(ConsensusError::StakeOverflow)` — `checked_add` overflowed
     ///   `u128`. Indicates a misconfigured or Byzantine validator set
     ///   (AGENTS.md §7.4).
-    pub fn add(
-        &mut self,
-        author: Address,
-        power: VotingPower,
-    ) -> Result<bool, ConsensusError> {
+    pub fn add(&mut self, author: Address, power: VotingPower) -> Result<bool, ConsensusError> {
         // Idempotency guard: already counted → return current state, no change.
         if self.counted.contains(&author) {
             return Ok(self.reached);
@@ -152,8 +148,7 @@ impl StakeAggregator {
         // non-decreasing within a round — only `clear` can reset it. A threshold
         // crossed once stays crossed until the next `clear` (spec §1.1).
         if !self.reached {
-            self.reached =
-                exceeds_threshold(self.accumulated, self.total_power, self.threshold);
+            self.reached = exceeds_threshold(self.accumulated, self.total_power, self.threshold);
         }
 
         Ok(self.reached)

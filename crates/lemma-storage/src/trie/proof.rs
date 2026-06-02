@@ -117,9 +117,7 @@ impl ProofNode {
                 children: *children,
                 value: value.clone(),
             },
-            ProofNode::Extension { prefix, child } => {
-                TrieNode::extension(prefix.clone(), *child)
-            }
+            ProofNode::Extension { prefix, child } => TrieNode::extension(prefix.clone(), *child),
             ProofNode::Leaf { path, value } => TrieNode::leaf(path.clone(), value.clone()),
         }
     }
@@ -227,9 +225,7 @@ impl MerkleProof {
     /// `nodes[0..i]` (i.e., the depth of `nodes[i]` in the forward trie walk).
     ///
     /// `hashes[i]` = `nodes[i].hash()`.
-    fn compute_depths_and_hashes(
-        &self,
-    ) -> Result<(Vec<usize>, Vec<Hash>), StorageError> {
+    fn compute_depths_and_hashes(&self) -> Result<(Vec<usize>, Vec<Hash>), StorageError> {
         let mut depths = Vec::with_capacity(self.nodes.len());
         let mut hashes = Vec::with_capacity(self.nodes.len());
         let mut d = 0usize;
@@ -270,25 +266,30 @@ impl MerkleProof {
         match parent {
             ProofNode::Branch { children, .. } => {
                 // `depth` is the nibble position this Branch routes on.
-                let nibble = path
-                    .get(depth)
-                    .ok_or_else(|| StorageError::InvalidProof { key: key_hex.to_string() })?
-                    as usize;
+                let nibble = path.get(depth).ok_or_else(|| StorageError::InvalidProof {
+                    key: key_hex.to_string(),
+                })? as usize;
                 let actual = children[nibble].ok_or_else(|| StorageError::InvalidProof {
                     key: key_hex.to_string(),
                 })?;
                 if actual != expected_child_hash {
-                    return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                    return Err(StorageError::InvalidProof {
+                        key: key_hex.to_string(),
+                    });
                 }
             }
             ProofNode::Extension { child, .. } => {
                 if *child != expected_child_hash {
-                    return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                    return Err(StorageError::InvalidProof {
+                        key: key_hex.to_string(),
+                    });
                 }
             }
             ProofNode::Leaf { .. } => {
                 // A Leaf can never parent another node.
-                return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                return Err(StorageError::InvalidProof {
+                    key: key_hex.to_string(),
+                });
             }
         }
         Ok(())
@@ -322,7 +323,9 @@ impl MerkleProof {
         let last = self
             .nodes
             .last()
-            .ok_or_else(|| StorageError::InvalidProof { key: key_hex.to_string() })?;
+            .ok_or_else(|| StorageError::InvalidProof {
+                key: key_hex.to_string(),
+            })?;
 
         // The remaining key path at the terminal node's depth.
         let remaining = full_path.skip(terminal_depth);
@@ -330,51 +333,85 @@ impl MerkleProof {
         match (last, &self.value) {
             // Inclusion via Leaf: stored path must equal the remaining key
             // path at this depth; value must match.
-            (ProofNode::Leaf { path: leaf_path, value: leaf_val }, Some(claimed)) => {
+            (
+                ProofNode::Leaf {
+                    path: leaf_path,
+                    value: leaf_val,
+                },
+                Some(claimed),
+            ) => {
                 if leaf_path != &remaining || leaf_val != claimed {
-                    return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                    return Err(StorageError::InvalidProof {
+                        key: key_hex.to_string(),
+                    });
                 }
             }
             // Inclusion via Branch value: path was exhausted at the branch.
             // CORR-2 / SEC-2: Also verify the path is actually exhausted here.
             // If remaining is non-empty, the Branch is not the correct terminal
             // for inclusion — the proof is forged or truncated.
-            (ProofNode::Branch { value: Some(branch_val), .. }, Some(claimed)) => {
+            (
+                ProofNode::Branch {
+                    value: Some(branch_val),
+                    ..
+                },
+                Some(claimed),
+            ) => {
                 if !remaining.is_empty() {
                     // Path not exhausted — Branch value inclusion is invalid here.
-                    return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                    return Err(StorageError::InvalidProof {
+                        key: key_hex.to_string(),
+                    });
                 }
                 if branch_val != claimed {
-                    return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                    return Err(StorageError::InvalidProof {
+                        key: key_hex.to_string(),
+                    });
                 }
             }
             // Non-inclusion via Leaf: the leaf's path diverges from ours —
             // the key is absent.  If they were equal, it would be inclusion.
-            (ProofNode::Leaf { path: leaf_path, .. }, None) => {
+            (
+                ProofNode::Leaf {
+                    path: leaf_path, ..
+                },
+                None,
+            ) => {
                 if leaf_path == &remaining {
                     // Leaf path matches but value claimed None → contradiction.
-                    return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                    return Err(StorageError::InvalidProof {
+                        key: key_hex.to_string(),
+                    });
                 }
             }
             // Non-inclusion via Branch: either the path is exhausted with no
             // value stored here, or the child slot at the key's next nibble is
             // empty.  SEC-2: Verify the specific sub-case explicitly — the hash
             // chain confirms the Branch content; we verify the claim is coherent.
-            (ProofNode::Branch { value: branch_val, children }, None) => {
+            (
+                ProofNode::Branch {
+                    value: branch_val,
+                    children,
+                },
+                None,
+            ) => {
                 if remaining.is_empty() {
                     // Path exhausted — valid only if no value is stored here.
                     if branch_val.is_some() {
-                        return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                        return Err(StorageError::InvalidProof {
+                            key: key_hex.to_string(),
+                        });
                     }
                 } else {
                     // Path not exhausted — valid only if the child slot is empty.
-                    let nibble = remaining
-                        .get(0)
-                        .ok_or_else(|| StorageError::InvalidProof { key: key_hex.to_string() })?
-                        as usize;
+                    let nibble = remaining.get(0).ok_or_else(|| StorageError::InvalidProof {
+                        key: key_hex.to_string(),
+                    })? as usize;
                     if children[nibble].is_some() {
                         // Child exists but was omitted — truncated/forged proof.
-                        return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                        return Err(StorageError::InvalidProof {
+                            key: key_hex.to_string(),
+                        });
                     }
                 }
             }
@@ -385,12 +422,16 @@ impl MerkleProof {
             // proof is truncated/forged.
             (ProofNode::Extension { prefix, .. }, None) => {
                 if remaining.starts_with(prefix) {
-                    return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                    return Err(StorageError::InvalidProof {
+                        key: key_hex.to_string(),
+                    });
                 }
             }
             // All other combos are structurally invalid.
             _ => {
-                return Err(StorageError::InvalidProof { key: key_hex.to_string() });
+                return Err(StorageError::InvalidProof {
+                    key: key_hex.to_string(),
+                });
             }
         }
         Ok(())

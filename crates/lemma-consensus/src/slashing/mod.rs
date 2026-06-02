@@ -101,9 +101,7 @@ pub enum SlashError {
     /// A fraction above 100% would underflow `entry.initial_balance` for
     /// `pending_inactive` entries. Rejected at function entry before any
     /// state mutation.
-    #[error(
-        "slash fraction {fraction_bps} bps exceeds maximum {MAX_FRACTION_BPS} bps (100%)"
-    )]
+    #[error("slash fraction {fraction_bps} bps exceeds maximum {MAX_FRACTION_BPS} bps (100%)")]
     InvalidFraction {
         /// The offending fraction value.
         fraction_bps: u16,
@@ -209,9 +207,15 @@ pub fn slash(
     // total supply (~10²⁷ Drop at genesis).
     let intended = validator_power
         .checked_mul(u128::from(fraction_bps))
-        .map_err(|e| SlashError::ComputeOverflow { address: addr, source: e })?
+        .map_err(|e| SlashError::ComputeOverflow {
+            address: addr,
+            source: e,
+        })?
         .checked_div(u128::from(MAX_FRACTION_BPS))
-        .map_err(|e| SlashError::ComputeOverflow { address: addr, source: e })?;
+        .map_err(|e| SlashError::ComputeOverflow {
+            address: addr,
+            source: e,
+        })?;
 
     // ── Step 2: Compute active-stake deduction (local, no mutation yet) ───────
     //
@@ -231,7 +235,10 @@ pub fn slash(
             .self_stake
             .active
             .checked_sub(intended)
-            .map_err(|e| SlashError::ApplyOverflow { address: addr, source: e })?;
+            .map_err(|e| SlashError::ApplyOverflow {
+                address: addr,
+                source: e,
+            })?;
     }
 
     // ── Step 3: Compute per-entry deductions (local, no mutation yet) ─────────
@@ -258,23 +265,40 @@ pub fn slash(
         let entry_slash = entry
             .initial_balance
             .checked_mul(u128::from(fraction_bps))
-            .map_err(|e| SlashError::ApplyOverflow { address: addr, source: e })?
+            .map_err(|e| SlashError::ApplyOverflow {
+                address: addr,
+                source: e,
+            })?
             .checked_div(u128::from(MAX_FRACTION_BPS))
-            .map_err(|e| SlashError::ApplyOverflow { address: addr, source: e })?;
+            .map_err(|e| SlashError::ApplyOverflow {
+                address: addr,
+                source: e,
+            })?;
         let new_balance = entry
             .initial_balance
             .checked_sub(entry_slash)
-            .map_err(|e| SlashError::ApplyOverflow { address: addr, source: e })?;
-        from_pending = from_pending
-            .checked_add(entry_slash)
-            .map_err(|e| SlashError::ApplyOverflow { address: addr, source: e })?;
+            .map_err(|e| SlashError::ApplyOverflow {
+                address: addr,
+                source: e,
+            })?;
+        from_pending =
+            from_pending
+                .checked_add(entry_slash)
+                .map_err(|e| SlashError::ApplyOverflow {
+                    address: addr,
+                    source: e,
+                })?;
         entry_deltas.push((i, new_balance));
     }
 
     // ── Compute total burned (last fallible op before commit) ─────────────────
-    let total_burned = from_active
-        .checked_add(from_pending)
-        .map_err(|e| SlashError::ApplyOverflow { address: addr, source: e })?;
+    let total_burned =
+        from_active
+            .checked_add(from_pending)
+            .map_err(|e| SlashError::ApplyOverflow {
+                address: addr,
+                source: e,
+            })?;
 
     // ── COMMIT: all computation succeeded — apply mutations ───────────────────
     //

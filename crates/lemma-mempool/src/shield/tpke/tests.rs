@@ -10,20 +10,25 @@ use ark_ec::{AffineRepr, CurveGroup};
 
 use super::{combine, encrypt, hash_to_g2, validate, validate_batch, CombineShare};
 use crate::shield::{
-    ciphertext::ShieldAad,
-    domain::ShieldDomain,
-    params::MAX_SHIELD_PAYLOAD_BYTES,
-    ShieldError,
+    ciphertext::ShieldAad, domain::ShieldDomain, params::MAX_SHIELD_PAYLOAD_BYTES, ShieldError,
 };
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
 fn test_aad() -> ShieldAad {
-    ShieldAad { chain_id: 1, epoch: 10, submitter_nonce: 42 }
+    ShieldAad {
+        chain_id: 1,
+        epoch: 10,
+        submitter_nonce: 42,
+    }
 }
 
 fn test_aad2() -> ShieldAad {
-    ShieldAad { chain_id: 2, epoch: 10, submitter_nonce: 0 }
+    ShieldAad {
+        chain_id: 2,
+        epoch: 10,
+        submitter_nonce: 0,
+    }
 }
 
 fn test_y() -> G1Affine {
@@ -62,7 +67,10 @@ fn hash_to_g2_differs_for_different_aad() {
 #[test]
 fn hash_to_g2_output_is_in_correct_subgroup() {
     let p = hash_to_g2(&G1Affine::generator(), &test_aad()).unwrap();
-    assert!(p.is_in_correct_subgroup_assuming_on_curve(), "hash_to_g2 output must be in G2 subgroup");
+    assert!(
+        p.is_in_correct_subgroup_assuming_on_curve(),
+        "hash_to_g2 output must be in G2 subgroup"
+    );
 }
 
 // ── encrypt → validate roundtrip ─────────────────────────────────────────────
@@ -70,7 +78,10 @@ fn hash_to_g2_output_is_in_correct_subgroup() {
 #[test]
 fn encrypt_produces_valid_ciphertext_empty_msg() {
     let ct = encrypt(&test_y(), test_aad(), b"").unwrap();
-    assert!(validate(&ct).is_ok(), "empty-message ciphertext must validate");
+    assert!(
+        validate(&ct).is_ok(),
+        "empty-message ciphertext must validate"
+    );
 }
 
 #[test]
@@ -99,21 +110,33 @@ fn encrypt_two_calls_produce_different_ciphertexts() {
 fn validate_rejects_tampered_u() {
     let mut ct = encrypt(&test_y(), test_aad(), b"test").unwrap();
     ct.u = (-G1Affine::generator().into_group()).into_affine();
-    assert_eq!(validate(&ct).unwrap_err(), ShieldError::InvalidCiphertext, "tampered U must fail");
+    assert_eq!(
+        validate(&ct).unwrap_err(),
+        ShieldError::InvalidCiphertext,
+        "tampered U must fail"
+    );
 }
 
 #[test]
 fn validate_rejects_tampered_w() {
     let mut ct = encrypt(&test_y(), test_aad(), b"test").unwrap();
     ct.w = G2Affine::generator();
-    assert_eq!(validate(&ct).unwrap_err(), ShieldError::InvalidCiphertext, "tampered W must fail");
+    assert_eq!(
+        validate(&ct).unwrap_err(),
+        ShieldError::InvalidCiphertext,
+        "tampered W must fail"
+    );
 }
 
 #[test]
 fn validate_rejects_tampered_aad() {
     let mut ct = encrypt(&test_y(), test_aad(), b"test").unwrap();
     ct.aad.epoch += 1;
-    assert_eq!(validate(&ct).unwrap_err(), ShieldError::InvalidCiphertext, "tampered aad must fail");
+    assert_eq!(
+        validate(&ct).unwrap_err(),
+        ShieldError::InvalidCiphertext,
+        "tampered aad must fail"
+    );
 }
 
 #[test]
@@ -125,7 +148,10 @@ fn validate_rejects_zero_points() {
         aad: test_aad(),
         payload: vec![0u8; 32],
     };
-    assert!(validate(&ct).is_err(), "ciphertext with zero points must fail");
+    assert!(
+        validate(&ct).is_err(),
+        "ciphertext with zero points must fail"
+    );
 }
 
 // ── Payload size guard ────────────────────────────────────────────────────────
@@ -135,7 +161,10 @@ fn encrypt_rejects_oversized_payload() {
     let oversized = vec![0u8; MAX_SHIELD_PAYLOAD_BYTES + 1];
     assert_eq!(
         encrypt(&test_y(), test_aad(), &oversized).unwrap_err(),
-        ShieldError::PayloadTooLarge { len: MAX_SHIELD_PAYLOAD_BYTES + 1, max: MAX_SHIELD_PAYLOAD_BYTES }
+        ShieldError::PayloadTooLarge {
+            len: MAX_SHIELD_PAYLOAD_BYTES + 1,
+            max: MAX_SHIELD_PAYLOAD_BYTES
+        }
     );
 }
 
@@ -162,7 +191,16 @@ fn validate_batch_single_valid_ciphertext() {
 fn validate_batch_multiple_valid_ciphertexts() {
     let ct1 = encrypt(&test_y(), test_aad(), b"msg one").unwrap();
     let ct2 = encrypt(&test_y(), test_aad2(), b"msg two").unwrap();
-    let ct3 = encrypt(&test_y(), ShieldAad { chain_id: 3, epoch: 1, submitter_nonce: 0 }, b"three").unwrap();
+    let ct3 = encrypt(
+        &test_y(),
+        ShieldAad {
+            chain_id: 3,
+            epoch: 1,
+            submitter_nonce: 0,
+        },
+        b"three",
+    )
+    .unwrap();
     assert!(validate_batch(&[ct1, ct2, ct3]).is_ok());
 }
 
@@ -182,7 +220,11 @@ fn validate_batch_rejects_when_one_ciphertext_is_tampered() {
 fn validate_batch_matches_individual_validate_for_valid_set() {
     let cts: Vec<_> = (0..4)
         .map(|i| {
-            let aad = ShieldAad { chain_id: 1, epoch: 1, submitter_nonce: i };
+            let aad = ShieldAad {
+                chain_id: 1,
+                epoch: 1,
+                submitter_nonce: i,
+            };
             encrypt(&test_y(), aad, b"message").unwrap()
         })
         .collect();
@@ -282,7 +324,10 @@ fn fiat_shamir_challenges_differ_for_different_ciphertext_order() {
     let ct2 = encrypt(&test_y(), test_aad2(), b"second").unwrap();
     let fwd = fiat_shamir_challenges(&[ct1.clone(), ct2.clone()]).unwrap();
     let rev = fiat_shamir_challenges(&[ct2, ct1]).unwrap();
-    assert_ne!(fwd, rev, "different order must produce different challenges");
+    assert_ne!(
+        fwd, rev,
+        "different order must produce different challenges"
+    );
 }
 
 // ── combine (S4) ──────────────────────────────────────────────────────────────
@@ -312,19 +357,21 @@ fn make_domain(w: u64) -> ShieldDomain {
 
 /// ValidatorSet from (address_byte, share_count) pairs — mirrors committee/tests.rs.
 fn vset_for_combine(epoch: u64, entries: &[(u8, u64)]) -> lemma_core::validator_set::ValidatorSet {
-    use std::collections::BTreeMap;
+    use crate::shield::params::WEIGHT_GRANULARITY_DROP;
     use lemma_core::{
         amount::Amount,
         validator::{ConsensusKey, VotingPower},
         validator_set::{Member, ValidatorSet},
     };
-    use crate::shield::params::WEIGHT_GRANULARITY_DROP;
+    use std::collections::BTreeMap;
     let mut members = BTreeMap::new();
     let mut total_power = Amount::from_drop(0);
     for &(byte, shares) in entries {
         let drop_amt = u128::from(shares) * WEIGHT_GRANULARITY_DROP;
         let power = VotingPower(Amount::from_drop(drop_amt));
-        total_power = total_power.checked_add(Amount::from_drop(drop_amt)).unwrap();
+        total_power = total_power
+            .checked_add(Amount::from_drop(drop_amt))
+            .unwrap();
         members.insert(
             lemma_core::address::Address::from_public_key(&[byte; 32]),
             Member {
@@ -333,7 +380,11 @@ fn vset_for_combine(epoch: u64, entries: &[(u8, u64)]) -> lemma_core::validator_
             },
         );
     }
-    ValidatorSet { epoch, members, total_power }
+    ValidatorSet {
+        epoch,
+        members,
+        total_power,
+    }
 }
 
 /// Single-validator roundtrip. Committee has `committee_w` total shares;
@@ -352,7 +403,10 @@ fn roundtrip_single(
     let ct = encrypt(&y, aad, msg).unwrap();
     let shares = vec![CombineShare {
         validator_index: 0,
-        z_shares: contributing.iter().map(|&id| (id, z_share(a0, a1, id))).collect(),
+        z_shares: contributing
+            .iter()
+            .map(|&id| (id, z_share(a0, a1, id)))
+            .collect(),
     }];
     let vs = vset_for_combine(1, &[(1u8, committee_w)]);
     let committee = ShieldCommittee::from_validator_set(&vs)?;
@@ -392,7 +446,15 @@ fn roundtrip_two(
 fn combine_full_committee_recovers_plaintext() {
     // W=4 (minimum), f(x)=7 (constant). All 4 shares. 4 ≥ p+1=3.
     let msg = b"hello threshold";
-    let res = roundtrip_single(4, Fr::from(7u64), Fr::from(0u64), &[1, 2, 3, 4], msg, test_aad()).unwrap();
+    let res = roundtrip_single(
+        4,
+        Fr::from(7u64),
+        Fr::from(0u64),
+        &[1, 2, 3, 4],
+        msg,
+        test_aad(),
+    )
+    .unwrap();
     assert_eq!(res, msg);
 }
 
@@ -400,7 +462,15 @@ fn combine_full_committee_recovers_plaintext() {
 fn combine_linear_poly_recovers_plaintext() {
     // W=4, f(x) = 3 + 2x. All 4 shares.
     let msg = b"linear polynomial";
-    let res = roundtrip_single(4, Fr::from(3u64), Fr::from(2u64), &[1, 2, 3, 4], msg, test_aad()).unwrap();
+    let res = roundtrip_single(
+        4,
+        Fr::from(3u64),
+        Fr::from(2u64),
+        &[1, 2, 3, 4],
+        msg,
+        test_aad(),
+    )
+    .unwrap();
     assert_eq!(res, msg);
 }
 
@@ -408,7 +478,15 @@ fn combine_linear_poly_recovers_plaintext() {
 fn combine_two_validators_split_shares() {
     // W=4: V0={1,2,3}, V1={4}. Total=4 ≥ p+1=3.
     let msg = b"split across validators";
-    let res = roundtrip_two(Fr::from(11u64), Fr::from(5u64), &[1, 2, 3], &[4], msg, test_aad()).unwrap();
+    let res = roundtrip_two(
+        Fr::from(11u64),
+        Fr::from(5u64),
+        &[1, 2, 3],
+        &[4],
+        msg,
+        test_aad(),
+    )
+    .unwrap();
     assert_eq!(res, msg);
 }
 
@@ -416,7 +494,15 @@ fn combine_two_validators_split_shares() {
 fn combine_succeeds_at_exactly_p_plus_1_weight() {
     // W=6: t=1, p=4, p+1=5. Contribute exactly 5 shares (minimum threshold).
     let msg = b"exactly at threshold";
-    let res = roundtrip_single(6, Fr::from(13u64), Fr::from(3u64), &[1, 2, 3, 4, 5], msg, test_aad()).unwrap();
+    let res = roundtrip_single(
+        6,
+        Fr::from(13u64),
+        Fr::from(3u64),
+        &[1, 2, 3, 4, 5],
+        msg,
+        test_aad(),
+    )
+    .unwrap();
     assert_eq!(res, msg);
 }
 
@@ -464,19 +550,32 @@ fn combine_rejects_tampered_payload() {
     let domain = make_domain(4);
     let y = threshold_y(a0);
     let mut ct = encrypt(&y, test_aad(), b"secret msg").unwrap();
-    if let Some(b) = ct.payload.first_mut() { *b ^= 0xFF; }
+    if let Some(b) = ct.payload.first_mut() {
+        *b ^= 0xFF;
+    }
     let shares = vec![CombineShare {
         validator_index: 0,
         z_shares: (1u16..=4).map(|id| (id, z_share(a0, a1, id))).collect(),
     }];
     let vs = vset_for_combine(1, &[(1u8, 4u64)]);
     let committee = ShieldCommittee::from_validator_set(&vs).unwrap();
-    assert_eq!(combine(&ct, &shares, &committee, &domain).unwrap_err(), ShieldError::AeadFailure);
+    assert_eq!(
+        combine(&ct, &shares, &committee, &domain).unwrap_err(),
+        ShieldError::AeadFailure
+    );
 }
 
 #[test]
 fn combine_empty_message_roundtrip() {
-    let res = roundtrip_single(4, Fr::from(5u64), Fr::from(0u64), &[1, 2, 3, 4], b"", test_aad()).unwrap();
+    let res = roundtrip_single(
+        4,
+        Fr::from(5u64),
+        Fr::from(0u64),
+        &[1, 2, 3, 4],
+        b"",
+        test_aad(),
+    )
+    .unwrap();
     assert_eq!(res, b"");
 }
 
@@ -485,17 +584,26 @@ fn combine_empty_message_roundtrip() {
 #[test]
 fn lagrange_coeffs_for_rejects_zero_id() {
     let domain = make_domain(4);
-    assert!(matches!(domain.lagrange_coeffs_for(vec![0u16, 1, 2]).unwrap_err(), ShieldError::Lagrange(_)));
+    assert!(matches!(
+        domain.lagrange_coeffs_for(vec![0u16, 1, 2]).unwrap_err(),
+        ShieldError::Lagrange(_)
+    ));
 }
 
 #[test]
 fn lagrange_coeffs_for_rejects_out_of_range_id() {
     let domain = make_domain(4); // W=4; ID 5 > W
-    assert!(matches!(domain.lagrange_coeffs_for(vec![1, 2, 5]).unwrap_err(), ShieldError::Lagrange(_)));
+    assert!(matches!(
+        domain.lagrange_coeffs_for(vec![1, 2, 5]).unwrap_err(),
+        ShieldError::Lagrange(_)
+    ));
 }
 
 #[test]
 fn lagrange_coeffs_for_rejects_duplicates() {
     let domain = make_domain(4);
-    assert!(matches!(domain.lagrange_coeffs_for(vec![1, 2, 2]).unwrap_err(), ShieldError::Lagrange(_)));
+    assert!(matches!(
+        domain.lagrange_coeffs_for(vec![1, 2, 2]).unwrap_err(),
+        ShieldError::Lagrange(_)
+    ));
 }

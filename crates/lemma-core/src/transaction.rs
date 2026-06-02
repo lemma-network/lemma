@@ -121,7 +121,10 @@ impl TxType {
     /// `Transfer`, `Stake`, and `Unstake` may have empty `data`.
     #[must_use]
     pub fn requires_calldata(&self) -> bool {
-        matches!(self, Self::ContractCall | Self::ContractDeploy | Self::GovernanceVote)
+        matches!(
+            self,
+            Self::ContractCall | Self::ContractDeploy | Self::GovernanceVote
+        )
     }
 }
 

@@ -73,12 +73,12 @@ impl QuorumCert {
     /// `lemma_consensus::cert::verify_quorum_cert` to verify the cert
     /// against a validator set.
     #[must_use]
-    pub fn new(
-        height: u64,
-        header_digest: Hash,
-        signers: BTreeMap<Address, Signature>,
-    ) -> Self {
-        Self { height, header_digest, signers }
+    pub fn new(height: u64, header_digest: Hash, signers: BTreeMap<Address, Signature>) -> Self {
+        Self {
+            height,
+            header_digest,
+            signers,
+        }
     }
 
     /// Return the number of distinct signers in this certificate.

@@ -26,7 +26,7 @@ use crate::{
     pulse::{
         committer::{try_decide, LeaderStatus},
         leader::LeaderSchedule,
-        linearizer::{commit_timestamp, stake_weighted_median, Linearizer, linearize_sub_dag},
+        linearizer::{commit_timestamp, linearize_sub_dag, stake_weighted_median, Linearizer},
     },
 };
 
@@ -45,9 +45,19 @@ fn vset4() -> ValidatorSet {
     let total = Amount::from_drop(40);
     let mut members = BTreeMap::new();
     for i in 1u8..=4 {
-        members.insert(addr(i), Member { consensus_pubkey: dummy_key(), power });
+        members.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch: 1, members, total_power: total }
+    ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: total,
+    }
 }
 
 fn block(round: u64, author_n: u8, ancestors: Vec<DagBlockRef>, ts_ms: u64) -> DagBlock {
@@ -84,7 +94,13 @@ fn build_wave(
     ts_base: u64,
 ) -> (DagBlockRef, Vec<DagBlockRef>, Vec<DagBlockRef>) {
     let l_refs: Vec<DagBlockRef> = (1u8..=4)
-        .map(|a| insert_ok(dag, block(l, a, prev_refs.clone(), ts_base + a as u64), vset))
+        .map(|a| {
+            insert_ok(
+                dag,
+                block(l, a, prev_refs.clone(), ts_base + a as u64),
+                vset,
+            )
+        })
         .collect();
     let leader_ref = l_refs[0];
     let v_refs: Vec<DagBlockRef> = (1u8..=4)
@@ -153,15 +169,21 @@ fn median_exact_half_uses_upper() {
     // Stake 20 at ts=100, stake 20 at ts=200. Total=40, threshold=20.
     // Walk: ts=100 accum=20 (NOT > 20), ts=200 accum=40 (>20) → 200.
     let samples = vec![(20u128, 100u64), (20u128, 200u64)];
-    assert_eq!(stake_weighted_median(&samples).unwrap(), 200,
-        "exactly half must use upper half (strict > threshold)");
+    assert_eq!(
+        stake_weighted_median(&samples).unwrap(),
+        200,
+        "exactly half must use upper half (strict > threshold)"
+    );
 }
 
 #[test]
 fn median_is_deterministic_regardless_of_input_order() {
     let s1 = vec![(10u128, 300u64), (10u128, 100u64), (10u128, 200u64)];
     let s2 = vec![(10u128, 100u64), (10u128, 200u64), (10u128, 300u64)];
-    assert_eq!(stake_weighted_median(&s1).unwrap(), stake_weighted_median(&s2).unwrap());
+    assert_eq!(
+        stake_weighted_median(&s1).unwrap(),
+        stake_weighted_median(&s2).unwrap()
+    );
 }
 
 // ── commit_timestamp ──────────────────────────────────────────────────────────
@@ -171,8 +193,11 @@ fn commit_timestamp_genesis_round_returns_last_ts() {
     let vset = vset4();
     let dag = Dag::new(1);
     let leader = block(0, 1, vec![], 9_999);
-    assert_eq!(commit_timestamp(&leader, 5_000, &dag, &vset).unwrap(), 5_000,
-        "genesis round (no L-1 parents) must return last_commit_ts");
+    assert_eq!(
+        commit_timestamp(&leader, 5_000, &dag, &vset).unwrap(),
+        5_000,
+        "genesis round (no L-1 parents) must return last_commit_ts"
+    );
 }
 
 #[test]
@@ -189,7 +214,10 @@ fn commit_timestamp_monotonic_clamp() {
     // Round 1 leader: parents at round 0 (median ~ 100 ms).
     let leader_round1 = block(1, 1, r0, 999);
     let ts = commit_timestamp(&leader_round1, 5_000, &dag, &vset).unwrap();
-    assert_eq!(ts, 5_000, "median (100) < last_commit_ts (5000) → clamp to 5000");
+    assert_eq!(
+        ts, 5_000,
+        "median (100) < last_commit_ts (5000) → clamp to 5000"
+    );
 }
 
 #[test]
@@ -205,7 +233,10 @@ fn commit_timestamp_returns_weighted_median_of_parents() {
     }
     let r0_refs: Vec<DagBlockRef> = (1u8..=4)
         .map(|a| {
-            let slot = crate::dag::block::Slot { round: 0, author: addr(a) };
+            let slot = crate::dag::block::Slot {
+                round: 0,
+                author: addr(a),
+            };
             dag.block_at_slot(slot).unwrap()
         })
         .collect();
@@ -242,7 +273,13 @@ fn commit_timestamp_nonmember_parents_falls_back_to_last_ts() {
     let power = VotingPower(Amount::from_drop(10));
     let mut alt_members = BTreeMap::new();
     for n in 10u8..=13 {
-        alt_members.insert(addr(n), Member { consensus_pubkey: dummy_key(), power });
+        alt_members.insert(
+            addr(n),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
     let vset_alt = ValidatorSet {
         epoch: 1,
@@ -254,8 +291,10 @@ fn commit_timestamp_nonmember_parents_falls_back_to_last_ts() {
     let ts = commit_timestamp(&leader_block, 5_000, &dag, &vset_alt).unwrap();
     // All round-0 ancestors are addr(1)..addr(4), none in vset_alt → empty samples
     // → fallback to last_commit_ts_ms = 5_000.
-    assert_eq!(ts, 5_000,
-        "non-member parents (empty samples) must fall back to last_commit_ts_ms");
+    assert_eq!(
+        ts, 5_000,
+        "non-member parents (empty samples) must fall back to last_commit_ts_ms"
+    );
 }
 
 // ── linearize_sub_dag ─────────────────────────────────────────────────────────
@@ -308,7 +347,9 @@ fn linearize_sorts_by_round_then_author() {
     for w in result.windows(2) {
         assert!(
             (w[0].round, w[0].author) <= (w[1].round, w[1].author),
-            "not sorted: {:?} vs {:?}", w[0], w[1]
+            "not sorted: {:?} vs {:?}",
+            w[0],
+            w[1]
         );
     }
     // Must contain at least a1, a2, a3, leader_r (all at round 3+).
@@ -350,10 +391,14 @@ fn linearize_dedup_across_commits() {
     let result2 = linearize_sub_dag(&l2, &dag, &mut committed);
 
     // shared_ref must appear in result1 but NOT in result2.
-    assert!(result1.contains(&shared_ref),
-        "shared block must appear in first commit");
-    assert!(!result2.contains(&shared_ref),
-        "shared block must NOT appear in second commit (dedup)");
+    assert!(
+        result1.contains(&shared_ref),
+        "shared block must appear in first commit"
+    );
+    assert!(
+        !result2.contains(&shared_ref),
+        "shared block must NOT appear in second commit (dedup)"
+    );
 }
 
 #[test]
@@ -403,9 +448,11 @@ fn linearize_dfs_order_irrelevant_sort_is_deterministic() {
     // but all shared ancestors must appear in the same order in both.)
     let shared_fwd: Vec<_> = r_fwd.iter().filter(|&&r| r != l_fwd).collect();
     let shared_rev: Vec<_> = r_rev.iter().filter(|&&r| r != l_rev).collect();
-    assert_eq!(shared_fwd, shared_rev,
+    assert_eq!(
+        shared_fwd, shared_rev,
         "shared ancestors must be in identical (round,author)-sorted order \
-         regardless of ancestor list ordering in the leader block (DFS order independence)");
+         regardless of ancestor list ordering in the leader block (DFS order independence)"
+    );
 }
 
 // ── Linearizer state machine ───────────────────────────────────────────────────
@@ -425,7 +472,10 @@ fn commit_leaders_skips_skip_status() {
     let vset = vset4();
     let mut dag = Dag::new(1);
     let mut lin = Linearizer::new();
-    let slot = Slot { round: 0, author: addr(1) };
+    let slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     let decided = vec![LeaderStatus::Skip(slot)];
     let result = lin.commit_leaders(&decided, &mut dag, &vset).unwrap();
     assert!(result.is_empty(), "Skip must produce no commit");
@@ -453,14 +503,21 @@ fn commit_leaders_assigns_monotonic_index() {
     let (_, _, d0) = build_wave(&mut dag, &vset, 3, r2, 2_000);
     let (_, _, _d1) = build_wave(&mut dag, &vset, 6, d0, 3_000);
 
-    let last = Slot { round: 0, author: addr(0) };
+    let last = Slot {
+        round: 0,
+        author: addr(0),
+    };
     let decided = try_decide(last, &dag, &vset, schedule.leader_fn()).unwrap();
 
     let commits = lin.commit_leaders(&decided, &mut dag, &vset).unwrap();
     assert!(!commits.is_empty(), "should have at least one commit");
     for (i, c) in commits.iter().enumerate() {
-        assert_eq!(c.index, (i + 1) as u64,
-            "commit {i} must have index {}", i + 1);
+        assert_eq!(
+            c.index,
+            (i + 1) as u64,
+            "commit {i} must have index {}",
+            i + 1
+        );
     }
 }
 
@@ -476,7 +533,10 @@ fn commit_leaders_chains_digests() {
     let (_, _, d0) = build_wave(&mut dag, &vset, 3, r2, 2_000);
     let (_, _, _d1) = build_wave(&mut dag, &vset, 6, d0, 3_000);
 
-    let last = Slot { round: 0, author: addr(0) };
+    let last = Slot {
+        round: 0,
+        author: addr(0),
+    };
     let decided = try_decide(last, &dag, &vset, schedule.leader_fn()).unwrap();
     let commits = lin.commit_leaders(&decided, &mut dag, &vset).unwrap();
 
@@ -485,7 +545,8 @@ fn commit_leaders_chains_digests() {
         assert_eq!(
             commits[i].previous_digest,
             commits[i - 1].digest(),
-            "commit {i} previous_digest must equal commit {}'s digest", i - 1
+            "commit {i} previous_digest must equal commit {}'s digest",
+            i - 1
         );
     }
     // First commit's previous_digest must be genesis (Hash::zero).
@@ -505,9 +566,15 @@ fn commit_leaders_advances_gc() {
     let r2 = build_foundation(&mut dag, &vset, 1_000);
     let (_, _, _d0) = build_wave(&mut dag, &vset, 3, r2, 2_000);
 
-    let last = Slot { round: 0, author: addr(0) };
+    let last = Slot {
+        round: 0,
+        author: addr(0),
+    };
     let decided = try_decide(last, &dag, &vset, schedule.leader_fn()).unwrap();
-    assert!(!decided.is_empty(), "should have at least one decided leader");
+    assert!(
+        !decided.is_empty(),
+        "should have at least one decided leader"
+    );
 
     let gc_before = dag.gc_round();
     lin.commit_leaders(&decided, &mut dag, &vset).unwrap();
@@ -515,8 +582,10 @@ fn commit_leaders_advances_gc() {
     // gc_round = last_committed_round.saturating_sub(GC_DEPTH).
     // With GC_DEPTH=30, gc_round is still 0 (3 < 30), but last_committed_round is now 3.
     // We verify gc_round is >= gc_before (monotonic).
-    assert!(dag.gc_round() >= gc_before,
-        "GC must be monotonically advanced after commit");
+    assert!(
+        dag.gc_round() >= gc_before,
+        "GC must be monotonically advanced after commit"
+    );
 }
 
 // ── Integration: try_decide → commit_leaders ──────────────────────────────────
@@ -532,7 +601,10 @@ fn full_pipeline_try_decide_then_linearize() {
     let r2 = build_foundation(&mut dag, &vset, 1_000);
     let (_, _, _d0) = build_wave(&mut dag, &vset, 3, r2, 2_000);
 
-    let last = Slot { round: 0, author: addr(0) };
+    let last = Slot {
+        round: 0,
+        author: addr(0),
+    };
     let decided = try_decide(last, &dag, &vset, schedule.leader_fn()).unwrap();
     let commits = lin.commit_leaders(&decided, &mut dag, &vset).unwrap();
 

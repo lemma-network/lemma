@@ -11,11 +11,7 @@
 
 use lemma_core::{address::Address, amount::Amount, validator::VotingPower};
 
-use crate::{
-    error::ConsensusError,
-    stake::StakeAggregator,
-    wave_of,
-};
+use crate::{error::ConsensusError, stake::StakeAggregator, wave_of};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -100,7 +96,11 @@ fn add_is_idempotent_same_author_does_not_double_count() {
     agg.add(addr(1), vp(10)).unwrap(); // no-op
 
     // Accumulated must equal exactly one addition (10), not two (20).
-    assert_eq!(agg.accumulated(), 10, "duplicate add must not increase accumulated");
+    assert_eq!(
+        agg.accumulated(),
+        10,
+        "duplicate add must not increase accumulated"
+    );
     assert_eq!(agg.count(), 1, "duplicate add must not increase count");
 }
 
@@ -180,7 +180,10 @@ fn clear_preserves_threshold_and_total_power() {
     // New round: add fresh quorum with different authors.
     agg.add(addr(4), vp(10)).unwrap();
     agg.add(addr(5), vp(10)).unwrap();
-    assert!(agg.add(addr(6), vp(10)).unwrap(), "re-adding quorum after clear must reach threshold");
+    assert!(
+        agg.add(addr(6), vp(10)).unwrap(),
+        "re-adding quorum after clear must reach threshold"
+    );
 }
 
 // ── count ─────────────────────────────────────────────────────────────────────

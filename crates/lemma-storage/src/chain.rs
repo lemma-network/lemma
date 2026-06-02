@@ -63,7 +63,7 @@
 use lemma_core::{block::Block, hash::Hash};
 
 use crate::{
-    db::{CF_BLOCK_HASH, CF_BLOCKS, CF_METADATA},
+    db::{CF_BLOCKS, CF_BLOCK_HASH, CF_METADATA},
     LemmaDb, StorageError,
 };
 
@@ -129,25 +129,28 @@ impl<'a> ChainStore<'a> {
     /// - [`StorageError::BatchFailed`] — RocksDB commit failed.
     /// - [`StorageError::Database`] — underlying RocksDB I/O error.
     pub fn put_block(&self, block: &Block, hash: Hash) -> Result<(), StorageError> {
-        let block_bytes = bincode::serialize(block)
-            .map_err(StorageError::from)?;
+        let block_bytes = bincode::serialize(block).map_err(StorageError::from)?;
 
         let height = block.height();
         let height_key = height.to_be_bytes();
 
         let mut batch = self.db.new_batch();
-        self.db.batch_put(&mut batch, CF_BLOCKS,     &height_key,        &block_bytes)?;
-        self.db.batch_put(&mut batch, CF_BLOCK_HASH, hash.as_bytes(),    &block_bytes)?;
+        self.db
+            .batch_put(&mut batch, CF_BLOCKS, &height_key, &block_bytes)?;
+        self.db
+            .batch_put(&mut batch, CF_BLOCK_HASH, hash.as_bytes(), &block_bytes)?;
 
         // Advance chain-tip metadata only when this block is at or above the
         // current tip (handles both fresh chains and normal producer writes).
         let advance = match self.latest_height()? {
-            None          => true,               // uninitialised — always set
-            Some(current) => height >= current,  // >= handles exact-height re-write
+            None => true,                       // uninitialised — always set
+            Some(current) => height >= current, // >= handles exact-height re-write
         };
         if advance {
-            self.db.batch_put(&mut batch, CF_METADATA, META_LATEST_HEIGHT, &height_key)?;
-            self.db.batch_put(&mut batch, CF_METADATA, META_LATEST_HASH,   hash.as_bytes())?;
+            self.db
+                .batch_put(&mut batch, CF_METADATA, META_LATEST_HEIGHT, &height_key)?;
+            self.db
+                .batch_put(&mut batch, CF_METADATA, META_LATEST_HASH, hash.as_bytes())?;
         }
 
         self.db.write_batch(batch)
@@ -167,7 +170,9 @@ impl<'a> ChainStore<'a> {
         let Some(bytes) = self.db.get(CF_BLOCKS, &height.to_be_bytes())? else {
             return Ok(None);
         };
-        Ok(Some(bincode::deserialize(&bytes).map_err(StorageError::from)?))
+        Ok(Some(
+            bincode::deserialize(&bytes).map_err(StorageError::from)?,
+        ))
     }
 
     /// Retrieve the block with `hash`, or `None` if not found.
@@ -181,7 +186,9 @@ impl<'a> ChainStore<'a> {
         let Some(bytes) = self.db.get(CF_BLOCK_HASH, hash.as_bytes())? else {
             return Ok(None);
         };
-        Ok(Some(bincode::deserialize(&bytes).map_err(StorageError::from)?))
+        Ok(Some(
+            bincode::deserialize(&bytes).map_err(StorageError::from)?,
+        ))
     }
 
     // ── Reads — chain tip ────────────────────────────────────────────────────
@@ -219,14 +226,13 @@ impl<'a> ChainStore<'a> {
         let Some(bytes) = self.db.get(CF_METADATA, META_LATEST_HEIGHT)? else {
             return Ok(None);
         };
-        let arr: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
-            StorageError::SerializationFailed {
-                reason: format!(
-                    "latest_height: expected 8 bytes, got {}",
-                    bytes.len()
-                ),
-            }
-        })?;
+        let arr: [u8; 8] =
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| StorageError::SerializationFailed {
+                    reason: format!("latest_height: expected 8 bytes, got {}", bytes.len()),
+                })?;
         Ok(Some(u64::from_be_bytes(arr)))
     }
 
@@ -267,7 +273,7 @@ impl<'a> ChainStore<'a> {
         for height in from..=to {
             match self.get_block_by_height(height)? {
                 Some(block) => blocks.push(block),
-                None        => break, // stop at first gap — contiguous prefix only
+                None => break, // stop at first gap — contiguous prefix only
             }
         }
         Ok(blocks)
@@ -279,11 +285,13 @@ impl<'a> ChainStore<'a> {
         let Some(bytes) = self.db.get(CF_METADATA, META_LATEST_HASH)? else {
             return Ok(None);
         };
-        let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-            StorageError::SerializationFailed {
-                reason: format!("latest_hash: expected 32 bytes, got {}", bytes.len()),
-            }
-        })?;
+        let arr: [u8; 32] =
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| StorageError::SerializationFailed {
+                    reason: format!("latest_hash: expected 32 bytes, got {}", bytes.len()),
+                })?;
         Ok(Some(Hash::from_bytes(arr)))
     }
 }

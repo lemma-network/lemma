@@ -121,7 +121,12 @@ pub fn deal_reshare(
         }
     }
 
-    Ok(PvssTranscript { tau, coeff_comms, tag, enc_shares })
+    Ok(PvssTranscript {
+        tau,
+        coeff_comms,
+        tag,
+        enc_shares,
+    })
 }
 
 // ── verify_reshare ────────────────────────────────────────────────────────────
@@ -158,7 +163,10 @@ pub fn verify_reshare(
 
     // Phase 2: zero-constant assertion (§5.4 — replaces tag pairing for resharing).
     // Non-identity F_0 means the dealer is trying to change Y → reject unconditionally.
-    let f0 = transcript.coeff_comms.first().ok_or(ShieldError::InvalidTranscript)?;
+    let f0 = transcript
+        .coeff_comms
+        .first()
+        .ok_or(ShieldError::InvalidTranscript)?;
     if !f0.is_zero() {
         return Err(ShieldError::ReshareAlteredKey);
     }

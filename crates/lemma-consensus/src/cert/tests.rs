@@ -19,9 +19,9 @@ use lemma_core::{
     amount::Amount,
     hash::Hash,
     signature::Signature,
-    QuorumCert,
     validator::{ConsensusKey, VotingPower},
     validator_set::{Member, ValidatorSet},
+    QuorumCert,
 };
 
 use crate::cert::{verify_quorum_cert, CertError};
@@ -49,16 +49,23 @@ fn make_vset(members: &[(u8, u128)]) -> ValidatorSet {
     let map: BTreeMap<_, _> = members
         .iter()
         .map(|&(b, p)| {
-            (addr(b), Member {
-                consensus_pubkey: ConsensusKey::from_bytes(vec![b; 32], vec![b; 32]),
-                power: power(p),
-            })
+            (
+                addr(b),
+                Member {
+                    consensus_pubkey: ConsensusKey::from_bytes(vec![b; 32], vec![b; 32]),
+                    power: power(p),
+                },
+            )
         })
         .collect();
     let total = map.values().fold(Amount::zero(), |a, m| {
         a.checked_add(m.power.as_amount()).unwrap()
     });
-    ValidatorSet { epoch: 0, members: map, total_power: total }
+    ValidatorSet {
+        epoch: 0,
+        members: map,
+        total_power: total,
+    }
 }
 
 /// Build a cert where `signer_bytes` signed `digest`.
@@ -196,7 +203,10 @@ fn verify_rejects_empty_cert() {
     let sigs = BTreeMap::new();
 
     let err = verify_quorum_cert(&qc, &vset, digest, &sigs).unwrap_err();
-    assert!(matches!(err, CertError::InsufficientQuorum { accumulated: 0, .. }));
+    assert!(matches!(
+        err,
+        CertError::InsufficientQuorum { accumulated: 0, .. }
+    ));
 }
 
 #[test]
@@ -207,12 +217,10 @@ fn verify_rejects_single_validator_below_quorum() {
     let qc = make_cert(10, digest, &[1]); // only 1 signer
     let sigs = all_valid(&[1]);
 
-    assert!(
-        matches!(
-            verify_quorum_cert(&qc, &vset, digest, &sigs),
-            Err(CertError::InsufficientQuorum { .. })
-        )
-    );
+    assert!(matches!(
+        verify_quorum_cert(&qc, &vset, digest, &sigs),
+        Err(CertError::InsufficientQuorum { .. })
+    ));
 }
 
 // ── Boundary: just over 2/3 ───────────────────────────────────────────────────

@@ -42,11 +42,7 @@ use tracing::{debug, info, warn};
 
 use lemma_consensus::calculate_base_fee;
 use lemma_core::{
-    address::Address,
-    block::Block,
-    error::CoreError,
-    hash::Hash,
-    header::BlockHeader,
+    address::Address, block::Block, error::CoreError, hash::Hash, header::BlockHeader,
 };
 use lemma_mempool::pool::Mempool;
 use lemma_storage::{ChainStore, LemmaDb};
@@ -69,7 +65,9 @@ pub struct ProducerConfig {
 
 impl Default for ProducerConfig {
     fn default() -> Self {
-        Self { block_interval_ms: 500 }
+        Self {
+            block_interval_ms: 500,
+        }
     }
 }
 
@@ -129,8 +127,8 @@ pub fn build_next_block(
     })?;
 
     // Compute the next block's base fee from the parent (Burn Fee Model).
-    let base_fee = calculate_base_fee(&parent.header)
-        .map_err(|e| NodeError::Core(CoreError::from(e)))?;
+    let base_fee =
+        calculate_base_fee(&parent.header).map_err(|e| NodeError::Core(CoreError::from(e)))?;
 
     // Clamp timestamp: must be strictly greater than the parent's timestamp to
     // guarantee chain monotonicity (light-client requirement, 12-SPEC §3.2).
@@ -140,22 +138,22 @@ pub fn build_next_block(
     // Phase 1: state_root unchanged (no execution), dag_round/dag_anchor = 0
     // (no consensus yet), epoch unchanged (no advance_epoch in single-node mode).
     let header = BlockHeader::new(
-        parent_height + 1,                       // height
+        parent_height + 1, // height
         timestamp,
-        parent_hash,                             // parent_hash
-        Hash::zero(),                            // transactions_root (no txs)
-        parent.header.state_root,               // state_root — unchanged (no VM)
-        Hash::zero(),                            // receipts_root (no receipts)
+        parent_hash,              // parent_hash
+        Hash::zero(),             // transactions_root (no txs)
+        parent.header.state_root, // state_root — unchanged (no VM)
+        Hash::zero(),             // receipts_root (no receipts)
         proposer,
-        parent.header.epoch,                    // epoch — unchanged
-        0,                                       // dag_round (no consensus)
-        Hash::zero(),                            // dag_anchor (no consensus)
-        parent.header.validators_hash,          // validators_hash — unchanged
-        parent.header.next_validators_hash,     // next_validators_hash — unchanged
-        parent.header.gas_limit,               // gas_limit — unchanged (Phase 1)
-        0,                                       // gas_used = 0 (no execution)
+        parent.header.epoch,                // epoch — unchanged
+        0,                                  // dag_round (no consensus)
+        Hash::zero(),                       // dag_anchor (no consensus)
+        parent.header.validators_hash,      // validators_hash — unchanged
+        parent.header.next_validators_hash, // next_validators_hash — unchanged
+        parent.header.gas_limit,            // gas_limit — unchanged (Phase 1)
+        0,                                  // gas_used = 0 (no execution)
         base_fee,
-        vec![],                                  // extra_data
+        vec![], // extra_data
     )?;
 
     // Build the empty block. Block::validate checks:
@@ -166,8 +164,7 @@ pub fn build_next_block(
     // Compute the canonical block hash (AGENTS §2.2: one canonical hash path).
     // compute_block_hash is the single definition; calling it here ensures the
     // producer and the range-sync consumer always derive identical hashes.
-    let hash = compute_block_hash(&block)
-        .map_err(|e| NodeError::Serialization(e.to_string()))?;
+    let hash = compute_block_hash(&block).map_err(|e| NodeError::Serialization(e.to_string()))?;
 
     Ok((block, hash))
 }
@@ -249,8 +246,7 @@ pub async fn run(
     write_lock: Arc<Mutex<()>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), NodeError> {
-    let mut interval =
-        tokio::time::interval(Duration::from_millis(cfg.block_interval_ms));
+    let mut interval = tokio::time::interval(Duration::from_millis(cfg.block_interval_ms));
     // Skip ticks that fire while we're still processing the previous one —
     // avoids a burst of catch-up blocks after a slow tick.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

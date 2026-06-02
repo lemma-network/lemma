@@ -13,8 +13,8 @@ use crate::{db::LemmaDb, StorageError};
 
 fn open_temp_db() -> (LemmaDb, tempfile::TempDir) {
     let dir = tempdir().expect("tempdir: OS should always provide a temp directory");
-    let db = LemmaDb::open(dir.path())
-        .expect("LemmaDb::open: should succeed on a fresh temp directory");
+    let db =
+        LemmaDb::open(dir.path()).expect("LemmaDb::open: should succeed on a fresh temp directory");
     (db, dir)
 }
 
@@ -27,8 +27,8 @@ fn multi_key_trie(db: &LemmaDb) -> MerklePatriciaTrie<'_> {
     let mut t = trie(db);
     t.insert(b"lem1qaaabbbccc111", b"acc1".to_vec()).unwrap();
     t.insert(b"lem1qaaabbbccc222", b"acc2".to_vec()).unwrap();
-    t.insert(b"lem1qaaaxxx",       b"acc3".to_vec()).unwrap();
-    t.insert(b"lem1qzzz",          b"acc4".to_vec()).unwrap();
+    t.insert(b"lem1qaaaxxx", b"acc3".to_vec()).unwrap();
+    t.insert(b"lem1qzzz", b"acc4".to_vec()).unwrap();
     t
 }
 
@@ -55,7 +55,10 @@ fn generate_proof_single_key_is_inclusion() {
     let proof = t.generate_proof(b"key1").unwrap();
     assert_eq!(proof.key, b"key1");
     assert_eq!(proof.value, Some(b"val1".to_vec()));
-    assert!(!proof.nodes.is_empty(), "proof must contain at least one node");
+    assert!(
+        !proof.nodes.is_empty(),
+        "proof must contain at least one node"
+    );
 }
 
 #[test]
@@ -64,9 +67,9 @@ fn generate_proof_multi_key_each_is_inclusion() {
     let t = multi_key_trie(&db);
     for (key, val) in &[
         (&b"lem1qaaabbbccc111"[..], &b"acc1"[..]),
-        (b"lem1qaaabbbccc222",      b"acc2"),
-        (b"lem1qaaaxxx",            b"acc3"),
-        (b"lem1qzzz",               b"acc4"),
+        (b"lem1qaaabbbccc222", b"acc2"),
+        (b"lem1qaaaxxx", b"acc3"),
+        (b"lem1qzzz", b"acc4"),
     ] {
         let proof = t.generate_proof(key).unwrap();
         assert_eq!(proof.key, *key);
@@ -78,13 +81,13 @@ fn generate_proof_multi_key_each_is_inclusion() {
 fn generate_proof_prefix_key_is_inclusion() {
     let (db, _dir) = open_temp_db();
     let mut t = trie(&db);
-    t.insert(b"ab",  b"short".to_vec()).unwrap();
+    t.insert(b"ab", b"short".to_vec()).unwrap();
     t.insert(b"abc", b"long".to_vec()).unwrap();
 
-    let proof_ab  = t.generate_proof(b"ab").unwrap();
+    let proof_ab = t.generate_proof(b"ab").unwrap();
     let proof_abc = t.generate_proof(b"abc").unwrap();
 
-    assert_eq!(proof_ab.value,  Some(b"short".to_vec()));
+    assert_eq!(proof_ab.value, Some(b"short".to_vec()));
     assert_eq!(proof_abc.value, Some(b"long".to_vec()));
 }
 
@@ -118,7 +121,10 @@ fn generate_proof_absent_key_is_non_inclusion() {
     t.insert(b"exists", b"yes".to_vec()).unwrap();
     let proof = t.generate_proof(b"absent").unwrap();
     assert_eq!(proof.key, b"absent");
-    assert!(proof.value.is_none(), "absent key must produce non-inclusion proof");
+    assert!(
+        proof.value.is_none(),
+        "absent key must produce non-inclusion proof"
+    );
     assert!(!proof.nodes.is_empty());
 }
 
@@ -161,7 +167,9 @@ fn verify_non_inclusion_proof_passes_for_correct_root() {
     t.insert(b"exists", b"val".to_vec()).unwrap();
     let root = t.root().unwrap();
     let proof = t.generate_proof(b"absent").unwrap();
-    proof.verify(root).expect("valid non-inclusion proof must pass");
+    proof
+        .verify(root)
+        .expect("valid non-inclusion proof must pass");
 }
 
 #[test]
@@ -176,9 +184,9 @@ fn verify_multi_key_all_inclusion_proofs_pass() {
         b"lem1qzzz",
     ] {
         let proof = t.generate_proof(key).unwrap();
-        proof.verify(root).unwrap_or_else(|e| {
-            panic!("proof for {:?} must verify, got: {e:?}", key)
-        });
+        proof
+            .verify(root)
+            .unwrap_or_else(|e| panic!("proof for {:?} must verify, got: {e:?}", key));
     }
 }
 
@@ -186,7 +194,7 @@ fn verify_multi_key_all_inclusion_proofs_pass() {
 fn verify_prefix_keys_both_pass() {
     let (db, _dir) = open_temp_db();
     let mut t = trie(&db);
-    t.insert(b"ab",  b"short".to_vec()).unwrap();
+    t.insert(b"ab", b"short".to_vec()).unwrap();
     t.insert(b"abc", b"long".to_vec()).unwrap();
     let root = t.root().unwrap();
     t.generate_proof(b"ab").unwrap().verify(root).unwrap();
@@ -206,7 +214,10 @@ fn verify_tampered_value_returns_invalid_proof() {
     proof.value = Some(b"tampered".to_vec());
     let err = proof.verify(root).unwrap_err();
     assert!(
-        matches!(err, StorageError::InvalidProof { .. } | StorageError::TrieRootMismatch { .. }),
+        matches!(
+            err,
+            StorageError::InvalidProof { .. } | StorageError::TrieRootMismatch { .. }
+        ),
         "tampered value must fail, got: {err:?}",
     );
 }
@@ -221,7 +232,10 @@ fn verify_wrong_root_returns_trie_root_mismatch() {
     let wrong_root = lemma_core::Hash::from_bytes([0x00; 32]);
     let err = proof.verify(wrong_root).unwrap_err();
     assert!(
-        matches!(err, StorageError::TrieRootMismatch { .. } | StorageError::InvalidProof { .. }),
+        matches!(
+            err,
+            StorageError::TrieRootMismatch { .. } | StorageError::InvalidProof { .. }
+        ),
         "wrong root must fail, got: {err:?}",
     );
 }
@@ -240,7 +254,10 @@ fn verify_truncated_proof_returns_invalid_proof() {
     }
     let err = proof.verify(root).unwrap_err();
     assert!(
-        matches!(err, StorageError::InvalidProof { .. } | StorageError::TrieRootMismatch { .. }),
+        matches!(
+            err,
+            StorageError::InvalidProof { .. } | StorageError::TrieRootMismatch { .. }
+        ),
         "truncated proof must fail, got: {err:?}",
     );
 }
@@ -261,7 +278,10 @@ fn verify_proof_against_stale_root_fails() {
     // Original proof must fail against new root.
     let err = proof.verify(root2).unwrap_err();
     assert!(
-        matches!(err, StorageError::TrieRootMismatch { .. } | StorageError::InvalidProof { .. }),
+        matches!(
+            err,
+            StorageError::TrieRootMismatch { .. } | StorageError::InvalidProof { .. }
+        ),
         "stale proof must fail, got: {err:?}",
     );
 }
@@ -351,7 +371,7 @@ fn generate_proof_branch_value_inclusion_is_some() {
     // stored as a Branch value (path exhausted at the Branch that splits them).
     let (db, _dir) = open_temp_db();
     let mut t = trie(&db);
-    t.insert(b"ab",  b"short".to_vec()).unwrap();
+    t.insert(b"ab", b"short".to_vec()).unwrap();
     t.insert(b"abc", b"long".to_vec()).unwrap();
     let proof = t.generate_proof(b"ab").unwrap();
     assert_eq!(proof.value, Some(b"short".to_vec()), "ab must be inclusion");
@@ -361,12 +381,14 @@ fn generate_proof_branch_value_inclusion_is_some() {
 fn verify_branch_value_inclusion_proof_passes() {
     let (db, _dir) = open_temp_db();
     let mut t = trie(&db);
-    t.insert(b"ab",  b"short".to_vec()).unwrap();
+    t.insert(b"ab", b"short".to_vec()).unwrap();
     t.insert(b"abc", b"long".to_vec()).unwrap();
     let root = t.root().unwrap();
     let proof = t.generate_proof(b"ab").unwrap();
     assert_eq!(proof.value, Some(b"short".to_vec()));
-    proof.verify(root).expect("branch-value inclusion proof must verify");
+    proof
+        .verify(root)
+        .expect("branch-value inclusion proof must verify");
 }
 
 // ── TEST-2: Single-byte key ───────────────────────────────────────────────────
@@ -379,7 +401,9 @@ fn verify_single_byte_key_inclusion_proof_passes() {
     let root = t.root().unwrap();
     let proof = t.generate_proof(b"\x42").unwrap();
     assert_eq!(proof.value, Some(b"val".to_vec()));
-    proof.verify(root).expect("single-byte key inclusion proof must verify");
+    proof
+        .verify(root)
+        .expect("single-byte key inclusion proof must verify");
 }
 
 #[test]
@@ -390,7 +414,9 @@ fn verify_single_byte_key_non_inclusion_proof_passes() {
     let root = t.root().unwrap();
     let proof = t.generate_proof(b"\x43").unwrap();
     assert!(proof.value.is_none());
-    proof.verify(root).expect("single-byte key non-inclusion proof must verify");
+    proof
+        .verify(root)
+        .expect("single-byte key non-inclusion proof must verify");
 }
 
 // ── TEST-3: Empty key ─────────────────────────────────────────────────────────
@@ -403,7 +429,9 @@ fn verify_empty_key_inclusion_proof_passes() {
     let root = t.root().unwrap();
     let proof = t.generate_proof(b"").unwrap();
     assert_eq!(proof.value, Some(b"root_val".to_vec()));
-    proof.verify(root).expect("empty key inclusion proof must verify");
+    proof
+        .verify(root)
+        .expect("empty key inclusion proof must verify");
 }
 
 #[test]
@@ -415,7 +443,9 @@ fn verify_empty_key_non_inclusion_when_absent_passes() {
     // Empty key was never inserted.
     let proof = t.generate_proof(b"").unwrap();
     assert!(proof.value.is_none());
-    proof.verify(root).expect("empty key non-inclusion proof must verify");
+    proof
+        .verify(root)
+        .expect("empty key non-inclusion proof must verify");
 }
 
 // ── TEST-4: Node substitution tamper ─────────────────────────────────────────
@@ -438,7 +468,10 @@ fn verify_substituted_node_returns_invalid_proof() {
     }
     let err = proof.verify(root).unwrap_err();
     assert!(
-        matches!(err, StorageError::InvalidProof { .. } | StorageError::TrieRootMismatch { .. }),
+        matches!(
+            err,
+            StorageError::InvalidProof { .. } | StorageError::TrieRootMismatch { .. }
+        ),
         "substituted node must fail verification, got: {err:?}",
     );
 }
@@ -464,7 +497,10 @@ fn proof_node_hash_matches_trie_node_hash_for_leaf() {
 fn proof_node_hash_matches_trie_node_hash_for_branch() {
     use crate::trie::node::TrieNode;
     let trie_branch = TrieNode::empty_branch();
-    let proof_branch = ProofNode::Branch { children: [None; 16], value: None };
+    let proof_branch = ProofNode::Branch {
+        children: [None; 16],
+        value: None,
+    };
     assert_eq!(
         trie_branch.hash().unwrap(),
         proof_branch.hash().unwrap(),
@@ -482,11 +518,14 @@ fn generate_proof_same_key_produces_identical_proof_bytes_after_serialization() 
     t.insert(b"key2", b"val2".to_vec()).unwrap();
     let proof_a = t.generate_proof(b"key1").unwrap();
     let proof_b = t.generate_proof(b"key1").unwrap();
-    let bytes_a = bincode::serialize(&proof_a)
-        .expect("serialization must not fail for well-formed proof");
-    let bytes_b = bincode::serialize(&proof_b)
-        .expect("serialization must not fail for well-formed proof");
-    assert_eq!(bytes_a, bytes_b, "proof bytes must be identical (consensus determinism)");
+    let bytes_a =
+        bincode::serialize(&proof_a).expect("serialization must not fail for well-formed proof");
+    let bytes_b =
+        bincode::serialize(&proof_b).expect("serialization must not fail for well-formed proof");
+    assert_eq!(
+        bytes_a, bytes_b,
+        "proof bytes must be identical (consensus determinism)"
+    );
 }
 
 // ── verify: deep trie ────────────────────────────────────────────────────────
@@ -498,9 +537,9 @@ fn verify_deep_trie_all_keys_pass() {
     // Force deep Extension → Branch → Extension nesting.
     t.insert(b"lem1qaaabbbccc111", b"acc1".to_vec()).unwrap();
     t.insert(b"lem1qaaabbbccc222", b"acc2".to_vec()).unwrap();
-    t.insert(b"lem1qaaaxxx",       b"acc3".to_vec()).unwrap();
-    t.insert(b"lem1qzzz",          b"acc4".to_vec()).unwrap();
-    t.insert(b"lem1q",             b"root_acc".to_vec()).unwrap();
+    t.insert(b"lem1qaaaxxx", b"acc3".to_vec()).unwrap();
+    t.insert(b"lem1qzzz", b"acc4".to_vec()).unwrap();
+    t.insert(b"lem1q", b"root_acc".to_vec()).unwrap();
     let root = t.root().unwrap();
 
     for key in &[
@@ -511,9 +550,9 @@ fn verify_deep_trie_all_keys_pass() {
         b"lem1q",
     ] {
         let proof = t.generate_proof(key).unwrap();
-        proof.verify(root).unwrap_or_else(|e| {
-            panic!("deep trie proof for {key:?} must verify, got: {e:?}")
-        });
+        proof
+            .verify(root)
+            .unwrap_or_else(|e| panic!("deep trie proof for {key:?} must verify, got: {e:?}"));
     }
 }
 
@@ -527,5 +566,7 @@ fn verify_deep_trie_absent_key_non_inclusion_passes() {
     // Key that shares a long prefix but was never inserted.
     let proof = t.generate_proof(b"lem1qaaa").unwrap();
     assert!(proof.value.is_none());
-    proof.verify(root).expect("deep non-inclusion proof must verify");
+    proof
+        .verify(root)
+        .expect("deep non-inclusion proof must verify");
 }

@@ -320,8 +320,7 @@ impl Dag {
         validity::check_gc_boundary(block.round, self.gc_round())?;
 
         // ── Rule 4: ancestors present (spec §3 rule 4) ──────────────────────
-        let missing =
-            validity::collect_missing_ancestors(&block, |r| self.blocks.contains_key(r));
+        let missing = validity::collect_missing_ancestors(&block, |r| self.blocks.contains_key(r));
         if !missing.is_empty() {
             // Bounded suspension buffer (AGENTS §15.2).
             if self.suspended.len() < MAX_SUSPENDED {
@@ -342,9 +341,19 @@ impl Dag {
         let existing = self.block_at_slot(block.slot());
         match validity::check_no_equivocation(&block, existing) {
             Ok(()) => {}
-            Err(ConsensusError::Equivocation { author, round, first, second }) => {
+            Err(ConsensusError::Equivocation {
+                author,
+                round,
+                first,
+                second,
+            }) => {
                 // Block NOT inserted — caller emits DoubleSignEvidence.
-                return Ok(InsertOutcome::Equivocation { author, round, first, second });
+                return Ok(InsertOutcome::Equivocation {
+                    author,
+                    round,
+                    first,
+                    second,
+                });
             }
             Err(e) => return Err(e),
         }

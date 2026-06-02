@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use balance::query_balance_from_db;
-use wallet::{Network, address_from_keystore, keystore_path};
+use wallet::{address_from_keystore, keystore_path, Network};
 
 // ── CLI definition ────────────────────────────────────────────────────────────
 
@@ -129,8 +129,9 @@ fn dispatch_wallet(action: WalletAction) -> Result<(), error::LemmaCliError> {
     match action {
         WalletAction::New { out_dir, network } => {
             // Create the output directory if it does not exist.
-            std::fs::create_dir_all(&out_dir).map_err(|e| {
-                error::LemmaCliError::KeystoreIo { path: out_dir.clone(), source: e }
+            std::fs::create_dir_all(&out_dir).map_err(|e| error::LemmaCliError::KeystoreIo {
+                path: out_dir.clone(),
+                source: e,
             })?;
 
             let addr_str = new_wallet_in_dir(&out_dir, network)?;
@@ -139,9 +140,7 @@ fn dispatch_wallet(action: WalletAction) -> Result<(), error::LemmaCliError> {
                 "⚠️  Keystore saved to: {}/{addr_str}.key",
                 out_dir.display()
             );
-            eprintln!(
-                "⚠️  UNENCRYPTED — devnet/testnet only. Do NOT use for mainnet."
-            );
+            eprintln!("⚠️  UNENCRYPTED — devnet/testnet only. Do NOT use for mainnet.");
             Ok(())
         }
 
@@ -163,17 +162,21 @@ fn new_wallet_in_dir(
 ) -> Result<String, error::LemmaCliError> {
     use lemma_crypto::KeyPair; // local use — lemma_crypto dep is in Cargo.toml
 
-    let kp       = KeyPair::generate()?;
+    let kp = KeyPair::generate()?;
     let addr_str = wallet::format_address(kp.address(), network);
-    let path     = keystore_path(out_dir, kp.address(), network);
+    let path = keystore_path(out_dir, kp.address(), network);
 
     // Atomic write: rename from .tmp prevents a torn file on crash.
     // Overwrite is intentional — address collision probability is negligible
     // (birthday paradox over 2^160). If you need a guard against accidental
     // overwrite (e.g. running `wallet new` twice), add a `path.exists()` check.
     let tmp_path = path.with_extension("key.tmp");
-    std::fs::write(&tmp_path, kp.to_keystore_bytes())
-        .map_err(|e| error::LemmaCliError::KeystoreIo { path: tmp_path.clone(), source: e })?;
+    std::fs::write(&tmp_path, kp.to_keystore_bytes()).map_err(|e| {
+        error::LemmaCliError::KeystoreIo {
+            path: tmp_path.clone(),
+            source: e,
+        }
+    })?;
     std::fs::rename(&tmp_path, &path)
         .map_err(|e| error::LemmaCliError::KeystoreIo { path, source: e })?;
 
@@ -182,11 +185,14 @@ fn new_wallet_in_dir(
 
 // ── Balance dispatch ──────────────────────────────────────────────────────────
 
-fn dispatch_balance(address_str: &str, data_dir: &std::path::Path) -> Result<(), error::LemmaCliError> {
+fn dispatch_balance(
+    address_str: &str,
+    data_dir: &std::path::Path,
+) -> Result<(), error::LemmaCliError> {
     let (address, _addr_type, _hrp) =
         lemma_core::Address::from_bech32(address_str).map_err(|e| {
             error::LemmaCliError::InvalidAddress {
-                input:  address_str.to_owned(),
+                input: address_str.to_owned(),
                 reason: e.to_string(),
             }
         })?;

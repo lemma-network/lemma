@@ -87,7 +87,8 @@ fn snapshot_metadata_new_sets_height_and_state_root() {
 fn snapshot_metadata_json_roundtrip() {
     let m = meta(1000);
     let json = serde_json::to_string(&m).expect("serialisation must succeed");
-    let decoded: SnapshotMetadata = serde_json::from_str(&json).expect("deserialisation must succeed");
+    let decoded: SnapshotMetadata =
+        serde_json::from_str(&json).expect("deserialisation must succeed");
     assert_eq!(m, decoded);
 }
 
@@ -99,7 +100,10 @@ fn new_creates_snapshot_directory_if_missing() {
     let snap_dir = base.path().join("snapshots");
     assert!(!snap_dir.exists(), "directory must not exist before new()");
     SnapshotManager::new(&snap_dir, 3).expect("SnapshotManager::new must create the directory");
-    assert!(snap_dir.is_dir(), "SnapshotManager::new must create the directory");
+    assert!(
+        snap_dir.is_dir(),
+        "SnapshotManager::new must create the directory"
+    );
 }
 
 #[test]
@@ -157,7 +161,8 @@ fn create_snapshot_overwrites_existing_snapshot_at_same_height() {
         state_root: lemma_core::Hash::from_bytes([0x01; 32]),
         timestamp: 1000,
     };
-    mgr.create_snapshot(&db, &m1).expect("first create must succeed");
+    mgr.create_snapshot(&db, &m1)
+        .expect("first create must succeed");
 
     // Second snapshot at same height — different state_root.
     let m2 = SnapshotMetadata {
@@ -165,7 +170,8 @@ fn create_snapshot_overwrites_existing_snapshot_at_same_height() {
         state_root: lemma_core::Hash::from_bytes([0x02; 32]),
         timestamp: 2000,
     };
-    mgr.create_snapshot(&db, &m2).expect("second create must succeed");
+    mgr.create_snapshot(&db, &m2)
+        .expect("second create must succeed");
 
     // The metadata must reflect the second write.
     let loaded = mgr
@@ -181,7 +187,9 @@ fn create_snapshot_overwrites_existing_snapshot_at_same_height() {
 fn list_snapshots_on_empty_dir_returns_empty() {
     let snap_dir = tempdir().expect("tempdir must succeed");
     let mgr = manager(snap_dir.path());
-    let list = mgr.list_snapshots().expect("list must succeed on empty dir");
+    let list = mgr
+        .list_snapshots()
+        .expect("list must succeed on empty dir");
     assert!(list.is_empty());
 }
 
@@ -193,9 +201,12 @@ fn list_snapshots_returns_all_sorted_newest_first() {
     // max_snapshots=0 to avoid pruning during this test.
     let mgr = SnapshotManager::new(snap_dir.path(), 0).expect("new must succeed");
 
-    mgr.create_snapshot(&db, &meta(1000)).expect("create 1000 must succeed");
-    mgr.create_snapshot(&db, &meta(2000)).expect("create 2000 must succeed");
-    mgr.create_snapshot(&db, &meta(500)).expect("create 500 must succeed");
+    mgr.create_snapshot(&db, &meta(1000))
+        .expect("create 1000 must succeed");
+    mgr.create_snapshot(&db, &meta(2000))
+        .expect("create 2000 must succeed");
+    mgr.create_snapshot(&db, &meta(500))
+        .expect("create 500 must succeed");
 
     let list = mgr.list_snapshots().expect("list must succeed");
     assert_eq!(list.len(), 3);
@@ -221,11 +232,17 @@ fn latest_snapshot_returns_highest_height() {
     let db = open_db(db_dir.path());
     let mgr = SnapshotManager::new(snap_dir.path(), 0).expect("new must succeed");
 
-    mgr.create_snapshot(&db, &meta(100)).expect("create 100 must succeed");
-    mgr.create_snapshot(&db, &meta(300)).expect("create 300 must succeed");
-    mgr.create_snapshot(&db, &meta(200)).expect("create 200 must succeed");
+    mgr.create_snapshot(&db, &meta(100))
+        .expect("create 100 must succeed");
+    mgr.create_snapshot(&db, &meta(300))
+        .expect("create 300 must succeed");
+    mgr.create_snapshot(&db, &meta(200))
+        .expect("create 200 must succeed");
 
-    let latest = mgr.latest_snapshot().expect("latest must succeed").expect("must be Some");
+    let latest = mgr
+        .latest_snapshot()
+        .expect("latest must succeed")
+        .expect("must be Some");
     assert_eq!(latest.height, 300);
 }
 
@@ -249,7 +266,10 @@ fn snapshot_metadata_returns_correct_data_for_existing_height() {
 
     mgr.create_snapshot(&db, &m).expect("create must succeed");
 
-    let loaded = mgr.snapshot_metadata(42).expect("must not error").expect("must be Some");
+    let loaded = mgr
+        .snapshot_metadata(42)
+        .expect("must not error")
+        .expect("must be Some");
     assert_eq!(loaded.height, m.height);
     assert_eq!(loaded.state_root, m.state_root);
 }
@@ -261,9 +281,12 @@ fn restore_path_points_to_openable_db() {
     let db = open_db(db_dir.path());
     let mgr = manager(snap_dir.path());
 
-    mgr.create_snapshot(&db, &meta(777)).expect("create must succeed");
+    mgr.create_snapshot(&db, &meta(777))
+        .expect("create must succeed");
 
-    let path = mgr.restore_path(777).expect("restore_path must succeed for existing snapshot");
+    let path = mgr
+        .restore_path(777)
+        .expect("restore_path must succeed for existing snapshot");
     let _db2 = LemmaDb::open(&path).expect("restore_path must point to an openable LemmaDb");
 }
 
@@ -288,7 +311,7 @@ fn create_checkpoint_excludes_writes_made_after_checkpoint() {
     let ckpt_dir = tempdir().expect("tempdir for checkpoint must succeed");
 
     let addr_before = Address::from_public_key(&[0x01u8; 32]);
-    let addr_after  = Address::from_public_key(&[0x02u8; 32]);
+    let addr_after = Address::from_public_key(&[0x02u8; 32]);
 
     // Write addr_before, commit, take checkpoint, then write addr_after.
     let state_root = {
@@ -302,7 +325,8 @@ fn create_checkpoint_excludes_writes_made_after_checkpoint() {
     let ckpt_path = ckpt_dir.path().join("ckpt");
     {
         let db = open_db(db_dir.path());
-        db.create_checkpoint(&ckpt_path).expect("checkpoint must succeed");
+        db.create_checkpoint(&ckpt_path)
+            .expect("checkpoint must succeed");
         // Write addr_after AFTER the checkpoint — must not appear in checkpoint.
         let mut ws = WorldState::with_state_root(db, state_root);
         ws.put_account(&addr_after, &Account::new_eoa(Amount::from_drop(2)))
@@ -312,11 +336,15 @@ fn create_checkpoint_excludes_writes_made_after_checkpoint() {
     let ckpt_db = open_db(&ckpt_path);
     let ws = WorldState::with_state_root(ckpt_db, state_root);
     assert!(
-        ws.get_account(&addr_before).expect("get must succeed").is_some(),
+        ws.get_account(&addr_before)
+            .expect("get must succeed")
+            .is_some(),
         "checkpoint must contain writes made BEFORE checkpoint",
     );
     assert!(
-        ws.get_account(&addr_after).expect("get must succeed").is_none(),
+        ws.get_account(&addr_after)
+            .expect("get must succeed")
+            .is_none(),
         "checkpoint must NOT contain writes made AFTER checkpoint",
     );
 }
@@ -331,7 +359,8 @@ fn list_snapshots_skips_directory_with_missing_metadata_json() {
     let mgr = SnapshotManager::new(snap_dir.path(), 0).expect("new must succeed");
 
     // Create a valid snapshot at height 100.
-    mgr.create_snapshot(&db, &meta(100)).expect("create must succeed");
+    mgr.create_snapshot(&db, &meta(100))
+        .expect("create must succeed");
 
     // Manually create a snapshot directory at height 200 with no metadata.json
     // (simulates a crash mid-write before metadata was written).
@@ -340,7 +369,11 @@ fn list_snapshots_skips_directory_with_missing_metadata_json() {
 
     // list_snapshots must return only the valid snapshot, silently skipping orphan.
     let list = mgr.list_snapshots().expect("list must succeed");
-    assert_eq!(list.len(), 1, "orphaned directory without metadata.json must be skipped");
+    assert_eq!(
+        list.len(),
+        1,
+        "orphaned directory without metadata.json must be skipped"
+    );
     assert_eq!(list[0].height, 100);
 }
 
@@ -353,14 +386,23 @@ fn prune_with_exactly_max_snapshots_removes_nothing() {
     let db = open_db(db_dir.path());
     // Use max_snapshots=0 to prevent auto-pruning during creates.
     let mgr_no_prune = SnapshotManager::new(snap_dir.path(), 0).expect("new must succeed");
-    mgr_no_prune.create_snapshot(&db, &meta(100)).expect("create 100 must succeed");
-    mgr_no_prune.create_snapshot(&db, &meta(200)).expect("create 200 must succeed");
-    mgr_no_prune.create_snapshot(&db, &meta(300)).expect("create 300 must succeed");
+    mgr_no_prune
+        .create_snapshot(&db, &meta(100))
+        .expect("create 100 must succeed");
+    mgr_no_prune
+        .create_snapshot(&db, &meta(200))
+        .expect("create 200 must succeed");
+    mgr_no_prune
+        .create_snapshot(&db, &meta(300))
+        .expect("create 300 must succeed");
 
     // Now prune with max_snapshots=3 — exactly 3 exist, so nothing should be removed.
     let mgr3 = SnapshotManager::new(snap_dir.path(), 3).expect("new must succeed");
     let removed = mgr3.prune().expect("prune must succeed");
-    assert_eq!(removed, 0, "exactly max_snapshots snapshots exist — nothing should be pruned");
+    assert_eq!(
+        removed, 0,
+        "exactly max_snapshots snapshots exist — nothing should be pruned"
+    );
     assert_eq!(mgr3.list_snapshots().expect("list must succeed").len(), 3);
 }
 
@@ -374,9 +416,12 @@ fn prune_removes_oldest_beyond_max() {
     // max_snapshots=2: only keep the 2 newest.
     let mgr = SnapshotManager::new(snap_dir.path(), 2).expect("new must succeed");
 
-    mgr.create_snapshot(&db, &meta(100)).expect("create 100 must succeed");
-    mgr.create_snapshot(&db, &meta(200)).expect("create 200 must succeed");
-    mgr.create_snapshot(&db, &meta(300)).expect("create 300 must succeed");
+    mgr.create_snapshot(&db, &meta(100))
+        .expect("create 100 must succeed");
+    mgr.create_snapshot(&db, &meta(200))
+        .expect("create 200 must succeed");
+    mgr.create_snapshot(&db, &meta(300))
+        .expect("create 300 must succeed");
 
     // After the third create, prune runs automatically. Only 200 and 300 remain.
     let list = mgr.list_snapshots().expect("list must succeed");
@@ -402,11 +447,17 @@ fn prune_with_max_zero_removes_nothing() {
     let db = open_db(db_dir.path());
     let mgr = SnapshotManager::new(snap_dir.path(), 0).expect("new must succeed");
 
-    mgr.create_snapshot(&db, &meta(100)).expect("create must succeed");
-    mgr.create_snapshot(&db, &meta(200)).expect("create must succeed");
-    mgr.create_snapshot(&db, &meta(300)).expect("create must succeed");
+    mgr.create_snapshot(&db, &meta(100))
+        .expect("create must succeed");
+    mgr.create_snapshot(&db, &meta(200))
+        .expect("create must succeed");
+    mgr.create_snapshot(&db, &meta(300))
+        .expect("create must succeed");
 
     let removed = mgr.prune().expect("prune with max=0 must succeed");
-    assert_eq!(removed, 0, "max_snapshots=0 means unlimited — nothing pruned");
+    assert_eq!(
+        removed, 0,
+        "max_snapshots=0 means unlimited — nothing pruned"
+    );
     assert_eq!(mgr.list_snapshots().expect("list must succeed").len(), 3);
 }

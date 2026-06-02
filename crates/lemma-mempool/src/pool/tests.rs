@@ -45,7 +45,9 @@ fn empty_world_state() -> (WorldState, TempDir) {
 /// Fund `address` with `balance` Drop in `state`.
 fn fund(state: &mut WorldState, address: &Address, balance: Amount) {
     let account = Account::new_eoa(balance);
-    state.put_account(address, &account).expect("put_account must succeed");
+    state
+        .put_account(address, &account)
+        .expect("put_account must succeed");
 }
 
 /// Build and sign a minimal `Transfer` transaction.
@@ -112,23 +114,58 @@ fn signed_contract_call(kp: &KeyPair, nonce: u64, gas_price: Amount, to: Address
 }
 
 /// Standard admit call (no stake, no Express hint, zero base fee, Instant::now()).
-fn admit(pool: &mut Mempool, tx: Transaction, kp: &KeyPair, state: &WorldState) -> Result<AdmitOutcome, MempoolError> {
-    let ctx = AdmitContext { chain_id: CHAIN_ID, base_fee: Amount::zero(), now: Instant::now() };
+fn admit(
+    pool: &mut Mempool,
+    tx: Transaction,
+    kp: &KeyPair,
+    state: &WorldState,
+) -> Result<AdmitOutcome, MempoolError> {
+    let ctx = AdmitContext {
+        chain_id: CHAIN_ID,
+        base_fee: Amount::zero(),
+        now: Instant::now(),
+    };
     pool.admit(tx, &kp.public_key(), Amount::zero(), None, state, &ctx)
 }
 
 /// Admit with an Express hint.
-fn admit_with_hint(pool: &mut Mempool, tx: Transaction, kp: &KeyPair, state: &WorldState, hint: &ExpressHint) -> Result<AdmitOutcome, MempoolError> {
-    let ctx = AdmitContext { chain_id: CHAIN_ID, base_fee: Amount::zero(), now: Instant::now() };
-    pool.admit(tx, &kp.public_key(), Amount::zero(), Some(hint), state, &ctx)
+fn admit_with_hint(
+    pool: &mut Mempool,
+    tx: Transaction,
+    kp: &KeyPair,
+    state: &WorldState,
+    hint: &ExpressHint,
+) -> Result<AdmitOutcome, MempoolError> {
+    let ctx = AdmitContext {
+        chain_id: CHAIN_ID,
+        base_fee: Amount::zero(),
+        now: Instant::now(),
+    };
+    pool.admit(
+        tx,
+        &kp.public_key(),
+        Amount::zero(),
+        Some(hint),
+        state,
+        &ctx,
+    )
 }
 
 /// Admit with an explicit gas base fee.
-fn admit_with_base_fee(pool: &mut Mempool, tx: Transaction, kp: &KeyPair, state: &WorldState, base_fee: Amount) -> Result<AdmitOutcome, MempoolError> {
-    let ctx = AdmitContext { chain_id: CHAIN_ID, base_fee, now: Instant::now() };
+fn admit_with_base_fee(
+    pool: &mut Mempool,
+    tx: Transaction,
+    kp: &KeyPair,
+    state: &WorldState,
+    base_fee: Amount,
+) -> Result<AdmitOutcome, MempoolError> {
+    let ctx = AdmitContext {
+        chain_id: CHAIN_ID,
+        base_fee,
+        now: Instant::now(),
+    };
     pool.admit(tx, &kp.public_key(), Amount::zero(), None, state, &ctx)
 }
-
 
 /// Sufficient funding for most tests: covers gas_limit × gas_price + value.
 fn rich() -> Amount {
@@ -219,7 +256,12 @@ fn admit_replace_by_fee_accepted_when_price_above_minimum_bump() {
     let new_hash = tx_new.hash;
     let outcome = admit(&mut pool, tx_new, &kp, &state).expect("replacement must be accepted");
 
-    assert_eq!(outcome, AdmitOutcome::Replaced { replaced_hash: old_hash });
+    assert_eq!(
+        outcome,
+        AdmitOutcome::Replaced {
+            replaced_hash: old_hash
+        }
+    );
     assert_eq!(pool.len(), 1, "old tx evicted, new tx inserted");
     assert!(pool.contains(new_hash));
     assert!(!pool.contains(old_hash));
@@ -295,8 +337,8 @@ fn admit_evicts_lowest_priority_when_pool_is_full_and_incoming_beats_it() {
     // Admit higher-priority Stake tx: must evict the low-priority one.
     let tx_high = signed_stake(&kp_high, 0, Amount::from_drop(200), validator);
     let high_hash = tx_high.hash;
-    let outcome = admit(&mut pool, tx_high, &kp_high, &state)
-        .expect("high-priority Stake must evict low");
+    let outcome =
+        admit(&mut pool, tx_high, &kp_high, &state).expect("high-priority Stake must evict low");
 
     assert_eq!(outcome, AdmitOutcome::Inserted);
     assert_eq!(pool.len(), 1);
@@ -370,8 +412,7 @@ fn admit_returns_rate_limited_when_bucket_exhausted() {
     let _ = admit(&mut pool, tx0, &kp, &state).expect("first tx must pass");
 
     let tx1 = signed_transfer(&kp, 1, Amount::from_drop(1_000));
-    let err = admit(&mut pool, tx1, &kp, &state)
-        .expect_err("second tx must be rate-limited");
+    let err = admit(&mut pool, tx1, &kp, &state).expect_err("second tx must be rate-limited");
 
     assert!(
         matches!(err, MempoolError::RateLimited { sender, .. } if sender == *kp.address()),
@@ -420,8 +461,7 @@ fn admit_propagates_validation_error_for_unfunded_account() {
 
     // Gas limit × gas_price = 1_000_000 × 1_000 Drop = too much for zero balance.
     let tx = signed_transfer(&kp, 0, Amount::from_drop(1_000));
-    let err = admit(&mut pool, tx, &kp, &state)
-        .expect_err("unfunded account must fail validation");
+    let err = admit(&mut pool, tx, &kp, &state).expect_err("unfunded account must fail validation");
 
     assert!(
         matches!(err, MempoolError::InsufficientBalance { .. }),
@@ -495,7 +535,10 @@ fn remove_twice_second_call_returns_none() {
     let _ = admit(&mut pool, tx, &kp, &state).expect("admit");
 
     pool.remove(hash).expect("first remove");
-    assert!(pool.remove(hash).is_none(), "second remove must return None");
+    assert!(
+        pool.remove(hash).is_none(),
+        "second remove must return None"
+    );
 }
 
 // ── Query predicates ──────────────────────────────────────────────────────────
@@ -588,7 +631,9 @@ fn pending_by_priority_returns_highest_priority_first() {
 #[test]
 fn pending_by_priority_respects_limit() {
     let (mut state, _dir) = empty_world_state();
-    let kps: Vec<KeyPair> = (0..5).map(|_| KeyPair::generate().expect("KeyPair::generate must succeed")).collect();
+    let kps: Vec<KeyPair> = (0..5)
+        .map(|_| KeyPair::generate().expect("KeyPair::generate must succeed"))
+        .collect();
     for kp in &kps {
         fund(&mut state, kp.address(), rich());
     }

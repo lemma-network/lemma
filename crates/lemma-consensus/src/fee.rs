@@ -139,9 +139,10 @@ pub fn calculate_base_fee(parent: &BlockHeader) -> Result<Amount, AmountError> {
             // Always increase by at least MIN_BASE_FEE_DELTA_DROP even when
             // integer division truncates delta to 0 (mirrors EIP-1559 max(Δ, 1)).
             let delta = delta.max(MIN_BASE_FEE_DELTA_DROP);
-            base_fee
-                .checked_add(delta)
-                .ok_or(AmountError::Overflow { lhs: base_fee, rhs: delta })?
+            base_fee.checked_add(delta).ok_or(AmountError::Overflow {
+                lhs: base_fee,
+                rhs: delta,
+            })?
         }
         std::cmp::Ordering::Less => {
             // Below target: fee decreases.
@@ -152,7 +153,10 @@ pub fn calculate_base_fee(parent: &BlockHeader) -> Result<Amount, AmountError> {
             //         = base_fee / 8  ≤  base_fee
             // Therefore base_fee − delta ≥ 0 always.
             let delta = compute_fee_delta(base_fee, target - gas_used, target)?;
-            debug_assert!(delta <= base_fee, "decrease delta must not exceed base_fee (proof in doc)");
+            debug_assert!(
+                delta <= base_fee,
+                "decrease delta must not exceed base_fee (proof in doc)"
+            );
             base_fee.saturating_sub(delta) // safe per proof above; saturating = defence-in-depth
         }
     };
@@ -167,11 +171,17 @@ pub fn calculate_base_fee(parent: &BlockHeader) -> Result<Amount, AmountError> {
 /// `BASE_FEE_CHANGE_DENOMINATOR = 8 ≠ 0` — no division-by-zero.
 /// Only `checked_mul` can fail; the two subsequent divisions are infallible.
 fn compute_fee_delta(base_fee: u128, gas_diff: u128, target: u128) -> Result<u128, AmountError> {
-    debug_assert!(target > 0, "compute_fee_delta requires target > 0 (caller invariant)");
+    debug_assert!(
+        target > 0,
+        "compute_fee_delta requires target > 0 (caller invariant)"
+    );
     base_fee
         .checked_mul(gas_diff)
         .map(|n| n / target / BASE_FEE_CHANGE_DENOMINATOR)
-        .ok_or(AmountError::Overflow { lhs: base_fee, rhs: gas_diff })
+        .ok_or(AmountError::Overflow {
+            lhs: base_fee,
+            rhs: gas_diff,
+        })
 }
 
 // ── distribute_fee ────────────────────────────────────────────────────────────
@@ -206,7 +216,10 @@ pub fn distribute_fee(
     let tip_per_gas = gas_price.checked_sub(base_fee)?;
     let burned = base_fee.checked_mul(gas_used as u128)?;
     let to_proposer = tip_per_gas.checked_mul(gas_used as u128)?;
-    Ok(FeeDistribution { burned, to_proposer })
+    Ok(FeeDistribution {
+        burned,
+        to_proposer,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -22,6 +22,7 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
 bincode    = { workspace = true }
+ark-bls12-381   = { workspace = true }
 lemma-core      = { path = "../lemma-core" }
 lemma-storage   = { path = "../lemma-storage" }
 lemma-crypto    = { path = "../lemma-crypto" }
@@ -31,4 +32,6 @@ lemma-network   = { path = "../lemma-network" }
 libp2p          = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile        = { workspace = true }
+ark-ec          = { workspace = true }
+rand            = { workspace = true }

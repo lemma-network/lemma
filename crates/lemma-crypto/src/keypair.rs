@@ -71,16 +71,17 @@ impl PublicKey {
     ///
     /// [`CryptoError::InvalidPublicKeyBytes`] if the bytes are not a valid
     /// Ed25519 curve point or have the wrong length.
-    pub fn classical_verifying_key(
-        &self,
-    ) -> Result<ed25519_dalek::VerifyingKey, CryptoError> {
+    pub fn classical_verifying_key(&self) -> Result<ed25519_dalek::VerifyingKey, CryptoError> {
         let bytes: &[u8; 32] = self.classical.as_slice().try_into().map_err(|_| {
             CryptoError::InvalidPublicKeyBytes {
                 reason: format!("expected 32 bytes, got {}", self.classical.len()),
             }
         })?;
-        ed25519_dalek::VerifyingKey::from_bytes(bytes)
-            .map_err(|e| CryptoError::InvalidPublicKeyBytes { reason: e.to_string() })
+        ed25519_dalek::VerifyingKey::from_bytes(bytes).map_err(|e| {
+            CryptoError::InvalidPublicKeyBytes {
+                reason: e.to_string(),
+            }
+        })
     }
 
     /// Reconstruct the ML-DSA-65 public key from the stored bytes.
@@ -91,7 +92,9 @@ impl PublicKey {
     /// valid ML-DSA-65 public key.
     pub fn quantum_public_key(&self) -> Result<mldsa65::PublicKey, CryptoError> {
         mldsa65::PublicKey::from_bytes(&self.quantum).map_err(|e| {
-            CryptoError::InvalidQuantumPublicKeyBytes { reason: e.to_string() }
+            CryptoError::InvalidQuantumPublicKeyBytes {
+                reason: e.to_string(),
+            }
         })
     }
 
@@ -127,7 +130,7 @@ impl HybridSignature {
     pub fn to_lemma_signature(&self) -> Signature {
         Signature::Hybrid {
             classical: self.classical.clone(),
-            quantum:   self.quantum.clone(),
+            quantum: self.quantum.clone(),
         }
     }
 }
@@ -184,11 +187,16 @@ impl KeyPair {
     /// [`CryptoError::KeyGenerationFailed`] if the OS RNG is unavailable
     /// (extremely rare; indicates a broken OS environment).
     pub fn generate() -> Result<Self, CryptoError> {
-        let classical  = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let classical = ed25519_dalek::SigningKey::generate(&mut OsRng);
         // pqcrypto uses its own internal C entropy — no RNG argument needed.
         let (quantum_pk, quantum_sk) = mldsa65::keypair();
         let address = Address::from_public_key(classical.verifying_key().as_bytes());
-        Ok(Self { classical, quantum_sk, quantum_pk, address })
+        Ok(Self {
+            classical,
+            quantum_sk,
+            quantum_pk,
+            address,
+        })
     }
 
     /// Derive the [`PublicKey`] (Ed25519 + ML-DSA-65 verifying keys as bytes).
@@ -200,7 +208,7 @@ impl KeyPair {
     pub fn public_key(&self) -> PublicKey {
         PublicKey {
             classical: self.classical.verifying_key().as_bytes().to_vec(),
-            quantum:   self.quantum_pk.as_bytes().to_vec(),
+            quantum: self.quantum_pk.as_bytes().to_vec(),
         }
     }
 
@@ -226,10 +234,10 @@ impl KeyPair {
     #[must_use]
     pub fn sign(&self, message: &[u8]) -> HybridSignature {
         let classical_sig = self.classical.sign(message);
-        let quantum_sig   = mldsa65::detached_sign(message, &self.quantum_sk);
+        let quantum_sig = mldsa65::detached_sign(message, &self.quantum_sk);
         HybridSignature {
             classical: classical_sig.to_bytes().to_vec(),
-            quantum:   quantum_sig.as_bytes().to_vec(),
+            quantum: quantum_sig.as_bytes().to_vec(),
         }
     }
 
@@ -264,7 +272,7 @@ impl KeyPair {
     #[must_use]
     pub fn to_keystore_bytes(&self) -> Vec<u8> {
         let ed_sk_bytes = self.classical.to_bytes(); // [u8; 32]
-        // PqSecretKeyTrait + PqPublicKeyTrait provide as_bytes() for ML-DSA types.
+                                                     // PqSecretKeyTrait + PqPublicKeyTrait provide as_bytes() for ML-DSA types.
         let ml_sk_bytes = PqSecretKeyTrait::as_bytes(&self.quantum_sk); // 4032 bytes
         let ml_pk_bytes = PqPublicKeyTrait::as_bytes(&self.quantum_pk); // 1952 bytes
 
@@ -286,7 +294,6 @@ impl KeyPair {
     ///   but the Ed25519 or ML-DSA-65 material is cryptographically invalid
     ///   (corrupted keystore).
     pub fn from_keystore_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-
         if bytes.len() != KEYSTORE_BYTE_LEN {
             return Err(CryptoError::InvalidKeystoreLength {
                 expected: KEYSTORE_BYTE_LEN,
@@ -295,11 +302,12 @@ impl KeyPair {
         }
 
         // Split into three segments.
-        let (ed_bytes, rest)     = bytes.split_at(ED_SK_LEN);
+        let (ed_bytes, rest) = bytes.split_at(ED_SK_LEN);
         let (ml_sk_bytes, ml_pk_bytes) = rest.split_at(ML_SK_LEN);
 
         // Reconstruct Ed25519 signing key (contains both scalar + verifying key).
-        let ed_array: &[u8; ED_SK_LEN] = ed_bytes.try_into()
+        let ed_array: &[u8; ED_SK_LEN] = ed_bytes
+            .try_into()
             .expect("slice has exact length ED_SK_LEN — split_at guarantees this");
         let classical = ed25519_dalek::SigningKey::from_bytes(ed_array);
 
@@ -318,7 +326,12 @@ impl KeyPair {
                 reason: format!("ML-DSA-65 public key: {e}"),
             })?;
 
-        Ok(Self { classical, quantum_sk, quantum_pk, address })
+        Ok(Self {
+            classical,
+            quantum_sk,
+            quantum_pk,
+            address,
+        })
     }
 }
 
@@ -377,17 +390,18 @@ pub const KEYSTORE_BYTE_LEN: usize = ED_SK_LEN + ML_SK_LEN + ML_PK_LEN;
 /// assert!(verify(&pk, b"tampered!", &sig).is_err());
 /// ```
 pub fn verify(
-    pubkey:  &PublicKey,
+    pubkey: &PublicKey,
     message: &[u8],
-    sig:     &HybridSignature,
+    sig: &HybridSignature,
 ) -> Result<(), CryptoError> {
     // ── Classical (Ed25519) ──────────────────────────────────────────────────
     let vk = pubkey.classical_verifying_key()?;
 
-    let classical_bytes: [u8; 64] =
-        sig.classical.as_slice().try_into().map_err(|_| {
-            CryptoError::InvalidClassicalSignatureLength { got: sig.classical.len() }
-        })?;
+    let classical_bytes: [u8; 64] = sig.classical.as_slice().try_into().map_err(|_| {
+        CryptoError::InvalidClassicalSignatureLength {
+            got: sig.classical.len(),
+        }
+    })?;
     let classical_sig = ed25519_dalek::Signature::from_bytes(&classical_bytes);
 
     vk.verify(message, &classical_sig)
@@ -400,7 +414,7 @@ pub fn verify(
     let pq_sig = mldsa65::DetachedSignature::from_bytes(&sig.quantum).map_err(|_| {
         CryptoError::InvalidQuantumSignatureLength {
             expected: mldsa65::signature_bytes(),
-            got:      sig.quantum.len(),
+            got: sig.quantum.len(),
         }
     })?;
 
@@ -437,7 +451,7 @@ impl From<lemma_core::ConsensusKey> for PublicKey {
     fn from(ck: lemma_core::ConsensusKey) -> Self {
         PublicKey {
             classical: ck.classical,
-            quantum:   ck.quantum,
+            quantum: ck.quantum,
         }
     }
 }

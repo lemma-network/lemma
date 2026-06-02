@@ -20,10 +20,7 @@ use crate::{
         block::{DagBlock, DagBlockBody, DagBlockRef, Slot},
         graph::{Dag, InsertOutcome},
     },
-    pulse::{
-        committer::try_decide,
-        leader::LeaderSchedule,
-    },
+    pulse::{committer::try_decide, leader::LeaderSchedule},
     reputation::LeaderSwapTable,
     LEADER_OFFSET,
 };
@@ -44,9 +41,19 @@ fn vset(n: u8) -> ValidatorSet {
     let total = Amount::from_drop(n as u128 * 10);
     let mut members = BTreeMap::new();
     for i in 1u8..=n {
-        members.insert(addr(i), Member { consensus_pubkey: dummy_key(), power });
+        members.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch: 1, members, total_power: total }
+    ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: total,
+    }
 }
 
 // ── Construction — empty committee (W1) ──────────────────────────────────────
@@ -61,8 +68,10 @@ fn new_returns_error_on_empty_committee() {
         total_power: Amount::from_drop(0),
     };
     let err = LeaderSchedule::new(&empty_vset).unwrap_err();
-    assert!(err.is_empty_committee(),
-        "empty committee must return EmptyCommittee error, got: {err:?}");
+    assert!(
+        err.is_empty_committee(),
+        "empty committee must return EmptyCommittee error, got: {err:?}"
+    );
 }
 
 #[test]
@@ -74,9 +83,7 @@ fn with_offset_returns_error_on_empty_committee() {
         total_power: Amount::from_drop(0),
     };
     assert!(LeaderSchedule::with_offset(&empty_vset, 0).is_err());
-    assert!(LeaderSchedule::with_swap(
-        &empty_vset, 0, LeaderSwapTable::identity()
-    ).is_err());
+    assert!(LeaderSchedule::with_swap(&empty_vset, 0, LeaderSwapTable::identity()).is_err());
 }
 
 // ── Basic construction ─────────────────────────────────────────────────────────
@@ -111,7 +118,11 @@ fn elect_leader_cycles_through_committee() {
     let mut unique = leaders.clone();
     unique.sort();
     unique.dedup();
-    assert_eq!(unique.len(), 4, "4 rounds must cover all 4 distinct authors");
+    assert_eq!(
+        unique.len(),
+        4,
+        "4 rounds must cover all 4 distinct authors"
+    );
 }
 
 #[test]
@@ -132,8 +143,11 @@ fn elect_leader_returns_correct_slot_round() {
     let v = vset(4);
     let schedule = LeaderSchedule::new(&v).unwrap();
     for r in 0u64..10 {
-        assert_eq!(schedule.elect_leader(r).round, r,
-            "slot round must equal input round");
+        assert_eq!(
+            schedule.elect_leader(r).round,
+            r,
+            "slot round must equal input round"
+        );
     }
 }
 
@@ -144,8 +158,11 @@ fn elect_leader_deterministic_same_round_same_leader() {
     let s1 = LeaderSchedule::new(&v).unwrap();
     let s2 = LeaderSchedule::new(&v).unwrap();
     for r in 0u64..20 {
-        assert_eq!(s1.elect_leader(r), s2.elect_leader(r),
-            "same round must always elect same leader");
+        assert_eq!(
+            s1.elect_leader(r),
+            s2.elect_leader(r),
+            "same round must always elect same leader"
+        );
     }
 }
 
@@ -160,8 +177,10 @@ fn committee_order_matches_btreemap_sorted_address_order() {
     let leaders: Vec<Address> = (0u64..4).map(|r| schedule.elect_leader(r).author).collect();
     // BTreeMap keys are sorted by Address bytes.
     let btree_order: Vec<Address> = v.members.keys().copied().collect();
-    assert_eq!(leaders, btree_order,
-        "round 0..4 leaders must match BTreeMap sorted key order");
+    assert_eq!(
+        leaders, btree_order,
+        "round 0..4 leaders must match BTreeMap sorted key order"
+    );
 }
 
 #[test]
@@ -189,15 +208,23 @@ fn elect_leader_at_max_round_does_not_panic_and_wraps() {
 
     // Must not panic — wrapping_add is the hardening.
     let slot_max = s_off0.elect_leader(u64::MAX);
-    assert_eq!(slot_max.round, u64::MAX,
-        "slot.round must always equal the input round");
-    assert!(v.members.contains_key(&slot_max.author),
-        "elected leader at u64::MAX must be a committee member");
+    assert_eq!(
+        slot_max.round,
+        u64::MAX,
+        "slot.round must always equal the input round"
+    );
+    assert!(
+        v.members.contains_key(&slot_max.author),
+        "elected leader at u64::MAX must be a committee member"
+    );
 
     // offset=1 at u64::MAX: wrapping_add(1) == 0; same as offset=0 at round 0.
     let slot_wrap = s_off1.elect_leader(u64::MAX);
-    assert_eq!(slot_wrap.author, s_off0.elect_leader(0).author,
-        "offset=1 at u64::MAX wraps to same author as offset=0 at round 0");
+    assert_eq!(
+        slot_wrap.author,
+        s_off0.elect_leader(0).author,
+        "offset=1 at u64::MAX wraps to same author as offset=0 at round 0"
+    );
 }
 
 // ── Insertion-order independence (S3) ──────────────────────────────────────────
@@ -210,20 +237,43 @@ fn committee_order_independent_of_insertion_order() {
     let mut fwd: BTreeMap<Address, Member> = BTreeMap::new();
     let mut rev: BTreeMap<Address, Member> = BTreeMap::new();
     for i in 1u8..=4 {
-        fwd.insert(addr(i), Member { consensus_pubkey: dummy_key(), power });
+        fwd.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
     for i in (1u8..=4).rev() {
-        rev.insert(addr(i), Member { consensus_pubkey: dummy_key(), power });
+        rev.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
     let total = Amount::from_drop(40);
-    let v_fwd = ValidatorSet { epoch: 1, members: fwd, total_power: total };
-    let v_rev = ValidatorSet { epoch: 1, members: rev, total_power: total };
+    let v_fwd = ValidatorSet {
+        epoch: 1,
+        members: fwd,
+        total_power: total,
+    };
+    let v_rev = ValidatorSet {
+        epoch: 1,
+        members: rev,
+        total_power: total,
+    };
     let s_fwd = LeaderSchedule::new(&v_fwd).unwrap();
     let s_rev = LeaderSchedule::new(&v_rev).unwrap();
 
     for r in 0u64..8 {
-        assert_eq!(s_fwd.elect_leader(r), s_rev.elect_leader(r),
-            "insertion order must not affect leader election (round {r})");
+        assert_eq!(
+            s_fwd.elect_leader(r),
+            s_rev.elect_leader(r),
+            "insertion order must not affect leader election (round {r})"
+        );
     }
 }
 
@@ -253,7 +303,8 @@ fn offset_shifts_cycle_by_n_positions() {
             assert_eq!(
                 sk.elect_leader(r).author,
                 s0.elect_leader(r + offset).author,
-                "offset {offset} at round {r} must match offset-0 at round {}", r + offset
+                "offset {offset} at round {r} must match offset-0 at round {}",
+                r + offset
             );
         }
     }
@@ -267,8 +318,11 @@ fn single_validator_committee_always_same_leader() {
     let schedule = LeaderSchedule::new(&v).unwrap();
     let leader = schedule.elect_leader(0).author;
     for r in 0u64..20 {
-        assert_eq!(schedule.elect_leader(r).author, leader,
-            "single-validator committee must always elect same leader");
+        assert_eq!(
+            schedule.elect_leader(r).author,
+            leader,
+            "single-validator committee must always elect same leader"
+        );
     }
 }
 
@@ -280,8 +334,11 @@ fn with_swap_identity_equals_new() {
     let s_new = LeaderSchedule::new(&v).unwrap();
     let s_swap = LeaderSchedule::with_swap(&v, LEADER_OFFSET, LeaderSwapTable::identity()).unwrap();
     for r in 0u64..8 {
-        assert_eq!(s_new.elect_leader(r), s_swap.elect_leader(r),
-            "identity swap must produce same result as new()");
+        assert_eq!(
+            s_new.elect_leader(r),
+            s_swap.elect_leader(r),
+            "identity swap must produce same result as new()"
+        );
     }
 }
 
@@ -293,8 +350,11 @@ fn leader_fn_produces_same_results_as_elect_leader() {
     let schedule = LeaderSchedule::new(&v).unwrap();
     let f = schedule.leader_fn();
     for r in 0u64..12 {
-        assert_eq!(f(r), schedule.elect_leader(r),
-            "leader_fn must produce same result as elect_leader");
+        assert_eq!(
+            f(r),
+            schedule.elect_leader(r),
+            "leader_fn must produce same result as elect_leader"
+        );
     }
 }
 
@@ -308,7 +368,10 @@ fn leader_fn_works_with_try_decide() {
     let schedule = LeaderSchedule::new(&v).unwrap();
     let mut dag = Dag::new(1);
     // addr(0): genesis sentinel, not a committee member (1..=4). Only .round is read.
-    let last = Slot { round: 0, author: addr(0) };
+    let last = Slot {
+        round: 0,
+        author: addr(0),
+    };
 
     // Determine who leads round 3 (first wave-aligned round > 0).
     let leader3 = schedule.elect_leader(3);
@@ -348,14 +411,20 @@ fn leader_fn_works_with_try_decide() {
     let result = try_decide(last, &dag, &v, schedule.leader_fn()).unwrap();
 
     assert!(!result.is_empty(), "should decide at least one leader");
-    assert_eq!(result[0].round(), 3, "first decided leader must be at round 3");
+    assert_eq!(
+        result[0].round(),
+        3,
+        "first decided leader must be at round 3"
+    );
 
     // W2 fix: use match so the test fails loudly if the wave didn't Commit.
     // An `if let` would silently pass if result[0] is Skip instead of Commit.
     match &result[0] {
         crate::pulse::committer::LeaderStatus::Commit(lref) => {
-            assert_eq!(lref.author, leader3.author,
-                "committed leader must match elect_leader output");
+            assert_eq!(
+                lref.author, leader3.author,
+                "committed leader must match elect_leader output"
+            );
         }
         other => panic!(
             "expected round-3 leader to Commit, got {other:?}; \

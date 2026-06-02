@@ -9,17 +9,11 @@
 
 use tempfile::tempdir;
 
-use lemma_core::{
-    address::Address,
-    amount::Amount,
-    block::Block,
-    hash::Hash,
-    header::BlockHeader,
-};
+use lemma_core::{address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader};
 
 use super::*;
 use crate::{
-    db::{CF_BLOCK_HASH, CF_BLOCKS, CF_METADATA},
+    db::{CF_BLOCKS, CF_BLOCK_HASH, CF_METADATA},
     LemmaDb, StorageError,
 };
 
@@ -27,7 +21,7 @@ use crate::{
 
 fn open_temp_db() -> (LemmaDb, tempfile::TempDir) {
     let dir = tempdir().expect("tempdir must succeed");
-    let db  = LemmaDb::open(dir.path()).expect("LemmaDb::open must succeed");
+    let db = LemmaDb::open(dir.path()).expect("LemmaDb::open must succeed");
     (db, dir)
 }
 
@@ -45,28 +39,28 @@ fn make_block_at(height: u64, parent_hash: Hash) -> (Block, Hash) {
         height,
         1_700_000_000 + height,
         parent_hash,
-        Hash::zero(),               // transactions_root
-        Hash::zero(),               // state_root
-        Hash::zero(),               // receipts_root
-        Address::zero(),            // proposer
-        0,                          // epoch
-        0,                          // dag_round
-        Hash::zero(),               // dag_anchor
+        Hash::zero(),    // transactions_root
+        Hash::zero(),    // state_root
+        Hash::zero(),    // receipts_root
+        Address::zero(), // proposer
+        0,               // epoch
+        0,               // dag_round
+        Hash::zero(),    // dag_anchor
         validators_hash,
-        validators_hash,            // next_validators_hash
-        30_000_000,                 // gas_limit
-        0,                          // gas_used
+        validators_hash, // next_validators_hash
+        30_000_000,      // gas_limit
+        0,               // gas_used
         Amount::from_drop(1_000_000_000),
         vec![],
     )
     .expect("BlockHeader::new must succeed for valid params");
 
-    let block = Block::new(header, vec![], vec![])
-        .expect("Block::new must succeed for valid params");
+    let block =
+        Block::new(header, vec![], vec![]).expect("Block::new must succeed for valid params");
 
     // Compute hash from serialized bytes (canonical path, same as genesis_boot).
-    let bytes  = bincode::serialize(&block).expect("bincode::serialize must succeed");
-    let hash   = lemma_crypto::hash_bytes(&bytes);
+    let bytes = bincode::serialize(&block).expect("bincode::serialize must succeed");
+    let hash = lemma_crypto::hash_bytes(&bytes);
     (block, hash)
 }
 
@@ -78,7 +72,9 @@ fn put_block_then_get_by_height_returns_same_block() {
     let (block, hash) = genesis_block();
     let store = ChainStore::new(&db);
 
-    store.put_block(&block, hash).expect("put_block must succeed");
+    store
+        .put_block(&block, hash)
+        .expect("put_block must succeed");
 
     let got = store
         .get_block_by_height(0)
@@ -94,7 +90,9 @@ fn put_block_then_get_by_hash_returns_same_block() {
     let (block, hash) = genesis_block();
     let store = ChainStore::new(&db);
 
-    store.put_block(&block, hash).expect("put_block must succeed");
+    store
+        .put_block(&block, hash)
+        .expect("put_block must succeed");
 
     let got = store
         .get_block_by_hash(&hash)
@@ -108,7 +106,9 @@ fn put_block_height_and_hash_indexes_return_identical_bytes() {
     let (db, _dir) = open_temp_db();
     let (block, hash) = genesis_block();
     let store = ChainStore::new(&db);
-    store.put_block(&block, hash).expect("put_block must succeed");
+    store
+        .put_block(&block, hash)
+        .expect("put_block must succeed");
 
     // Both CF entries must contain the same encoded bytes — confirmed by
     // reading the raw CF entries and comparing.
@@ -120,7 +120,10 @@ fn put_block_height_and_hash_indexes_return_identical_bytes() {
         .get(CF_BLOCK_HASH, hash.as_bytes())
         .expect("CF_BLOCK_HASH get must succeed")
         .expect("block must exist by hash");
-    assert_eq!(by_height, by_hash, "height and hash CFs must store identical bytes");
+    assert_eq!(
+        by_height, by_hash,
+        "height and hash CFs must store identical bytes"
+    );
 }
 
 #[test]
@@ -153,7 +156,9 @@ fn tip_returns_none_on_empty_chain() {
 #[test]
 fn latest_height_returns_none_on_empty_chain() {
     let (db, _dir) = open_temp_db();
-    let h = ChainStore::new(&db).latest_height().expect("latest_height must not error");
+    let h = ChainStore::new(&db)
+        .latest_height()
+        .expect("latest_height must not error");
     assert!(h.is_none());
 }
 
@@ -162,9 +167,14 @@ fn tip_returns_correct_height_and_hash_after_genesis() {
     let (db, _dir) = open_temp_db();
     let (block, hash) = genesis_block();
     let store = ChainStore::new(&db);
-    store.put_block(&block, hash).expect("put_block must succeed");
+    store
+        .put_block(&block, hash)
+        .expect("put_block must succeed");
 
-    let (height, tip_hash) = store.tip().expect("tip must succeed").expect("tip must be Some");
+    let (height, tip_hash) = store
+        .tip()
+        .expect("tip must succeed")
+        .expect("tip must be Some");
     assert_eq!(height, 0);
     assert_eq!(tip_hash, hash);
 }
@@ -183,7 +193,10 @@ fn tip_advances_with_each_committed_block() {
     let (b2, h2) = make_block_at(2, h1);
     store.put_block(&b2, h2).expect("put b2");
 
-    let (height, tip_hash) = store.tip().expect("tip must succeed").expect("tip must be Some");
+    let (height, tip_hash) = store
+        .tip()
+        .expect("tip must succeed")
+        .expect("tip must be Some");
     assert_eq!(height, 2);
     assert_eq!(tip_hash, h2);
 }
@@ -237,13 +250,27 @@ fn put_block_does_not_overwrite_tip_when_writing_earlier_height() {
 fn put_block_writes_all_four_cf_entries_atomically() {
     let (db, _dir) = open_temp_db();
     let (block, hash) = genesis_block();
-    ChainStore::new(&db).put_block(&block, hash).expect("put_block must succeed");
+    ChainStore::new(&db)
+        .put_block(&block, hash)
+        .expect("put_block must succeed");
 
     // All four writes must be present after a single put_block call.
-    assert!(db.get(CF_BLOCKS,     &0u64.to_be_bytes()).unwrap().is_some(),         "CF_BLOCKS missing");
-    assert!(db.get(CF_BLOCK_HASH, hash.as_bytes()).unwrap().is_some(),             "CF_BLOCK_HASH missing");
-    assert!(db.get(CF_METADATA,   META_LATEST_HEIGHT).unwrap().is_some(),         "latest_height missing");
-    assert!(db.get(CF_METADATA,   META_LATEST_HASH).unwrap().is_some(),           "latest_hash missing");
+    assert!(
+        db.get(CF_BLOCKS, &0u64.to_be_bytes()).unwrap().is_some(),
+        "CF_BLOCKS missing"
+    );
+    assert!(
+        db.get(CF_BLOCK_HASH, hash.as_bytes()).unwrap().is_some(),
+        "CF_BLOCK_HASH missing"
+    );
+    assert!(
+        db.get(CF_METADATA, META_LATEST_HEIGHT).unwrap().is_some(),
+        "latest_height missing"
+    );
+    assert!(
+        db.get(CF_METADATA, META_LATEST_HASH).unwrap().is_some(),
+        "latest_hash missing"
+    );
 }
 
 // ── tip advancement — exact-height re-write ───────────────────────────────────
@@ -257,7 +284,9 @@ fn put_block_at_same_height_advances_tip_hash() {
     let store = ChainStore::new(&db);
 
     let (b0_v1, h0_v1) = genesis_block();
-    store.put_block(&b0_v1, h0_v1).expect("first put must succeed");
+    store
+        .put_block(&b0_v1, h0_v1)
+        .expect("first put must succeed");
     let (tip_height_1, tip_hash_1) = store.tip().unwrap().unwrap();
     assert_eq!(tip_height_1, 0);
     assert_eq!(tip_hash_1, h0_v1);
@@ -265,11 +294,16 @@ fn put_block_at_same_height_advances_tip_hash() {
     // Write a different block at the same height (different hash).
     let (b0_v2, h0_v2) = make_block_at(0, Hash::from_bytes([0xFF; 32])); // different parent
     assert_ne!(h0_v1, h0_v2, "test fixture must produce different hashes");
-    store.put_block(&b0_v2, h0_v2).expect("second put at same height must succeed");
+    store
+        .put_block(&b0_v2, h0_v2)
+        .expect("second put at same height must succeed");
 
     let (tip_height_2, tip_hash_2) = store.tip().unwrap().unwrap();
     assert_eq!(tip_height_2, 0, "height unchanged");
-    assert_eq!(tip_hash_2, h0_v2, "tip hash must update to new hash at same height");
+    assert_eq!(
+        tip_hash_2, h0_v2,
+        "tip hash must update to new hash at same height"
+    );
 }
 
 // ── corruption paths ──────────────────────────────────────────────────────────

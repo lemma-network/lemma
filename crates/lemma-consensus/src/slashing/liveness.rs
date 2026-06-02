@@ -61,6 +61,15 @@ pub const MAX_MISSED_BLOCKS: u64 = SIGNED_BLOCKS_WINDOW / 2;
 /// a permanent tombstone. Set from `block_time + DOWNTIME_JAIL_DURATION_SECONDS`.
 pub const DOWNTIME_JAIL_DURATION_SECONDS: u64 = 24 * 60 * 60; // 86_400 s
 
+/// Duration of the share-withholding jail sentence in consensus seconds (spec §5.4).
+///
+/// Share-withholding is a liveness fault ("finite jail, not tombstone" — 13 §5.4).
+/// The spec does not specify a separate duration; one epoch (24 h) matches the
+/// same one-epoch-scoped liveness semantics as downtime (§5.5). Defined as a
+/// separate named constant so a future spec revision can diverge independently
+/// without modifying the orchestrator. Currently equal to `DOWNTIME_JAIL_DURATION_SECONDS`.
+pub const SHARE_WITHHOLDING_JAIL_DURATION_SECONDS: u64 = DOWNTIME_JAIL_DURATION_SECONDS;
+
 // ── SignedBlocksWindow ────────────────────────────────────────────────────────
 
 /// Sliding-window bit-array for per-validator downtime tracking (spec §5.5).
@@ -111,7 +120,10 @@ impl SignedBlocksWindow {
     /// This is a programmer error — callers must pass a positive window size.
     #[must_use]
     pub fn new(window_size: u64, max_missed: u64) -> Self {
-        assert!(window_size > 0, "SignedBlocksWindow: window_size must be > 0");
+        assert!(
+            window_size > 0,
+            "SignedBlocksWindow: window_size must be > 0"
+        );
         Self {
             bits: vec![true; window_size as usize], // initialise: all blocks signed
             missed_count: 0,
@@ -139,16 +151,18 @@ impl SignedBlocksWindow {
 
         // Update missed count for the slot being overwritten.
         match (previously_signed, signed) {
-            (true, false) => self.missed_count += 1,              // was signed, now missed
+            (true, false) => self.missed_count += 1, // was signed, now missed
             (false, true) => self.missed_count = self.missed_count.saturating_sub(1), // was missed, now signed
-            _ => {}                                               // no change
+            _ => {}                                                                   // no change
         }
         self.bits[slot] = signed;
 
         // Fire breach if threshold exceeded AND not already fired for this height.
         if self.missed_count > self.max_missed && self.last_breach_height != Some(height) {
             self.last_breach_height = Some(height);
-            return Some(DowntimeBreach { breach_height: height });
+            return Some(DowntimeBreach {
+                breach_height: height,
+            });
         }
         None
     }

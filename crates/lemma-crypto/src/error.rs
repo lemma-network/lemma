@@ -37,7 +37,6 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CryptoError {
     // ── Verification ─────────────────────────────────────────────────────────
-
     /// Ed25519 classical signature verification failed.
     ///
     /// The message, public key, or signature bytes are invalid or mismatched.
@@ -74,7 +73,6 @@ pub enum CryptoError {
     UnsignedTransaction,
 
     // ── Key & byte validation ─────────────────────────────────────────────────
-
     /// Ed25519 signature bytes had the wrong length.
     ///
     /// Ed25519 signatures are always exactly 64 bytes.
@@ -104,7 +102,6 @@ pub enum CryptoError {
     InvalidQuantumPublicKeyBytes { reason: String },
 
     // ── Key generation ────────────────────────────────────────────────────────
-
     /// Key pair generation failed.
     ///
     /// Occurs when the underlying RNG or key derivation step fails.
@@ -113,7 +110,6 @@ pub enum CryptoError {
     KeyGenerationFailed { reason: String },
 
     // ── Serialization ─────────────────────────────────────────────────────────
-
     /// Serialization or deserialization failed.
     ///
     /// Occurs when a value cannot be serialized to bytes (e.g., before hashing
@@ -127,7 +123,6 @@ pub enum CryptoError {
     SerializationFailed { reason: String },
 
     // ── Keystore ──────────────────────────────────────────────────────────────
-
     /// Keystore bytes are the wrong length for a Lemma hybrid keypair.
     ///
     /// A valid keystore produced by [`KeyPair::to_keystore_bytes`] is always

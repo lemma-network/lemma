@@ -23,14 +23,9 @@
 
 use std::collections::BTreeMap;
 
-use lemma_core::{
-    address::Address,
-    hash::Hash,
-    QuorumCert,
-    validator_set::ValidatorSet,
-};
+use lemma_core::{address::Address, hash::Hash, validator_set::ValidatorSet, QuorumCert};
 
-use crate::stake::{StakeAggregator};
+use crate::stake::StakeAggregator;
 
 // ── CertError ─────────────────────────────────────────────────────────────────
 
@@ -45,9 +40,7 @@ pub enum CertError {
     ///
     /// `qc.header_digest` must match the Blake3 digest of the header being
     /// certified (`lemma-crypto::hash(header)`, injected by caller).
-    #[error(
-        "certificate digest mismatch: cert covers {got}, expected {expected}"
-    )]
+    #[error("certificate digest mismatch: cert covers {got}, expected {expected}")]
     DigestMismatch {
         /// The digest the caller expected the cert to cover.
         expected: Hash,
@@ -153,7 +146,10 @@ pub fn verify_quorum_cert(
     // BTreeMap iteration is canonically sorted by Address — deterministic.
     for addr in qc.signers.keys() {
         // Check 2: signer must be in committee.
-        let member = vset.members.get(addr).ok_or(CertError::NonMemberSigner { signer: *addr })?;
+        let member = vset
+            .members
+            .get(addr)
+            .ok_or(CertError::NonMemberSigner { signer: *addr })?;
 
         // Check 3: signature must be valid (injected).
         let sig_ok = sig_results.get(addr).copied().unwrap_or(false);

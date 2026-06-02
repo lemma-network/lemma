@@ -46,16 +46,31 @@ fn hash_b() -> Hash {
 /// `all_variants_count_matches_canary`.
 fn all_variants() -> Vec<ConsensusError> {
     vec![
-        ConsensusError::EpochMismatch { expected: 1, got: 2 },
-        ConsensusError::UnknownAuthor { author: addr(), epoch: 1 },
-        ConsensusError::InvalidSignature { author: addr(), round: 5 },
-        ConsensusError::BelowGcBoundary { round: 3, gc_round: 10 },
+        ConsensusError::EpochMismatch {
+            expected: 1,
+            got: 2,
+        },
+        ConsensusError::UnknownAuthor {
+            author: addr(),
+            epoch: 1,
+        },
+        ConsensusError::InvalidSignature {
+            author: addr(),
+            round: 5,
+        },
+        ConsensusError::BelowGcBoundary {
+            round: 3,
+            gc_round: 10,
+        },
         ConsensusError::MissingAncestor {
             ancestor_digest: hash_a(),
             author: addr(),
             round: 4,
         },
-        ConsensusError::InsufficientStrongLinks { author: addr(), round: 6 },
+        ConsensusError::InsufficientStrongLinks {
+            author: addr(),
+            round: 6,
+        },
         ConsensusError::Equivocation {
             author: addr(),
             round: 7,
@@ -70,7 +85,10 @@ fn all_variants() -> Vec<ConsensusError> {
             first: hash_a(),
             second: hash_b(),
         },
-        ConsensusError::DecidedLeaderMissing { round: 4, author: addr() },
+        ConsensusError::DecidedLeaderMissing {
+            round: 4,
+            author: addr(),
+        },
     ]
 }
 
@@ -78,13 +96,19 @@ fn all_variants() -> Vec<ConsensusError> {
 
 #[test]
 fn epoch_mismatch_display_is_exact() {
-    let e = ConsensusError::EpochMismatch { expected: 3, got: 7 };
+    let e = ConsensusError::EpochMismatch {
+        expected: 3,
+        got: 7,
+    };
     assert_eq!(e.to_string(), "block epoch mismatch: expected 3, got 7");
 }
 
 #[test]
 fn unknown_author_display_contains_anchored_epoch() {
-    let e = ConsensusError::UnknownAuthor { author: addr(), epoch: 5 };
+    let e = ConsensusError::UnknownAuthor {
+        author: addr(),
+        epoch: 5,
+    };
     let s = e.to_string();
     // Anchored token: "epoch 5" cannot collide with digits in the address string.
     assert!(s.contains("epoch 5"), "anchored epoch missing from: {s}");
@@ -92,14 +116,20 @@ fn unknown_author_display_contains_anchored_epoch() {
 
 #[test]
 fn invalid_signature_display_contains_anchored_round() {
-    let e = ConsensusError::InvalidSignature { author: addr(), round: 9 };
+    let e = ConsensusError::InvalidSignature {
+        author: addr(),
+        round: 9,
+    };
     let s = e.to_string();
     assert!(s.contains("round 9"), "anchored round missing from: {s}");
 }
 
 #[test]
 fn below_gc_boundary_display_is_exact() {
-    let e = ConsensusError::BelowGcBoundary { round: 2, gc_round: 15 };
+    let e = ConsensusError::BelowGcBoundary {
+        round: 2,
+        gc_round: 15,
+    };
     assert_eq!(
         e.to_string(),
         "block at round 2 is below GC boundary (gc_round=15)"
@@ -124,7 +154,10 @@ fn missing_ancestor_display_contains_digest_and_anchored_round() {
 
 #[test]
 fn insufficient_strong_links_display_contains_anchored_round() {
-    let e = ConsensusError::InsufficientStrongLinks { author: addr(), round: 11 };
+    let e = ConsensusError::InsufficientStrongLinks {
+        author: addr(),
+        round: 11,
+    };
     let s = e.to_string();
     assert!(s.contains("round 11"), "anchored round missing from: {s}");
 }
@@ -204,7 +237,10 @@ fn epoch_mismatch_is_not_pending_data() {
     // Regression guard for the §4.6 buffer-vs-drop decision: epoch recoverability
     // is stateful and owned by dag::graph, NOT this predicate. A future-epoch
     // mismatch must still return false here.
-    let future = ConsensusError::EpochMismatch { expected: 4, got: 9 };
+    let future = ConsensusError::EpochMismatch {
+        expected: 4,
+        got: 9,
+    };
     assert!(
         !future.is_pending_data(),
         "EpochMismatch must not be classified as pending-data"
@@ -227,17 +263,25 @@ fn is_byzantine_breach_true_only_for_byzantine_invariant_breach() {
         if matches!(e, ConsensusError::ByzantineInvariantBreach { .. }) {
             continue;
         }
-        assert!(!e.is_byzantine_breach(),
-            "is_byzantine_breach unexpectedly true for: {e:?}");
+        assert!(
+            !e.is_byzantine_breach(),
+            "is_byzantine_breach unexpectedly true for: {e:?}"
+        );
     }
 }
 
 #[test]
 fn is_fatal_true_for_breach_and_missing_leader() {
     let breach = ConsensusError::ByzantineInvariantBreach {
-        slot_round: 3, slot_author: addr(), first: hash_a(), second: hash_b(),
+        slot_round: 3,
+        slot_author: addr(),
+        first: hash_a(),
+        second: hash_b(),
     };
-    let missing = ConsensusError::DecidedLeaderMissing { round: 4, author: addr() };
+    let missing = ConsensusError::DecidedLeaderMissing {
+        round: 4,
+        author: addr(),
+    };
     assert!(breach.is_fatal());
     assert!(missing.is_fatal());
 
@@ -258,7 +302,10 @@ fn is_fatal_true_for_breach_and_missing_leader() {
 fn decided_leader_missing_is_fatal_but_not_byzantine() {
     // DecidedLeaderMissing must halt the node (is_fatal) but NOT be slashed
     // (is_byzantine_breach false — it's an internal invariant, not a peer offence).
-    let missing = ConsensusError::DecidedLeaderMissing { round: 4, author: addr() };
+    let missing = ConsensusError::DecidedLeaderMissing {
+        round: 4,
+        author: addr(),
+    };
     assert!(missing.is_fatal());
     assert!(!missing.is_byzantine_breach());
 }
@@ -271,8 +318,10 @@ fn is_empty_committee_true_only_for_empty_committee() {
         if matches!(e, ConsensusError::EmptyCommittee { .. }) {
             continue;
         }
-        assert!(!e.is_empty_committee(),
-            "is_empty_committee unexpectedly true for: {e:?}");
+        assert!(
+            !e.is_empty_committee(),
+            "is_empty_committee unexpectedly true for: {e:?}"
+        );
     }
 }
 

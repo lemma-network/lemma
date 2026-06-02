@@ -11,25 +11,27 @@ use ark_bls12_381::{Fr, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{Field, UniformRand, Zero};
 
-use super::{
-    decryption_share, verify_share, verify_share_batch,
-};
-use crate::shield::{
-    ciphertext::ShieldAad,
-    tpke::encrypt,
-    ShieldError,
-};
+use super::{decryption_share, verify_share, verify_share_batch};
+use crate::shield::{ciphertext::ShieldAad, tpke::encrypt, ShieldError};
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
 /// A consistent AAD used across tests.
 fn test_aad() -> ShieldAad {
-    ShieldAad { chain_id: 1, epoch: 7, submitter_nonce: 99 }
+    ShieldAad {
+        chain_id: 1,
+        epoch: 7,
+        submitter_nonce: 99,
+    }
 }
 
 /// A different AAD for cross-aad tests.
 fn test_aad2() -> ShieldAad {
-    ShieldAad { chain_id: 1, epoch: 8, submitter_nonce: 0 }
+    ShieldAad {
+        chain_id: 1,
+        epoch: 8,
+        submitter_nonce: 0,
+    }
 }
 
 /// A fixed nonzero epoch decryption scalar `dk_i`.
@@ -273,7 +275,10 @@ fn dleq_soundness_zero_response_rejected() {
 
 #[test]
 fn verify_share_batch_empty_returns_ok() {
-    assert!(verify_share_batch(&[]).is_ok(), "empty batch must return Ok");
+    assert!(
+        verify_share_batch(&[]).is_ok(),
+        "empty batch must return Ok"
+    );
 }
 
 #[test]
@@ -303,11 +308,7 @@ fn verify_share_batch_accepts_two_validators() {
     let ct2 = test_ct2();
     let share1 = decryption_share(&test_dk(), 0, &ct1).unwrap();
     let share2 = decryption_share(&test_dk2(), 1, &ct2).unwrap();
-    verify_share_batch(&[
-        (share1, ct1, test_ek()),
-        (share2, ct2, test_ek2()),
-    ])
-    .unwrap();
+    verify_share_batch(&[(share1, ct1, test_ek()), (share2, ct2, test_ek2())]).unwrap();
 }
 
 #[test]
@@ -324,10 +325,7 @@ fn verify_share_batch_rejects_one_bad_share_in_two() {
     // A tampered D_i with correct DLEQ proof is structurally inconsistent
     // (the proof would fail in verify_share). Here we test that the batch
     // pairing equation catches the bad share.
-    let result = verify_share_batch(&[
-        (good_share, ct1, test_ek()),
-        (bad_share, ct2, test_ek()),
-    ]);
+    let result = verify_share_batch(&[(good_share, ct1, test_ek()), (bad_share, ct2, test_ek())]);
     assert_eq!(
         result.unwrap_err(),
         ShieldError::InvalidShare,

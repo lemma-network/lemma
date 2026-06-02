@@ -191,7 +191,9 @@ pub enum ConfigError {
     ZeroMaxConnectionsIn,
 
     /// `request_timeout` was set to zero, disabling request timeouts.
-    #[error("request_timeout must be > 0 (a zero timeout causes all requests to immediately fail)")]
+    #[error(
+        "request_timeout must be > 0 (a zero timeout causes all requests to immediately fail)"
+    )]
     ZeroRequestTimeout,
 
     /// `idle_timeout` was set to zero, causing connections to close immediately.
@@ -230,7 +232,6 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NetworkConfig {
     // ── Addresses ─────────────────────────────────────────────────────────
-
     /// Local addresses the swarm will listen on.
     ///
     /// Defaults to all interfaces on a random OS-assigned TCP port
@@ -252,7 +253,6 @@ pub struct NetworkConfig {
     pub bootstrap_peers: Vec<Multiaddr>,
 
     // ── Bounds / DoS limits ────────────────────────────────────────────────
-
     /// Maximum number of blocks a range request may span.
     ///
     /// Requests exceeding this yield
@@ -280,7 +280,6 @@ pub struct NetworkConfig {
     pub max_connections_in: u32,
 
     // ── Timeouts ───────────────────────────────────────────────────────────
-
     /// Timeout for a single request-response call. See [`DEFAULT_REQUEST_TIMEOUT`].
     pub request_timeout: Duration,
 
@@ -293,7 +292,6 @@ pub struct NetworkConfig {
     pub gossip_heartbeat: Duration,
 
     // ── Snapshots ─────────────────────────────────────────────────────────
-
     /// How often (in blocks) to produce a state snapshot for fast sync.
     ///
     /// `0` disables snapshot production. Snapshots are taken only at
@@ -314,11 +312,9 @@ impl Default for NetworkConfig {
     /// - All limits set to the module-level `DEFAULT_*` constants.
     fn default() -> Self {
         NetworkConfig {
-            listen_addrs: vec![
-                "/ip4/0.0.0.0/tcp/0"
-                    .parse()
-                    .expect("static listen addr is always valid"),
-            ],
+            listen_addrs: vec!["/ip4/0.0.0.0/tcp/0"
+                .parse()
+                .expect("static listen addr is always valid")],
             bootstrap_peers: vec![],
             max_range: DEFAULT_MAX_RANGE,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
@@ -344,11 +340,9 @@ impl NetworkConfig {
     /// Bootstrap peers are left empty and should be populated by the caller.
     pub fn testnet() -> Self {
         NetworkConfig {
-            listen_addrs: vec![
-                "/ip4/0.0.0.0/tcp/30303"
-                    .parse()
-                    .expect("static testnet addr is always valid"),
-            ],
+            listen_addrs: vec!["/ip4/0.0.0.0/tcp/30303"
+                .parse()
+                .expect("static testnet addr is always valid")],
             snapshot_interval: DEFAULT_TESTNET_SNAPSHOT_INTERVAL,
             ..NetworkConfig::default()
         }

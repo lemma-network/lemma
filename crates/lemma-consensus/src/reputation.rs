@@ -65,7 +65,9 @@ impl ReputationScores {
     /// when `from_commits` is called with an empty slice.
     #[must_use]
     pub fn empty() -> Self {
-        Self { scores: BTreeMap::new() }
+        Self {
+            scores: BTreeMap::new(),
+        }
     }
 
     /// Compute reputation scores from a committed-sub-DAG window.
@@ -149,7 +151,9 @@ impl LeaderSwapTable {
     /// `from_scores` finds no swaps warranted (e.g. all scores equal).
     #[must_use]
     pub fn identity() -> Self {
-        Self { swaps: BTreeMap::new() }
+        Self {
+            swaps: BTreeMap::new(),
+        }
     }
 
     /// Build a swap table from reputation scores and the current committee.
@@ -204,7 +208,7 @@ impl LeaderSwapTable {
 
         // bad  = members[0 .. actual]          (lowest scores)
         // good = members[n−actual .. n]         (highest scores)
-        let bad  = &members[..actual];
+        let bad = &members[..actual];
         let good = &members[n - actual..];
 
         let mut swaps: BTreeMap<Address, Address> = BTreeMap::new();

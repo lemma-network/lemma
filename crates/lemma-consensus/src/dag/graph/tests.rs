@@ -25,7 +25,6 @@ fn addr(n: u8) -> Address {
     Address::from_public_key(&[n; 32])
 }
 
-
 fn dummy_key() -> ConsensusKey {
     ConsensusKey::from_bytes(vec![0u8; 32], vec![0u8; 32])
 }
@@ -35,9 +34,19 @@ fn vset_4() -> ValidatorSet {
     let power = VotingPower(Amount::from_drop(10));
     let mut members = BTreeMap::new();
     for n in 1u8..=4 {
-        members.insert(addr(n), Member { consensus_pubkey: dummy_key(), power });
+        members.insert(
+            addr(n),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch: 1, members, total_power: Amount::from_drop(40) }
+    ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: Amount::from_drop(40),
+    }
 }
 
 /// Create a DagBlock at the given round with the provided ancestor refs.
@@ -64,7 +73,10 @@ fn insert_genesis_set(dag: &mut Dag, vset: &ValidatorSet, n: u8) -> Vec<DagBlock
     (1..=n)
         .map(|i| {
             let b = genesis_block(i);
-            assert_eq!(dag.insert(b.clone(), vset, true).unwrap(), InsertOutcome::Accepted);
+            assert_eq!(
+                dag.insert(b.clone(), vset, true).unwrap(),
+                InsertOutcome::Accepted
+            );
             b
         })
         .collect()
@@ -74,8 +86,13 @@ fn insert_genesis_set(dag: &mut Dag, vset: &ValidatorSet, n: u8) -> Vec<DagBlock
 fn genesis_block(author_n: u8) -> DagBlock {
     DagBlock::new(
         DagBlockBody {
-            epoch: 1, round: 0, author: addr(author_n), timestamp_ms: 0,
-            ancestors: vec![], payload: vec![], commit_votes: vec![],
+            epoch: 1,
+            round: 0,
+            author: addr(author_n),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
         },
         Signature::Unsigned,
     )
@@ -96,7 +113,10 @@ fn insert_genesis_block_accepted() {
     let vset = vset_4();
     let mut dag = Dag::new(1);
     let block = genesis_block(1);
-    assert_eq!(dag.insert(block, &vset, true).unwrap(), InsertOutcome::Accepted);
+    assert_eq!(
+        dag.insert(block, &vset, true).unwrap(),
+        InsertOutcome::Accepted
+    );
     assert_eq!(dag.len(), 1);
 }
 
@@ -107,7 +127,10 @@ fn insert_duplicate_block_returns_accepted_idempotent() {
     let block = genesis_block(1);
     dag.insert(block.clone(), &vset, true).unwrap();
     // Second insert of same block = idempotent
-    assert_eq!(dag.insert(block, &vset, true).unwrap(), InsertOutcome::Accepted);
+    assert_eq!(
+        dag.insert(block, &vset, true).unwrap(),
+        InsertOutcome::Accepted
+    );
     assert_eq!(dag.len(), 1); // still only 1 block
 }
 
@@ -118,12 +141,25 @@ fn insert_past_epoch_rejected_with_epoch_mismatch() {
     let vset = vset_4();
     let mut dag = Dag::new(2); // dag epoch=2
     let block = DagBlock::new(
-        DagBlockBody { epoch: 1, round: 0, author: addr(1), timestamp_ms: 0,
-            ancestors: vec![], payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 1,
+            round: 0,
+            author: addr(1),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
     let err = dag.insert(block, &vset, true).unwrap_err();
-    assert!(matches!(err, ConsensusError::EpochMismatch { expected: 2, got: 1 }));
+    assert!(matches!(
+        err,
+        ConsensusError::EpochMismatch {
+            expected: 2,
+            got: 1
+        }
+    ));
 }
 
 #[test]
@@ -132,11 +168,21 @@ fn insert_next_epoch_block_buffered() {
     vset.epoch = 1;
     let mut dag = Dag::new(1);
     let block = DagBlock::new(
-        DagBlockBody { epoch: 2, round: 0, author: addr(1), timestamp_ms: 0,
-            ancestors: vec![], payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 2,
+            round: 0,
+            author: addr(1),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
-    assert_eq!(dag.insert(block, &vset, true).unwrap(), InsertOutcome::NextEpochBuffered);
+    assert_eq!(
+        dag.insert(block, &vset, true).unwrap(),
+        InsertOutcome::NextEpochBuffered
+    );
     assert_eq!(dag.len(), 0); // not in accepted store
 }
 
@@ -145,12 +191,25 @@ fn insert_far_future_epoch_rejected() {
     let vset = vset_4();
     let mut dag = Dag::new(1);
     let block = DagBlock::new(
-        DagBlockBody { epoch: 5, round: 0, author: addr(1), timestamp_ms: 0,
-            ancestors: vec![], payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 5,
+            round: 0,
+            author: addr(1),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
     let err = dag.insert(block, &vset, true).unwrap_err();
-    assert!(matches!(err, ConsensusError::EpochMismatch { expected: 1, got: 5 }));
+    assert!(matches!(
+        err,
+        ConsensusError::EpochMismatch {
+            expected: 1,
+            got: 5
+        }
+    ));
 }
 
 // ── Rule 2: author / sig ──────────────────────────────────────────────────────
@@ -161,8 +220,15 @@ fn insert_unknown_author_rejected() {
     let mut dag = Dag::new(1);
     // addr(9) not in vset_4
     let block = DagBlock::new(
-        DagBlockBody { epoch: 1, round: 0, author: addr(9), timestamp_ms: 0,
-            ancestors: vec![], payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 1,
+            round: 0,
+            author: addr(9),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
     let err = dag.insert(block, &vset, true).unwrap_err();
@@ -187,12 +253,25 @@ fn insert_block_below_gc_boundary_rejected() {
     // Push committed round high enough so gc_round > 0
     dag.set_last_committed_round(50); // gc_round = 50 - 30 = 20
     let block = DagBlock::new(
-        DagBlockBody { epoch: 1, round: 10, author: addr(1), timestamp_ms: 0,
-            ancestors: vec![], payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 1,
+            round: 10,
+            author: addr(1),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
     let err = dag.insert(block, &vset, true).unwrap_err();
-    assert!(matches!(err, ConsensusError::BelowGcBoundary { round: 10, gc_round: 20 }));
+    assert!(matches!(
+        err,
+        ConsensusError::BelowGcBoundary {
+            round: 10,
+            gc_round: 20
+        }
+    ));
 }
 
 // ── Rule 4: suspension ────────────────────────────────────────────────────────
@@ -205,7 +284,10 @@ fn insert_block_with_missing_ancestor_suspended() {
     let g: Vec<DagBlock> = (1u8..=3).map(genesis_block).collect();
     // Build round-1 block with REAL ancestor refs (not hash(n) placeholders).
     let block = make_round_block(1, 4, g.iter().map(|b| b.reference()).collect());
-    assert_eq!(dag.insert(block, &vset, true).unwrap(), InsertOutcome::Suspended);
+    assert_eq!(
+        dag.insert(block, &vset, true).unwrap(),
+        InsertOutcome::Suspended
+    );
     assert_eq!(dag.len(), 0); // not in accepted store
 }
 
@@ -221,14 +303,20 @@ fn insert_ancestor_after_suspension_unsuspends_block() {
     // Build round-1 block referencing real genesis refs (ancestors not in DAG yet).
     let round1 = make_round_block(1, 4, g_refs);
     let round1_ref = round1.reference();
-    assert_eq!(dag.insert(round1, &vset, true).unwrap(), InsertOutcome::Suspended);
+    assert_eq!(
+        dag.insert(round1, &vset, true).unwrap(),
+        InsertOutcome::Suspended
+    );
 
     // Now insert the 3 missing ancestors — round-1 block auto-unsuspends.
     for gb in g {
         dag.insert(gb, &vset, true).unwrap();
     }
 
-    assert!(dag.contains(&round1_ref), "block should be accepted after ancestors arrive");
+    assert!(
+        dag.contains(&round1_ref),
+        "block should be accepted after ancestors arrive"
+    );
     assert_eq!(dag.len(), 4); // 3 genesis + 1 promoted
 }
 
@@ -263,10 +351,10 @@ fn cascade_unsuspension_when_chain_of_dependencies_arrives() {
         dag.insert(gb, &vset, true).unwrap();
     }
 
-    assert!(dag.contains(&r1_ref),   "r1 must be cascade-accepted");
+    assert!(dag.contains(&r1_ref), "r1 must be cascade-accepted");
     assert!(dag.contains(&sib1_ref), "sib1 must be cascade-accepted");
     assert!(dag.contains(&sib2_ref), "sib2 must be cascade-accepted");
-    assert!(dag.contains(&r2_ref),   "r2 must be cascade-accepted");
+    assert!(dag.contains(&r2_ref), "r2 must be cascade-accepted");
     assert_eq!(dag.len(), 7); // 3 genesis + r1 + sib1 + sib2 + r2
 }
 
@@ -282,7 +370,10 @@ fn insert_insufficient_strong_links_rejected_after_ancestors_present() {
     // Only 2 of 4 strong links at round 0 → 20 stake < quorum (need >20).
     let weak = make_round_block(1, 4, vec![genesis[0].reference(), genesis[1].reference()]);
     let err = dag.insert(weak, &vset, true).unwrap_err();
-    assert!(matches!(err, ConsensusError::InsufficientStrongLinks { .. }));
+    assert!(matches!(
+        err,
+        ConsensusError::InsufficientStrongLinks { .. }
+    ));
 }
 
 #[test]
@@ -290,7 +381,10 @@ fn insert_genesis_round_accepted_without_strong_links() {
     let vset = vset_4();
     let mut dag = Dag::new(1);
     // Round 0, no ancestors needed.
-    assert_eq!(dag.insert(genesis_block(1), &vset, true).unwrap(), InsertOutcome::Accepted);
+    assert_eq!(
+        dag.insert(genesis_block(1), &vset, true).unwrap(),
+        InsertOutcome::Accepted
+    );
 }
 
 // ── Rule 6: equivocation ──────────────────────────────────────────────────────
@@ -304,8 +398,15 @@ fn insert_equivocating_block_returns_equivocation_outcome() {
 
     // Same slot, different body → equivocation.
     let block_b = DagBlock::new(
-        DagBlockBody { epoch: 1, round: 0, author: addr(1), timestamp_ms: 999,
-            ancestors: vec![], payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 1,
+            round: 0,
+            author: addr(1),
+            timestamp_ms: 999,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
     let outcome = dag.insert(block_b.clone(), &vset, true).unwrap();
@@ -399,7 +500,10 @@ fn set_last_committed_round_drops_old_blocks() {
 
     // Push gc_round past round 0 → block should be GC'd.
     dag.set_last_committed_round(35); // gc_round = 35 - 30 = 5 > 0
-    assert!(!dag.contains(&r), "round-0 block should be GC'd after set_last_committed_round(35)");
+    assert!(
+        !dag.contains(&r),
+        "round-0 block should be GC'd after set_last_committed_round(35)"
+    );
     assert_eq!(dag.len(), 0);
 }
 
@@ -425,8 +529,15 @@ fn advance_epoch_returns_buffered_blocks_and_clears_buffer() {
 
     // Buffer a next-epoch block.
     let next_epoch_block = DagBlock::new(
-        DagBlockBody { epoch: 2, round: 0, author: addr(1), timestamp_ms: 0,
-            ancestors: vec![], payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 2,
+            round: 0,
+            author: addr(1),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
     dag.insert(next_epoch_block.clone(), &vset, true).unwrap();
@@ -462,8 +573,15 @@ fn next_epoch_buffer_bounded_returns_dropped_when_full() {
     let mut buffered_count = 0usize;
     for i in 0usize..(MAX_NEXT_EPOCH_BUFFER + 10) {
         let block = DagBlock::new(
-            DagBlockBody { epoch: 2, round: 0, author: addr((i % 4) as u8 + 1),
-                timestamp_ms: i as u64, ancestors: vec![], payload: vec![], commit_votes: vec![] },
+            DagBlockBody {
+                epoch: 2,
+                round: 0,
+                author: addr((i % 4) as u8 + 1),
+                timestamp_ms: i as u64,
+                ancestors: vec![],
+                payload: vec![],
+                commit_votes: vec![],
+            },
             Signature::Unsigned,
         );
         match dag.insert(block, &vset, true).unwrap() {
@@ -488,8 +606,15 @@ fn suspended_buffer_bounded_returns_dropped_when_full() {
     // Each suspended block needs unique ancestry (different digest) → use timestamp.
     let fake_ancestor = |i: usize| {
         let b = DagBlock::new(
-            DagBlockBody { epoch: 1, round: 0, author: addr(1), timestamp_ms: i as u64,
-                ancestors: vec![], payload: vec![], commit_votes: vec![] },
+            DagBlockBody {
+                epoch: 1,
+                round: 0,
+                author: addr(1),
+                timestamp_ms: i as u64,
+                ancestors: vec![],
+                payload: vec![],
+                commit_votes: vec![],
+            },
             Signature::Unsigned,
         );
         b.reference()
@@ -498,8 +623,15 @@ fn suspended_buffer_bounded_returns_dropped_when_full() {
     let mut suspended_count = 0usize;
     for i in 0usize..(MAX_SUSPENDED + 5) {
         let block = DagBlock::new(
-            DagBlockBody { epoch: 1, round: 1, author: addr(2), timestamp_ms: i as u64,
-                ancestors: vec![fake_ancestor(i)], payload: vec![], commit_votes: vec![] },
+            DagBlockBody {
+                epoch: 1,
+                round: 1,
+                author: addr(2),
+                timestamp_ms: i as u64,
+                ancestors: vec![fake_ancestor(i)],
+                payload: vec![],
+                commit_votes: vec![],
+            },
             Signature::Unsigned,
         );
         match dag.insert(block, &vset, true).unwrap() {
@@ -521,15 +653,25 @@ fn gc_evicts_suspended_block_whose_ancestor_is_below_gc_boundary() {
     // A missing ancestor at a NON-genesis round (round 2). Genesis round (0) is
     // GC-exempt, so we must use a higher round to exercise the C1 eviction path.
     let missing_ancestor = DagBlock::new(
-        DagBlockBody { epoch: 1, round: 2, author: addr(1), timestamp_ms: 0,
-            ancestors: vec![], payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 1,
+            round: 2,
+            author: addr(1),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
     let missing_ref = missing_ancestor.reference();
 
     // Block at round 6 depends on the missing round-2 ancestor → suspended.
     let waiting = make_round_block(6, 4, vec![missing_ref]);
-    assert_eq!(dag.insert(waiting, &vset, true).unwrap(), InsertOutcome::Suspended);
+    assert_eq!(
+        dag.insert(waiting, &vset, true).unwrap(),
+        InsertOutcome::Suspended
+    );
     assert_eq!(dag.suspended_count(), 1, "block should be suspended");
 
     // Advance committed round so gc_round = 4: the round-2 ancestor is now below
@@ -560,8 +702,15 @@ fn equivocation_during_cascade_unsuspend_queued_in_pending() {
     let block_a = make_round_block(1, 4, g_refs.clone());
     // Block B at same slot: different body (different timestamp → different digest).
     let block_b = DagBlock::new(
-        DagBlockBody { epoch: 1, round: 1, author: addr(4), timestamp_ms: 9999,
-            ancestors: g_refs.clone(), payload: vec![], commit_votes: vec![] },
+        DagBlockBody {
+            epoch: 1,
+            round: 1,
+            author: addr(4),
+            timestamp_ms: 9999,
+            ancestors: g_refs.clone(),
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
     );
     assert_ne!(block_a.digest, block_b.digest, "must be distinct digests");

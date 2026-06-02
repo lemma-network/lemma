@@ -19,7 +19,10 @@ fn zero_weight_validator_displays_address() {
     let addr = Address::zero();
     let err = ShieldError::ZeroWeightValidator(addr);
     let msg = err.to_string();
-    assert!(msg.contains("zero share weight"), "expected 'zero share weight' in: {msg}");
+    assert!(
+        msg.contains("zero share weight"),
+        "expected 'zero share weight' in: {msg}"
+    );
 }
 
 #[test]
@@ -41,7 +44,10 @@ fn fft_domain_failed_displays_size() {
 fn lagrange_displays_inner_message() {
     let err = ShieldError::Lagrange("x_coord is zero".to_string());
     let msg = err.to_string();
-    assert!(msg.contains("x_coord is zero"), "expected inner msg in: {msg}");
+    assert!(
+        msg.contains("x_coord is zero"),
+        "expected inner msg in: {msg}"
+    );
 }
 
 // ── PartialEq ─────────────────────────────────────────────────────────────────

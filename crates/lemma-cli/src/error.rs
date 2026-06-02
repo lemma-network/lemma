@@ -16,7 +16,7 @@ pub enum LemmaCliError {
     /// Includes the file path in the message for user-actionable context.
     #[error("keystore I/O error ({path}): {source}")]
     KeystoreIo {
-        path:   std::path::PathBuf,
+        path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
     },

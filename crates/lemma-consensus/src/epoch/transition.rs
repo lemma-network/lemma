@@ -85,7 +85,9 @@ pub fn advance_epoch(
     let next_number = current
         .number
         .checked_add(1)
-        .ok_or(EpochError::EpochNumberOverflow { current: current.number })?;
+        .ok_or(EpochError::EpochNumberOverflow {
+            current: current.number,
+        })?;
 
     // ── Steps 1–2: Inflation mint + validator reward distribution ─────────
     //
@@ -96,9 +98,8 @@ pub fn advance_epoch(
     //
     // T2: priority tips are per-block proposer credits in lemma-vm (Phase 3).
     // This step handles inflation only.
-    let minted =
-        crate::rewards::compute_epoch_inflation(total_supply, current.number)
-            .map_err(EpochError::Reward)?;
+    let minted = crate::rewards::compute_epoch_inflation(total_supply, current.number)
+        .map_err(EpochError::Reward)?;
     let reward_outcome =
         crate::rewards::distribute_rewards(validators, &current.validators, minted)
             .map_err(EpochError::Reward)?;
@@ -128,7 +129,14 @@ pub fn advance_epoch(
 
     // ── Steps 7–8: No-ops ─────────────────────────────────────────────────
     // Step 7: Buffered protocol/config changes — Phase 3 governance.
-    // Step 8: Shield DKG resharing — blocked (ferveo GPL-3.0, decisions-log).
+    // Step 8: Shield DKG/resharing — driven at the `lemma-node` orchestration
+    //   layer (DB-12, 15-SHIELD_SPEC §5.3). `lemma-consensus` is crypto-free and
+    //   cannot depend on `lemma-mempool` (AGENTS §8). The node observes the epoch
+    //   boundary, drives `Shield::run_dkg` (genesis) or `Shield::reshare` (N→N+1)
+    //   using the post-settlement `ValidatorSet(N+1)` produced by step 5 above,
+    //   and feeds the resulting withholding set back as injected slashing input.
+    //   In-tree Shield (S1–S8) is fully built; ferveo (GPL-3.0) was rejected
+    //   (decisions-log DB-11). Node-layer orchestrator: `lemma-node::shield_orchestrator`.
 
     // ── Step 9: Assemble new Epoch ────────────────────────────────────────
     let epoch = Epoch {
@@ -173,13 +181,17 @@ fn settle_expired_unbonding(
         let matured = expired
             .into_iter()
             .try_fold(Amount::zero(), |acc, e| acc.checked_add(e.initial_balance))
-            .map_err(|e| EpochError::SettlementOverflow { address: *addr, source: e })?;
+            .map_err(|e| EpochError::SettlementOverflow {
+                address: *addr,
+                source: e,
+            })?;
 
-        v.self_stake.inactive = v
-            .self_stake
-            .inactive
-            .checked_add(matured)
-            .map_err(|e| EpochError::SettlementOverflow { address: *addr, source: e })?;
+        v.self_stake.inactive = v.self_stake.inactive.checked_add(matured).map_err(|e| {
+            EpochError::SettlementOverflow {
+                address: *addr,
+                source: e,
+            }
+        })?;
         v.self_stake.pending_inactive = remaining;
     }
     Ok(())
@@ -192,15 +204,16 @@ fn settle_expired_unbonding(
 /// This is the only place where voting power increases (pending stake becomes
 /// effective). Must run AFTER `settle_expired_unbonding` to avoid stale
 /// pending_inactive entries affecting the settled-active amount.
-fn activate_pending_stake(
-    validators: &mut BTreeMap<Address, Validator>,
-) -> Result<(), EpochError> {
+fn activate_pending_stake(validators: &mut BTreeMap<Address, Validator>) -> Result<(), EpochError> {
     for (addr, v) in validators.iter_mut() {
         let new_active = v
             .self_stake
             .active
             .checked_add(v.self_stake.pending_active)
-            .map_err(|e| EpochError::SettlementOverflow { address: *addr, source: e })?;
+            .map_err(|e| EpochError::SettlementOverflow {
+                address: *addr,
+                source: e,
+            })?;
         v.self_stake.active = new_active;
         v.self_stake.pending_active = Amount::zero();
     }

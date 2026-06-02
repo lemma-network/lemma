@@ -39,7 +39,6 @@ use lemma_core::Hash;
 #[non_exhaustive]
 pub enum NetworkError {
     // ── Block / sync validation ───────────────────────────────────────────
-
     /// A peer served a block that failed internal validation (bad signature,
     /// structural invariant violation, or hash mismatch). The peer MUST be
     /// demoted via the app-specific gossipsub score (12-NETWORK_SYNC_SPEC §5).
@@ -66,7 +65,6 @@ pub enum NetworkError {
     InvalidStateChunk { root: Hash },
 
     // ── Bounds / DoS hardening ────────────────────────────────────────────
-
     /// A peer's response body exceeded the configured byte limit. The response
     /// is dropped without processing to prevent memory exhaustion
     /// (12-NETWORK_SYNC_SPEC §2.2, AGENTS.md §15.2).
@@ -80,7 +78,6 @@ pub enum NetworkError {
     RangeTooWide { got: u64, max: u64 },
 
     // ── Light client errors ───────────────────────────────────────────────
-
     /// A light block falls outside the configured trusting period. Expired
     /// headers are rejected to bound long-range attacks where exited validators
     /// sign a fork with retired keys (12-NETWORK_SYNC_SPEC §3.5).
@@ -107,7 +104,6 @@ pub enum NetworkError {
     Equivocation { height: u64 },
 
     // ── Connection / transport ────────────────────────────────────────────
-
     /// A request-response call to a specific peer timed out before a response
     /// arrived. The sync layer retries against a different peer.
     #[error("request to peer {peer} timed out")]
@@ -123,7 +119,6 @@ pub enum NetworkError {
     Transport(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
     // ── Gossipsub errors ──────────────────────────────────────────────────
-
     /// Failed to subscribe to a gossipsub topic. This is a configuration or
     /// behaviour-lifecycle error, not peer misbehaviour.
     #[error("failed to subscribe to gossipsub topic '{topic}'")]
@@ -135,7 +130,6 @@ pub enum NetworkError {
     Publish { topic: String, reason: String },
 
     // ── Generic peer input validation ─────────────────────────────────────
-
     /// A wire message from a peer failed to deserialize or violated a
     /// structural invariant. The message is dropped; the peer is demoted.
     ///

@@ -34,10 +34,7 @@
 //! [`RateLimiter::prune_full`] removes buckets that are back to full capacity —
 //! call it periodically (e.g. once per block) to bound memory usage.
 
-use std::{
-    collections::HashMap,
-    time::Instant,
-};
+use std::{collections::HashMap, time::Instant};
 
 use lemma_core::Address;
 
@@ -88,7 +85,10 @@ struct TokenBucket {
 impl TokenBucket {
     /// Create a full bucket (starts at `capacity`).
     fn new(capacity: f64, now: Instant) -> Self {
-        Self { tokens: capacity, last_refill: now }
+        Self {
+            tokens: capacity,
+            last_refill: now,
+        }
     }
 
     /// Refill tokens based on elapsed time, then attempt to consume one.
@@ -122,7 +122,9 @@ impl TokenBucket {
             // 1.8446744e19 = 2^64 (nearest f64 above u64::MAX) used as the
             // saturation guard to avoid clippy::cast_precision_loss on `u64::MAX as f64`.
             #[allow(clippy::cast_possible_truncation)]
-            let retry_ms = (wait_secs * 1_000.0).ceil().min(1.844_674_407_370_955_2e19_f64) as u64;
+            let retry_ms = (wait_secs * 1_000.0)
+                .ceil()
+                .min(1.844_674_407_370_955_2e19_f64) as u64;
             Err(retry_ms)
         }
     }
@@ -200,11 +202,7 @@ impl RateLimiter {
     ///
     /// Production callers (e.g. `pool.rs`) pass `Instant::now()` as `now`.
     /// Test callers pass a fake clock for deterministic, sleep-free tests.
-    pub fn try_acquire(
-        &mut self,
-        account: &Address,
-        now: Instant,
-    ) -> Result<(), MempoolError> {
+    pub fn try_acquire(&mut self, account: &Address, now: Instant) -> Result<(), MempoolError> {
         let capacity = self.capacity;
         let refill_per_sec = self.refill_per_sec;
 
@@ -213,9 +211,12 @@ impl RateLimiter {
             .entry(*account)
             .or_insert_with(|| TokenBucket::new(capacity, now));
 
-        bucket.try_consume(capacity, refill_per_sec, now).map_err(|retry_after_ms| {
-            MempoolError::RateLimited { sender: *account, retry_after_ms }
-        })
+        bucket
+            .try_consume(capacity, refill_per_sec, now)
+            .map_err(|retry_after_ms| MempoolError::RateLimited {
+                sender: *account,
+                retry_after_ms,
+            })
     }
 
     /// Remove buckets that have returned to full capacity.
@@ -230,7 +231,9 @@ impl RateLimiter {
 
         self.buckets.retain(|_, bucket| {
             // Refill the bucket to get the current state, then check fullness.
-            let elapsed = now.saturating_duration_since(bucket.last_refill).as_secs_f64();
+            let elapsed = now
+                .saturating_duration_since(bucket.last_refill)
+                .as_secs_f64();
             bucket.tokens = (bucket.tokens + elapsed * refill_per_sec).min(capacity);
             bucket.last_refill = now;
             !bucket.is_full(capacity)

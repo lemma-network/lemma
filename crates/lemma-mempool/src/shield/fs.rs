@@ -10,9 +10,7 @@
 
 use ark_bls12_381::{Fr, G2Affine, G2Projective};
 use ark_ec::hashing::{
-    curve_maps::wb::WBMap,
-    map_to_curve_hasher::MapToCurveBasedHasher,
-    HashToCurve,
+    curve_maps::wb::WBMap, map_to_curve_hasher::MapToCurveBasedHasher, HashToCurve,
 };
 use ark_ff::{field_hashers::DefaultFieldHasher, PrimeField};
 use blake2::{Blake2b512, Digest};

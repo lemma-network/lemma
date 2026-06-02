@@ -20,7 +20,10 @@ fn compute_message_id_is_deterministic_for_same_data() {
 fn compute_message_id_differs_for_different_data() {
     let id1 = compute_message_id(b"block at height 100");
     let id2 = compute_message_id(b"block at height 101");
-    assert_ne!(id1, id2, "different input must produce different message IDs");
+    assert_ne!(
+        id1, id2,
+        "different input must produce different message IDs"
+    );
 }
 
 #[test]
@@ -46,7 +49,11 @@ fn compute_message_id_produces_32_bytes_for_empty_input() {
     // Blake3 always outputs exactly 32 bytes regardless of input length.
     // Verify the MessageId inner Vec<u8> carries the full 32-byte hash.
     let id = compute_message_id(&[]);
-    assert_eq!(id.0.len(), 32, "MessageId must contain exactly 32 bytes (Blake3 output)");
+    assert_eq!(
+        id.0.len(),
+        32,
+        "MessageId must contain exactly 32 bytes (Blake3 output)"
+    );
 }
 
 #[test]
@@ -54,7 +61,11 @@ fn compute_message_id_produces_32_bytes_for_large_input() {
     // Blake3 is a streaming hash — large inputs must produce the same fixed 32-byte output.
     let large_data = vec![0u8; 1024 * 1024]; // 1 MiB
     let id = compute_message_id(&large_data);
-    assert_eq!(id.0.len(), 32, "MessageId must contain exactly 32 bytes for large input");
+    assert_eq!(
+        id.0.len(),
+        32,
+        "MessageId must contain exactly 32 bytes for large input"
+    );
 }
 
 #[test]

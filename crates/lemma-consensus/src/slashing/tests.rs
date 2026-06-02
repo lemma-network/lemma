@@ -19,10 +19,10 @@ use lemma_core::{
 };
 
 use crate::{
-    epoch::{UNBONDING_PERIOD_SECONDS},
+    epoch::UNBONDING_PERIOD_SECONDS,
     slashing::{
-        slash, SlashError, DOUBLE_SIGN_SLASH_BPS, DOWNTIME_SLASH_BPS,
-        EVIDENCE_MAX_AGE_SECONDS, MAX_FRACTION_BPS, SHARE_WITHHOLDING_SLASH_BPS,
+        slash, SlashError, DOUBLE_SIGN_SLASH_BPS, DOWNTIME_SLASH_BPS, EVIDENCE_MAX_AGE_SECONDS,
+        MAX_FRACTION_BPS, SHARE_WITHHOLDING_SLASH_BPS,
     },
 };
 
@@ -83,7 +83,10 @@ fn downtime_slash_bps_is_100() {
 
 #[test]
 fn share_withholding_slash_bps_is_1000() {
-    assert_eq!(SHARE_WITHHOLDING_SLASH_BPS, 1_000, "share-withholding = 10% (1000 bps)");
+    assert_eq!(
+        SHARE_WITHHOLDING_SLASH_BPS, 1_000,
+        "share-withholding = 10% (1000 bps)"
+    );
 }
 
 #[test]
@@ -132,7 +135,10 @@ fn slash_active_capped_at_zero_when_active_less_than_intended() {
     let burned = slash(&mut v, 0, power, DOUBLE_SIGN_SLASH_BPS).unwrap();
 
     assert_eq!(burned, lem(1_000_000), "capped at all available active");
-    assert!(v.self_stake.active.is_zero(), "active must be fully drained");
+    assert!(
+        v.self_stake.active.is_zero(),
+        "active must be fully drained"
+    );
 }
 
 #[test]
@@ -170,7 +176,12 @@ fn slash_post_infraction_pending_inactive_slashed_by_same_fraction() {
     // from_active = 5% of 25M = 1.25M, from_pending = 5% of 5M = 250K
     let expected_active_slash = lem(1_250_000);
     let expected_entry_slash = lem(250_000);
-    assert_eq!(burned, expected_active_slash.checked_add(expected_entry_slash).unwrap());
+    assert_eq!(
+        burned,
+        expected_active_slash
+            .checked_add(expected_entry_slash)
+            .unwrap()
+    );
     assert_eq!(
         v.self_stake.pending_inactive[0].initial_balance,
         lem(4_750_000), // 5M - 5% = 4.75M
@@ -267,9 +278,14 @@ fn slash_all_post_infraction_entries_are_slashed() {
     // 5% of each: 150K + 100K + 250K = 500K burned from pending
     // from_active = 0 (active=0 < intended 500K), so from_active = 0
     let expected = lem(150_000) // 5% of 3M
-        .checked_add(lem(100_000)).unwrap()  // 5% of 2M
-        .checked_add(lem(250_000)).unwrap(); // 5% of 5M
-    assert_eq!(burned, expected, "all post-infraction entries slashed by 5%");
+        .checked_add(lem(100_000))
+        .unwrap() // 5% of 2M
+        .checked_add(lem(250_000))
+        .unwrap(); // 5% of 5M
+    assert_eq!(
+        burned, expected,
+        "all post-infraction entries slashed by 5%"
+    );
 }
 
 // ── Invariants ────────────────────────────────────────────────────────────────
@@ -287,13 +303,13 @@ fn slash_total_burned_equals_from_active_plus_from_pending() {
 
     let burned = slash(&mut v, 100, power, DOUBLE_SIGN_SLASH_BPS).unwrap();
 
-    let deducted_from_active = initial_active
-        .checked_sub(v.self_stake.active)
-        .unwrap();
+    let deducted_from_active = initial_active.checked_sub(v.self_stake.active).unwrap();
     let deducted_from_pending = initial_pending
         .checked_sub(v.self_stake.pending_inactive[1].initial_balance)
         .unwrap();
-    let expected_burned = deducted_from_active.checked_add(deducted_from_pending).unwrap();
+    let expected_burned = deducted_from_active
+        .checked_add(deducted_from_pending)
+        .unwrap();
 
     assert_eq!(
         burned, expected_burned,
@@ -308,8 +324,15 @@ fn slash_active_never_goes_negative() {
     let enormous_power = Amount::from_drop(u128::MAX / 10_001); // near u128::MAX / max_bps
     let burned = slash(&mut v, 0, enormous_power, MAX_FRACTION_BPS).unwrap();
 
-    assert!(v.self_stake.active.is_zero(), "active capped at zero — never negative");
-    assert_eq!(burned, lem(100), "burned = only what was available (100 LEM)");
+    assert!(
+        v.self_stake.active.is_zero(),
+        "active capped at zero — never negative"
+    );
+    assert_eq!(
+        burned,
+        lem(100),
+        "burned = only what was available (100 LEM)"
+    );
 }
 
 // ── Fraction edge cases ───────────────────────────────────────────────────────
@@ -352,7 +375,12 @@ fn slash_rejects_fraction_above_max() {
     let result = slash(&mut v, 0, lem(10_000_000), MAX_FRACTION_BPS + 1);
 
     assert!(
-        matches!(result, Err(SlashError::InvalidFraction { fraction_bps: 10_001 })),
+        matches!(
+            result,
+            Err(SlashError::InvalidFraction {
+                fraction_bps: 10_001
+            })
+        ),
         "fraction > MAX_FRACTION_BPS must return InvalidFraction"
     );
     // No state mutation must have occurred.
@@ -392,10 +420,7 @@ fn slash_compute_overflow_returns_err_and_leaves_state_unchanged() {
 fn slash_deterministic_same_input_same_output() {
     let make = || {
         let mut v = make_active_validator(20_000_000);
-        v.self_stake.pending_inactive = vec![
-            entry(50, 2_000_000),
-            entry(150, 3_000_000),
-        ];
+        v.self_stake.pending_inactive = vec![entry(50, 2_000_000), entry(150, 3_000_000)];
         slash(&mut v, 100, lem(23_000_000), DOUBLE_SIGN_SLASH_BPS).unwrap();
         (
             v.self_stake.active.as_drop(),

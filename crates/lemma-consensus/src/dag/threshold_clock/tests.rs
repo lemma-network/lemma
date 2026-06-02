@@ -38,9 +38,19 @@ fn vset_uniform(n: u8, power_drop: u128) -> ValidatorSet {
     let total = Amount::from_drop(n as u128 * power_drop);
     let mut members = BTreeMap::new();
     for i in 1u8..=n {
-        members.insert(addr(i), Member { consensus_pubkey: dummy_key(), power });
+        members.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch: 1, members, total_power: total }
+    ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: total,
+    }
 }
 
 /// Minimal DagBlock at given round by given author.
@@ -259,15 +269,35 @@ fn add_block_weighted_stake_single_large_author() {
     let power_large = VotingPower(Amount::from_drop(70));
     let power_small = VotingPower(Amount::from_drop(10));
     let mut members = BTreeMap::new();
-    members.insert(addr(1), Member { consensus_pubkey: dummy_key(), power: power_large });
+    members.insert(
+        addr(1),
+        Member {
+            consensus_pubkey: dummy_key(),
+            power: power_large,
+        },
+    );
     for i in 2u8..=4 {
-        members.insert(addr(i), Member { consensus_pubkey: dummy_key(), power: power_small });
+        members.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power: power_small,
+            },
+        );
     }
-    let vset = ValidatorSet { epoch: 1, members, total_power: Amount::from_drop(100) };
+    let vset = ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: Amount::from_drop(100),
+    };
     let mut clock = ThresholdClock::new(Amount::from_drop(100));
 
     let result = clock.add_block(&block_at(0, 1), &vset).unwrap();
-    assert_eq!(result, Some(1), "single large-stake author must advance clock");
+    assert_eq!(
+        result,
+        Some(1),
+        "single large-stake author must advance clock"
+    );
 }
 
 // ── catch-up / at_round ────────────────────────────────────────────────────────
@@ -283,7 +313,11 @@ fn at_round_clock_ignores_lower_rounds() {
             assert_eq!(clock.add_block(&block_at(r, a), &vset).unwrap(), None);
         }
     }
-    assert_eq!(clock.round(), 5, "past-round blocks must not affect catch-up clock");
+    assert_eq!(
+        clock.round(),
+        5,
+        "past-round blocks must not affect catch-up clock"
+    );
 }
 
 #[test]
@@ -294,7 +328,11 @@ fn at_round_clock_advances_at_its_round() {
     clock.add_block(&block_at(5, 1), &vset).unwrap();
     clock.add_block(&block_at(5, 2), &vset).unwrap();
     let result = clock.add_block(&block_at(5, 3), &vset).unwrap();
-    assert_eq!(result, Some(6), "at_round clock must advance normally at its round");
+    assert_eq!(
+        result,
+        Some(6),
+        "at_round clock must advance normally at its round"
+    );
 }
 
 // ── Error path ─────────────────────────────────────────────────────────────────
@@ -309,8 +347,20 @@ fn stake_overflow_propagates() {
     let max_power = VotingPower(Amount::from_drop(u128::MAX));
     let small_power = VotingPower(Amount::from_drop(1));
     let mut members = BTreeMap::new();
-    members.insert(addr(1), Member { consensus_pubkey: dummy_key(), power: max_power });
-    members.insert(addr(2), Member { consensus_pubkey: dummy_key(), power: small_power });
+    members.insert(
+        addr(1),
+        Member {
+            consensus_pubkey: dummy_key(),
+            power: max_power,
+        },
+    );
+    members.insert(
+        addr(2),
+        Member {
+            consensus_pubkey: dummy_key(),
+            power: small_power,
+        },
+    );
     // total_power itself would overflow, but StakeAggregator uses the stored
     // total_power u128 from construction. We set it to u128::MAX to avoid
     // quorum being reached on the first add (accumulated = MAX, MAX×3 wraps,
@@ -326,7 +376,11 @@ fn stake_overflow_propagates() {
     // Quorum check: MAX×3 saturates = u128::MAX; MAX×2 saturates = u128::MAX.
     // u128::MAX > u128::MAX is FALSE → no quorum reached. Returns Ok(None).
     let first = clock.add_block(&block_at(0, 1), &vset);
-    assert_eq!(first.unwrap(), None, "first add must not advance (saturating mul: MAX > MAX is false)");
+    assert_eq!(
+        first.unwrap(),
+        None,
+        "first add must not advance (saturating mul: MAX > MAX is false)"
+    );
 
     // Second add: checked_add(u128::MAX, 1) → None (overflow) → StakeOverflow.
     // This pins the overflow propagation contract: if StakeAggregator ever stops

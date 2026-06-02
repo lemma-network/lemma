@@ -89,9 +89,7 @@ impl ShieldAad {
         Self {
             chain_id: u64::from_be_bytes(b[0..8].try_into().expect("slice length == 8")),
             epoch: u64::from_be_bytes(b[8..16].try_into().expect("slice length == 8")),
-            submitter_nonce: u64::from_be_bytes(
-                b[16..24].try_into().expect("slice length == 8"),
-            ),
+            submitter_nonce: u64::from_be_bytes(b[16..24].try_into().expect("slice length == 8")),
         }
     }
 }
@@ -139,9 +137,7 @@ impl Ciphertext {
                 max: MAX_SHIELD_PAYLOAD_BYTES,
             });
         }
-        let mut out = Vec::with_capacity(
-            MIN_CIPHERTEXT_BYTES + self.payload.len(),
-        );
+        let mut out = Vec::with_capacity(MIN_CIPHERTEXT_BYTES + self.payload.len());
         self.u
             .serialize_compressed(&mut out)
             .map_err(|e| ShieldError::Serialization(format!("{e:?}")))?;
@@ -240,7 +236,12 @@ impl Ciphertext {
             )));
         }
 
-        Ok(Self { u, w, aad, payload: cursor[..payload_len].to_vec() })
+        Ok(Self {
+            u,
+            w,
+            aad,
+            payload: cursor[..payload_len].to_vec(),
+        })
     }
 }
 

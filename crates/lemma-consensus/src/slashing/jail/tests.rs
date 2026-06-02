@@ -21,10 +21,10 @@ fn make_validator() -> Validator {
         status: ValidatorStatus::Bonded,
         tombstoned: false,
         self_stake: Stake {
-            active:           Amount::from_drop(20_000_000),
-            pending_active:   Amount::zero(),
+            active: Amount::from_drop(20_000_000),
+            pending_active: Amount::zero(),
             pending_inactive: Vec::new(),
-            inactive:         Amount::zero(),
+            inactive: Amount::zero(),
         },
         delegated: Amount::zero(),
         commission_bps: 0,
@@ -47,7 +47,11 @@ fn tombstone_is_idempotent() {
     tombstone(&mut v);
     tombstone(&mut v); // second call — must not panic or change other fields
     assert!(v.tombstoned);
-    assert_eq!(v.status, ValidatorStatus::Bonded, "status unchanged by tombstone");
+    assert_eq!(
+        v.status,
+        ValidatorStatus::Bonded,
+        "status unchanged by tombstone"
+    );
 }
 
 #[test]
@@ -67,7 +71,10 @@ fn tombstone_does_not_touch_stake() {
     let mut v = make_validator();
     let initial_active = v.self_stake.active;
     tombstone(&mut v);
-    assert_eq!(v.self_stake.active, initial_active, "tombstone must not touch stake");
+    assert_eq!(
+        v.self_stake.active, initial_active,
+        "tombstone must not touch stake"
+    );
 }
 
 // ── jail ──────────────────────────────────────────────────────────────────────
@@ -76,7 +83,11 @@ fn tombstone_does_not_touch_stake() {
 fn jail_sets_jailed_until() {
     let mut v = make_validator();
     jail(&mut v, 1_000_000);
-    assert_eq!(v.jailed_until, Some(1_000_000), "jail must set jailed_until");
+    assert_eq!(
+        v.jailed_until,
+        Some(1_000_000),
+        "jail must set jailed_until"
+    );
 }
 
 #[test]
@@ -115,7 +126,10 @@ fn jail_is_idempotent_same_time() {
 fn jail_does_not_tombstone() {
     let mut v = make_validator();
     jail(&mut v, 1_000_000);
-    assert!(!v.tombstoned, "jail must not set tombstoned (finite sentence, not permanent)");
+    assert!(
+        !v.tombstoned,
+        "jail must not set tombstoned (finite sentence, not permanent)"
+    );
 }
 
 #[test]
@@ -134,7 +148,10 @@ fn jail_does_not_touch_stake() {
     let mut v = make_validator();
     let initial_active = v.self_stake.active;
     jail(&mut v, 1_000_000);
-    assert_eq!(v.self_stake.active, initial_active, "jail must not touch stake");
+    assert_eq!(
+        v.self_stake.active, initial_active,
+        "jail must not touch stake"
+    );
 }
 
 // ── Combined ──────────────────────────────────────────────────────────────────

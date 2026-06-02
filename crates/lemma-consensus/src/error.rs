@@ -71,7 +71,6 @@ use serde::{Deserialize, Serialize};
 #[non_exhaustive]
 pub enum ConsensusError {
     // ── DAG validity — §3 ────────────────────────────────────────────────────
-
     /// The block's epoch does not match the receiver's current validator-set epoch.
     ///
     /// This variant only *reports* the mismatch — it does **not** decide whether
@@ -143,7 +142,6 @@ pub enum ConsensusError {
     InsufficientStrongLinks { author: Address, round: u64 },
 
     // ── Equivocation — §3 rule 6, §7.1 ──────────────────────────────────────
-
     /// A validator produced two distinct blocks at the same `(round, author)` slot.
     ///
     /// This is a **slashable offence** (`docs/13-VALIDATOR_EPOCH_SPEC.md §5.2`).
@@ -153,9 +151,7 @@ pub enum ConsensusError {
     /// support (`docs/07-CONSENSUS_SPEC.md §7.1`).
     ///
     /// `first` and `second` are the Blake3 digests of the two conflicting blocks.
-    #[error(
-        "equivocation by {author} at round {round}: conflicting blocks {first} vs {second}"
-    )]
+    #[error("equivocation by {author} at round {round}: conflicting blocks {first} vs {second}")]
     Equivocation {
         author: Address,
         round: u64,
@@ -164,7 +160,6 @@ pub enum ConsensusError {
     },
 
     // ── StakeAggregator — §1.1 ───────────────────────────────────────────────
-
     /// Stake accumulation overflowed a `u128`.
     ///
     /// In a correctly-configured validator set, total stake fits well within
@@ -175,7 +170,6 @@ pub enum ConsensusError {
     StakeOverflow { author: Address },
 
     // ── Leader schedule — §6 ─────────────────────────────────────────────────
-
     /// The validator set passed to [`LeaderSchedule`] has no members.
     ///
     /// This is a protocol invariant violation — all valid epochs have at least
@@ -188,7 +182,6 @@ pub enum ConsensusError {
     EmptyCommittee { epoch: u64 },
 
     // ── Commit rule — §4 ─────────────────────────────────────────────────────
-
     /// The BFT safety assumption (`Byzantine < S/3`) has been violated.
     ///
     /// This occurs when the commit rule detects **more than one certified leader
@@ -217,7 +210,6 @@ pub enum ConsensusError {
     },
 
     // ── Linearization — §5 ───────────────────────────────────────────────────
-
     /// A leader decided by `try_decide` was absent from the DAG when the
     /// linearizer went to flatten its sub-DAG.
     ///

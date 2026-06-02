@@ -94,7 +94,9 @@ pub fn handle_mdns_event(event: &mdns::Event, table: &mut PeerTable) -> Vec<Peer
 /// | Other | Ignored — query progress, inbound requests are service concerns |
 pub fn handle_kademlia_event(event: &kad::Event, table: &mut PeerTable) {
     match event {
-        kad::Event::RoutingUpdated { peer, addresses, .. } => {
+        kad::Event::RoutingUpdated {
+            peer, addresses, ..
+        } => {
             // A peer's routing entry was created or refreshed.
             // `addresses` holds all currently-known addresses for this peer.
             table.add_peer(*peer);

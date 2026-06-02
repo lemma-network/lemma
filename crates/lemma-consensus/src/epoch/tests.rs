@@ -53,10 +53,10 @@ fn make_validator(addr_byte: u8, status: ValidatorStatus, active_lem: u64) -> Va
         status,
         tombstoned: false,
         self_stake: Stake {
-            active:           lem(active_lem),
-            pending_active:   Amount::zero(),
+            active: lem(active_lem),
+            pending_active: Amount::zero(),
             pending_inactive: Vec::new(),
-            inactive:         Amount::zero(),
+            inactive: Amount::zero(),
         },
         delegated: Amount::zero(),
         commission_bps: 0,
@@ -81,20 +81,27 @@ fn make_epoch(number: u64, validators: &BTreeMap<Address, Validator>) -> Epoch {
         .iter()
         .filter(|(_, v)| v.is_active())
         .map(|(a, v)| {
-            (*a, Member {
-                consensus_pubkey: v.consensus_pubkey.clone(),
-                power: v.voting_power().expect("test validator power"),
-            })
+            (
+                *a,
+                Member {
+                    consensus_pubkey: v.consensus_pubkey.clone(),
+                    power: v.voting_power().expect("test validator power"),
+                },
+            )
         })
         .collect();
-    let total_power = members
-        .values()
-        .fold(Amount::zero(), |acc, m| acc.checked_add(m.power.as_amount()).unwrap());
+    let total_power = members.values().fold(Amount::zero(), |acc, m| {
+        acc.checked_add(m.power.as_amount()).unwrap()
+    });
     Epoch {
         number,
         start_height: 0,
         start_timestamp: 0,
-        validators: ValidatorSet { epoch: number, members, total_power },
+        validators: ValidatorSet {
+            epoch: number,
+            members,
+            total_power,
+        },
     }
 }
 
@@ -107,7 +114,15 @@ fn run_advance(
     validators: &mut BTreeMap<Address, Validator>,
     block_time: u64,
 ) -> Result<EpochOutput, EpochError> {
-    advance_epoch(epoch, validators, &[], Amount::zero(), block_time, 100, min_stake())
+    advance_epoch(
+        epoch,
+        validators,
+        &[],
+        Amount::zero(),
+        block_time,
+        100,
+        min_stake(),
+    )
 }
 
 // ── advance_epoch — epoch numbering ──────────────────────────────────────────
@@ -124,10 +139,11 @@ fn new_epoch_number_is_current_plus_one() {
 fn start_height_is_boundary_block_height_plus_one() {
     let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 25_000_000)]);
     let epoch = make_epoch(0, &vs);
-    let out = advance_epoch(
-        &epoch, &mut vs, &[], Amount::zero(), 1_000, 42, min_stake(),
-    ).unwrap();
-    assert_eq!(out.epoch.start_height, 43, "start_height = boundary_height + 1");
+    let out = advance_epoch(&epoch, &mut vs, &[], Amount::zero(), 1_000, 42, min_stake()).unwrap();
+    assert_eq!(
+        out.epoch.start_height, 43,
+        "start_height = boundary_height + 1"
+    );
 }
 
 // ── Step 3a: Aptos bug-class guard ───────────────────────────────────────────
@@ -140,20 +156,30 @@ fn expired_pending_inactive_excluded_from_next_committee_power() {
     let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 30_000_000)]);
 
     // Add an unbonding entry that expires exactly at block_time = 1_000.
-    vs.get_mut(&addr(1)).unwrap().self_stake.pending_inactive.push(UnbondingEntry {
-        initial_balance: large,
-        start_height: 0,
-        complete_time: 1_000,
-        on_hold: false,
-    });
+    vs.get_mut(&addr(1))
+        .unwrap()
+        .self_stake
+        .pending_inactive
+        .push(UnbondingEntry {
+            initial_balance: large,
+            start_height: 0,
+            complete_time: 1_000,
+            on_hold: false,
+        });
 
     let epoch = make_epoch(0, &vs);
     let out = run_advance(&epoch, &mut vs, 1_000).unwrap();
 
     // Expired entry must be in `inactive`, NOT in the new committee's power.
     let v = vs.get(&addr(1)).unwrap();
-    assert!(v.self_stake.pending_inactive.is_empty(), "entry must have been settled");
-    assert_eq!(v.self_stake.inactive, large, "matured amount must be in inactive");
+    assert!(
+        v.self_stake.pending_inactive.is_empty(),
+        "entry must have been settled"
+    );
+    assert_eq!(
+        v.self_stake.inactive, large,
+        "matured amount must be in inactive"
+    );
 
     // Committee power = only active stake (the expired entry does NOT count).
     let member = out.epoch.validators.members.get(&addr(1)).unwrap();
@@ -167,17 +193,28 @@ fn expired_pending_inactive_excluded_from_next_committee_power() {
 #[test]
 fn on_hold_entry_not_expired_even_at_complete_time() {
     let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 25_000_000)]);
-    vs.get_mut(&addr(1)).unwrap().self_stake.pending_inactive.push(UnbondingEntry {
-        initial_balance: lem(5_000_000),
-        start_height: 0,
-        complete_time: 500, // would normally expire at block_time 500
-        on_hold: true,       // but frozen — slash evidence pending
-    });
+    vs.get_mut(&addr(1))
+        .unwrap()
+        .self_stake
+        .pending_inactive
+        .push(UnbondingEntry {
+            initial_balance: lem(5_000_000),
+            start_height: 0,
+            complete_time: 500, // would normally expire at block_time 500
+            on_hold: true,      // but frozen — slash evidence pending
+        });
     let epoch = make_epoch(0, &vs);
     let out = run_advance(&epoch, &mut vs, 1_000).unwrap(); // block_time > complete_time
     let v = vs.get(&addr(1)).unwrap();
-    assert_eq!(v.self_stake.pending_inactive.len(), 1, "on_hold entry must NOT be settled");
-    assert!(v.self_stake.inactive.is_zero(), "nothing should move to inactive");
+    assert_eq!(
+        v.self_stake.pending_inactive.len(),
+        1,
+        "on_hold entry must NOT be settled"
+    );
+    assert!(
+        v.self_stake.inactive.is_zero(),
+        "nothing should move to inactive"
+    );
     let _ = out; // epoch transition still succeeded
 }
 
@@ -198,8 +235,15 @@ fn pending_active_becomes_active_at_boundary() {
 
     // After boundary: active = 30M, pending_active = 0.
     let v = vs.get(&addr(1)).unwrap();
-    assert_eq!(v.self_stake.active, lem(30_000_000), "pending_active must be merged into active");
-    assert!(v.self_stake.pending_active.is_zero(), "pending_active must be zeroed");
+    assert_eq!(
+        v.self_stake.active,
+        lem(30_000_000),
+        "pending_active must be merged into active"
+    );
+    assert!(
+        v.self_stake.pending_active.is_zero(),
+        "pending_active must be zeroed"
+    );
 }
 
 // ── Step 4: validator status transitions ─────────────────────────────────────
@@ -218,8 +262,11 @@ fn bonded_to_unbonded_direct_is_impossible() {
 
     // Validator 1 (active=0) must become Unbonding, NOT Unbonded.
     let v1 = &vs[&addr(1)];
-    assert_eq!(v1.status, ValidatorStatus::Unbonding,
-        "Bonded→Unbonded direct must be forbidden; must pass through Unbonding");
+    assert_eq!(
+        v1.status,
+        ValidatorStatus::Unbonding,
+        "Bonded→Unbonded direct must be forbidden; must pass through Unbonding"
+    );
 }
 
 /// spec §10: "Eligibility re-check: pending_active validator joins only if
@@ -236,8 +283,11 @@ fn unbonded_with_enough_stake_becomes_bonded() {
     vs.insert(v2.address, v2);
     let epoch = make_epoch(0, &vs);
     let _out = run_advance(&epoch, &mut vs, 1_000).unwrap();
-    assert_eq!(vs[&addr(1)].status, ValidatorStatus::Bonded,
-        "Unbonded validator with active >= min_stake must become Bonded");
+    assert_eq!(
+        vs[&addr(1)].status,
+        ValidatorStatus::Bonded,
+        "Unbonded validator with active >= min_stake must become Bonded"
+    );
 }
 
 #[test]
@@ -250,8 +300,11 @@ fn unbonded_below_min_stake_stays_unbonded() {
     vs.insert(v2.address, v2);
     let epoch = make_epoch(0, &vs);
     let _out = run_advance(&epoch, &mut vs, 1_000).unwrap();
-    assert_eq!(vs[&addr(1)].status, ValidatorStatus::Unbonded,
-        "Unbonded validator below min_stake must remain Unbonded");
+    assert_eq!(
+        vs[&addr(1)].status,
+        ValidatorStatus::Unbonded,
+        "Unbonded validator below min_stake must remain Unbonded"
+    );
 }
 
 #[test]
@@ -263,8 +316,11 @@ fn bonded_below_min_stake_becomes_unbonding() {
     ]);
     let epoch = make_epoch(0, &vs);
     let _out = run_advance(&epoch, &mut vs, 1_000).unwrap();
-    assert_eq!(vs[&addr(1)].status, ValidatorStatus::Unbonding,
-        "Bonded validator with active < min_stake must move to Unbonding");
+    assert_eq!(
+        vs[&addr(1)].status,
+        ValidatorStatus::Unbonding,
+        "Bonded validator with active < min_stake must move to Unbonding"
+    );
 }
 
 #[test]
@@ -278,8 +334,11 @@ fn unbonding_fully_unwound_becomes_unbonded() {
     vs.insert(v2.address, v2);
     let epoch = make_epoch(0, &vs);
     let _out = run_advance(&epoch, &mut vs, 1_000).unwrap();
-    assert_eq!(vs[&addr(1)].status, ValidatorStatus::Unbonded,
-        "Unbonding with no stake left must become Unbonded");
+    assert_eq!(
+        vs[&addr(1)].status,
+        ValidatorStatus::Unbonded,
+        "Unbonding with no stake left must become Unbonded"
+    );
 }
 
 #[test]
@@ -290,7 +349,10 @@ fn jailed_validator_unjailed_at_boundary() {
     vs.insert(v.address, v);
     let epoch = make_epoch(0, &vs);
     let out = run_advance(&epoch, &mut vs, 1_000).unwrap();
-    assert!(vs[&addr(1)].jailed_until.is_none(), "jail must be cleared at boundary");
+    assert!(
+        vs[&addr(1)].jailed_until.is_none(),
+        "jail must be cleared at boundary"
+    );
     // Unjailed Bonded validator with enough stake is in the new committee.
     assert!(out.epoch.validators.members.contains_key(&addr(1)));
 }
@@ -307,8 +369,10 @@ fn tombstoned_validator_excluded_from_next_set() {
     vs.insert(v2.address, v2);
     let epoch = make_epoch(0, &vs);
     let out = run_advance(&epoch, &mut vs, 1_000).unwrap();
-    assert!(!out.epoch.validators.members.contains_key(&addr(1)),
-        "tombstoned validator must not appear in next ValidatorSet");
+    assert!(
+        !out.epoch.validators.members.contains_key(&addr(1)),
+        "tombstoned validator must not appear in next ValidatorSet"
+    );
 }
 
 #[test]
@@ -321,8 +385,10 @@ fn still_jailed_validator_excluded_from_next_set() {
     vs.insert(v2.address, v2);
     let epoch = make_epoch(0, &vs);
     let out = run_advance(&epoch, &mut vs, 1_000).unwrap();
-    assert!(!out.epoch.validators.members.contains_key(&addr(1)),
-        "still-jailed validator must not appear in next ValidatorSet");
+    assert!(
+        !out.epoch.validators.members.contains_key(&addr(1)),
+        "still-jailed validator must not appear in next ValidatorSet"
+    );
 }
 
 #[test]
@@ -333,7 +399,10 @@ fn empty_next_committee_returns_err_not_panic() {
     let epoch = make_epoch(0, &vs);
     let result = run_advance(&epoch, &mut vs, 1_000);
     assert!(
-        matches!(result, Err(EpochError::EmptyNextCommittee { next_epoch: 1 })),
+        matches!(
+            result,
+            Err(EpochError::EmptyNextCommittee { next_epoch: 1 })
+        ),
         "empty committee must return Err, not panic"
     );
 }
@@ -345,10 +414,15 @@ fn bonded_at_exactly_min_stake_stays_bonded() {
     let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 20_000_000)]);
     let epoch = make_epoch(0, &vs);
     let out = run_advance(&epoch, &mut vs, 1_000).unwrap();
-    assert_eq!(vs[&addr(1)].status, ValidatorStatus::Bonded,
-        "active == min_stake must stay Bonded (>= boundary, not >)");
-    assert!(out.epoch.validators.members.contains_key(&addr(1)),
-        "validator at exactly min_stake must be in the next committee");
+    assert_eq!(
+        vs[&addr(1)].status,
+        ValidatorStatus::Bonded,
+        "active == min_stake must stay Bonded (>= boundary, not >)"
+    );
+    assert!(
+        out.epoch.validators.members.contains_key(&addr(1)),
+        "validator at exactly min_stake must be in the next committee"
+    );
 }
 
 // ── Steps 5 + 9: hash correctness ────────────────────────────────────────────
@@ -396,12 +470,14 @@ fn deterministic_same_input_same_output() {
 /// round-robin for all rounds. The two runs must produce different schedules.
 #[test]
 fn reputation_recompute_produces_non_identity_schedule_when_scores_differ() {
-    let make_vs = || make_validators(&[
-        (0, ValidatorStatus::Bonded, 25_000_000),
-        (1, ValidatorStatus::Bonded, 25_000_000),
-        (2, ValidatorStatus::Bonded, 25_000_000),
-        (3, ValidatorStatus::Bonded, 25_000_000),
-    ]);
+    let make_vs = || {
+        make_validators(&[
+            (0, ValidatorStatus::Bonded, 25_000_000),
+            (1, ValidatorStatus::Bonded, 25_000_000),
+            (2, ValidatorStatus::Bonded, 25_000_000),
+            (3, ValidatorStatus::Bonded, 25_000_000),
+        ])
+    };
 
     // addr(3) gets 3 blocks (best rep); others get 0.
     let a3 = addr(3);
@@ -419,22 +495,37 @@ fn reputation_recompute_produces_non_identity_schedule_when_scores_differ() {
     let mut vs1 = make_vs();
     let epoch1 = make_epoch(0, &vs1);
     let out_rep = advance_epoch(
-        &epoch1, &mut vs1, &commits, Amount::zero(), 1_000, 100, min_stake(),
-    ).unwrap();
+        &epoch1,
+        &mut vs1,
+        &commits,
+        Amount::zero(),
+        1_000,
+        100,
+        min_stake(),
+    )
+    .unwrap();
 
     // Run WITHOUT reputation — all scores 0 → equal-score guard → identity.
     let mut vs2 = make_vs();
     let epoch2 = make_epoch(0, &vs2);
     let out_no = advance_epoch(
-        &epoch2, &mut vs2, &[], Amount::zero(), 1_000, 100, min_stake(),
-    ).unwrap();
+        &epoch2,
+        &mut vs2,
+        &[],
+        Amount::zero(),
+        1_000,
+        100,
+        min_stake(),
+    )
+    .unwrap();
 
     // With unequal scores, at least one leader election must differ.
-    let any_different = (0..4_u64).any(|r| {
-        out_rep.leader_schedule.elect_leader(r) != out_no.leader_schedule.elect_leader(r)
-    });
-    assert!(any_different,
-        "unequal reputation scores must produce a different leader schedule vs no-commits");
+    let any_different = (0..4_u64)
+        .any(|r| out_rep.leader_schedule.elect_leader(r) != out_no.leader_schedule.elect_leader(r));
+    assert!(
+        any_different,
+        "unequal reputation scores must produce a different leader schedule vs no-commits"
+    );
 }
 
 // ── Delegated stake counts toward power ──────────────────────────────────────
@@ -448,8 +539,11 @@ fn delegated_stake_included_in_voting_power() {
     let epoch = make_epoch(0, &vs);
     let out = run_advance(&epoch, &mut vs, 1_000).unwrap();
     let power = out.epoch.validators.members[&addr(1)].power;
-    assert_eq!(power.as_amount(), lem(25_000_000),
-        "voting power must include delegated stake");
+    assert_eq!(
+        power.as_amount(),
+        lem(25_000_000),
+        "voting power must include delegated stake"
+    );
 }
 
 // ── B2: Reward integration tests ─────────────────────────────────────────────
@@ -463,15 +557,14 @@ fn advance_epoch_nonzero_supply_credits_inflation_to_active_stake() {
     let initial_active = vs[&addr(1)].self_stake.active;
     let epoch = make_epoch(0, &vs);
 
-    let out = advance_epoch(
-        &epoch, &mut vs, &[], supply, 1_000, 100, min_stake(),
-    ).unwrap();
+    let out = advance_epoch(&epoch, &mut vs, &[], supply, 1_000, 100, min_stake()).unwrap();
 
     let new_active = vs[&addr(1)].self_stake.active;
     assert!(
         new_active > initial_active,
         "active stake must grow after inflation: initial={:?} new={:?}",
-        initial_active, new_active
+        initial_active,
+        new_active
     );
     // The credited amount equals the minted inflation (single validator gets all).
     let credited = new_active.checked_sub(initial_active).unwrap();
@@ -489,15 +582,15 @@ fn advance_epoch_minted_matches_compute_epoch_inflation() {
     let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 25_000_000)]);
     let epoch = make_epoch(0, &vs); // epoch 0
 
-    let out = advance_epoch(
-        &epoch, &mut vs, &[], supply, 1_000, 100, min_stake(),
-    ).unwrap();
+    let out = advance_epoch(&epoch, &mut vs, &[], supply, 1_000, 100, min_stake()).unwrap();
 
     // advance_epoch closes epoch 0 → next_number = 1;
     // compute_epoch_inflation uses current.number (0) for the rate.
     let expected_minted = compute_epoch_inflation(supply, 0).unwrap();
-    assert_eq!(out.minted, expected_minted,
-        "EpochOutput.minted must equal compute_epoch_inflation(supply, epoch 0)");
+    assert_eq!(
+        out.minted, expected_minted,
+        "EpochOutput.minted must equal compute_epoch_inflation(supply, epoch 0)"
+    );
 }
 
 /// With zero total supply, minted = 0 and burned_remainder = 0.
@@ -508,7 +601,10 @@ fn advance_epoch_zero_supply_gives_zero_minted_zero_remainder() {
     let out = run_advance(&epoch, &mut vs, 1_000).unwrap(); // uses Amount::zero() supply
 
     assert!(out.minted.is_zero(), "zero supply → zero minted");
-    assert!(out.burned_remainder.is_zero(), "zero supply → zero burned_remainder");
+    assert!(
+        out.burned_remainder.is_zero(),
+        "zero supply → zero burned_remainder"
+    );
 }
 
 /// Reward is distributed BEFORE stake settlement — auto-compounds into next epoch power.
@@ -521,18 +617,21 @@ fn advance_epoch_reward_compounds_into_next_epoch_power() {
     let mut vs = make_validators(&[(1, ValidatorStatus::Bonded, 20_000_000)]);
     let epoch = make_epoch(0, &vs);
 
-    let out_with_rewards = advance_epoch(
-        &epoch, &mut vs, &[], supply, 1_000, 100, min_stake(),
-    ).unwrap();
+    let out_with_rewards =
+        advance_epoch(&epoch, &mut vs, &[], supply, 1_000, 100, min_stake()).unwrap();
 
     // The next committee's power must include the reward (it was credited before step 5).
-    let power_with = out_with_rewards.epoch.validators.members[&addr(1)].power.as_amount();
+    let power_with = out_with_rewards.epoch.validators.members[&addr(1)]
+        .power
+        .as_amount();
 
     // Run again without rewards (zero supply) for comparison.
     let mut vs2 = make_validators(&[(1, ValidatorStatus::Bonded, 20_000_000)]);
     let epoch2 = make_epoch(0, &vs2);
     let out_no_rewards = run_advance(&epoch2, &mut vs2, 1_000).unwrap();
-    let power_without = out_no_rewards.epoch.validators.members[&addr(1)].power.as_amount();
+    let power_without = out_no_rewards.epoch.validators.members[&addr(1)]
+        .power
+        .as_amount();
 
     assert!(
         power_with > power_without,

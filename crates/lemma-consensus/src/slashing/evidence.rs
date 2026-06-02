@@ -35,12 +35,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use lemma_core::{address::Address, amount::Amount, validator::Validator, validator_set::ValidatorSet};
-
-use super::{
-    jail::tombstone,
-    slash, SlashError, DOUBLE_SIGN_SLASH_BPS, EVIDENCE_MAX_AGE_SECONDS,
+use lemma_core::{
+    address::Address, amount::Amount, validator::Validator, validator_set::ValidatorSet,
 };
+
+use super::{jail::tombstone, slash, SlashError, DOUBLE_SIGN_SLASH_BPS, EVIDENCE_MAX_AGE_SECONDS};
 use crate::dag::block::DagBlockRef;
 
 // ── DoubleSignEvidence ────────────────────────────────────────────────────────
@@ -118,16 +117,16 @@ pub enum EvidenceError {
     ///
     /// `sig_a_ok` / `sig_b_ok` are injected by the caller (B3-2). If either
     /// is `false`, the evidence is unsigned or forged — rejected.
-    #[error(
-        "evidence signature verification failed: sig_a_ok={sig_a_ok}, sig_b_ok={sig_b_ok}"
-    )]
+    #[error("evidence signature verification failed: sig_a_ok={sig_a_ok}, sig_b_ok={sig_b_ok}")]
     InvalidSignature { sig_a_ok: bool, sig_b_ok: bool },
 
     /// The accused validator was not in the committee at `infraction_height`.
     ///
     /// In v1, this checks the **current** `vset` (passed by the caller). A
     /// non-member cannot have committed equivocation within that committee.
-    #[error("validator {validator} not found in committee at infraction height {infraction_height}")]
+    #[error(
+        "validator {validator} not found in committee at infraction height {infraction_height}"
+    )]
     NotInCommittee {
         validator: Address,
         infraction_height: u64,
@@ -150,9 +149,7 @@ pub enum EvidenceError {
     ///
     /// Prevents double-jeopardy: the same equivocation cannot be slashed twice
     /// even if submitted again.
-    #[error(
-        "evidence already processed for validator {validator} at height {infraction_height}"
-    )]
+    #[error("evidence already processed for validator {validator} at height {infraction_height}")]
     Duplicate {
         validator: Address,
         infraction_height: u64,
@@ -201,9 +198,9 @@ pub fn verify_double_sign(
         || evidence.vote_a.author != evidence.vote_b.author
     {
         return Err(EvidenceError::SlotMismatch {
-            vote_a_round:  evidence.vote_a.round,
+            vote_a_round: evidence.vote_a.round,
             vote_a_author: evidence.vote_a.author,
-            vote_b_round:  evidence.vote_b.round,
+            vote_b_round: evidence.vote_b.round,
             vote_b_author: evidence.vote_b.author,
         });
     }

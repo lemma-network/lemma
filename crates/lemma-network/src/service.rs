@@ -38,10 +38,10 @@
 
 use futures::StreamExt as _;
 use libp2p::{
-    gossipsub, identify,
+    gossipsub, identify, noise,
     request_response::{self},
     swarm::SwarmEvent,
-    noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
+    tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use tokio::sync::mpsc;
 
@@ -191,10 +191,7 @@ impl NetworkHandle {
     /// # Errors
     ///
     /// Returns [`NetworkError::Transport`] if the command channel is closed.
-    pub async fn broadcast_transaction(
-        &self,
-        tx: Transaction,
-    ) -> Result<(), NetworkError> {
+    pub async fn broadcast_transaction(&self, tx: Transaction) -> Result<(), NetworkError> {
         self.send(NetworkCommand::BroadcastTransaction(tx)).await
     }
 
@@ -214,7 +211,8 @@ impl NetworkHandle {
         peer: PeerId,
         request: crate::messages::RangeRequest,
     ) -> Result<(), NetworkError> {
-        self.send(NetworkCommand::RequestRange { peer, request }).await
+        self.send(NetworkCommand::RequestRange { peer, request })
+            .await
     }
 
     /// Send a range response back through an open request-response channel.
@@ -232,7 +230,8 @@ impl NetworkHandle {
         channel: request_response::ResponseChannel<crate::messages::RangeResponse>,
         response: crate::messages::RangeResponse,
     ) -> Result<(), NetworkError> {
-        self.send(NetworkCommand::SendRangeResponse { channel, response }).await
+        self.send(NetworkCommand::SendRangeResponse { channel, response })
+            .await
     }
 
     /// Dial a bootstrap or peer address.
@@ -295,31 +294,22 @@ impl NetworkService {
                 yamux::Config::default,
             )
             .map_err(|e| {
-                NetworkError::transport(std::io::Error::other(format!(
-                    "TCP transport: {e}"
-                )))
+                NetworkError::transport(std::io::Error::other(format!("TCP transport: {e}")))
             })?
             .with_behaviour(|k| {
-                build_behaviour(k, config).map_err(|e| {
-                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                })
+                build_behaviour(k, config)
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             })
             .map_err(|e| {
-                NetworkError::transport(std::io::Error::other(format!(
-                    "LemmaBehaviour: {e}"
-                )))
+                NetworkError::transport(std::io::Error::other(format!("LemmaBehaviour: {e}")))
             })?
-            .with_swarm_config(|cfg| {
-                cfg.with_idle_connection_timeout(config.idle_timeout)
-            })
+            .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(config.idle_timeout))
             .build();
 
         // Start listening on all configured addresses.
         for addr in &config.listen_addrs {
             swarm.listen_on(addr.clone()).map_err(|e| {
-                NetworkError::transport(std::io::Error::other(format!(
-                    "listen_on {addr}: {e}"
-                )))
+                NetworkError::transport(std::io::Error::other(format!("listen_on {addr}: {e}")))
             })?;
         }
 
@@ -384,10 +374,7 @@ impl NetworkService {
 
     // ── Swarm event dispatch ──────────────────────────────────────────────────
 
-    fn handle_swarm_event(
-        &mut self,
-        event: SwarmEvent<LemmaBehaviourEvent>,
-    ) {
+    fn handle_swarm_event(&mut self, event: SwarmEvent<LemmaBehaviourEvent>) {
         match event {
             // ── Behaviour events (sub-behaviour dispatch) ─────────────────────
             SwarmEvent::Behaviour(behaviour_event) => {
@@ -401,7 +388,11 @@ impl NetworkService {
                 self.emit(NetworkEvent::PeerConnected(peer_id));
             }
 
-            SwarmEvent::ConnectionClosed { peer_id, num_established, .. } => {
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
                 // Only mark disconnected when the last connection to this peer closes.
                 if num_established == 0 {
                     self.peers.mark_disconnected(&peer_id);
@@ -448,15 +439,15 @@ impl NetworkService {
 
             // ── Request-response (range sync) ─────────────────────────────────
             LemmaBehaviourEvent::Sync(request_response::Event::Message {
-                peer,
-                message,
-                ..
+                peer, message, ..
             }) => {
                 self.handle_sync_message(peer, message);
             }
 
             LemmaBehaviourEvent::Sync(request_response::Event::OutboundFailure {
-                peer, error, ..
+                peer,
+                error,
+                ..
             }) => {
                 tracing::warn!(
                     peer = %peer,
@@ -476,8 +467,7 @@ impl NetworkService {
 
             // ── mDNS ──────────────────────────────────────────────────────────
             LemmaBehaviourEvent::Mdns(mdns_event) => {
-                let newly_discovered =
-                    discovery::handle_mdns_event(&mdns_event, &mut self.peers);
+                let newly_discovered = discovery::handle_mdns_event(&mdns_event, &mut self.peers);
                 // Dial newly discovered LAN peers.
                 for peer_id in newly_discovered {
                     if let Some(info) = self.peers.peer_info(&peer_id) {
@@ -496,9 +486,7 @@ impl NetworkService {
             }
 
             // ── Identify ──────────────────────────────────────────────────────
-            LemmaBehaviourEvent::Identify(identify::Event::Received {
-                peer_id, info, ..
-            }) => {
+            LemmaBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
                 // Add all listen addresses reported by the peer via identify.
                 // This lets Kademlia use them for routing-table entries.
                 for addr in &info.listen_addrs {
@@ -571,7 +559,11 @@ impl NetworkService {
                     self.apply_peer_score(&from);
                     return;
                 }
-                self.emit(NetworkEvent::RangeRequest { from, request, channel });
+                self.emit(NetworkEvent::RangeRequest {
+                    from,
+                    request,
+                    channel,
+                });
             }
 
             request_response::Message::Response { response, .. } => {
@@ -626,10 +618,7 @@ impl NetworkService {
             }
 
             NetworkCommand::RequestRange { peer, request } => {
-                self.swarm
-                    .behaviour_mut()
-                    .sync
-                    .send_request(&peer, request);
+                self.swarm.behaviour_mut().sync.send_request(&peer, request);
             }
 
             NetworkCommand::SendRangeResponse { channel, response } => {

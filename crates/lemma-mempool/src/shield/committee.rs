@@ -167,10 +167,7 @@ impl ShieldCommittee {
     /// Number of shares assigned to `addr` (0 if not a member).
     #[must_use]
     pub fn weight_of(&self, addr: &Address) -> u64 {
-        self.shares
-            .get(addr)
-            .map(|v| v.len() as u64)
-            .unwrap_or(0)
+        self.shares.get(addr).map(|v| v.len() as u64).unwrap_or(0)
     }
 
     /// Iterator over `(address, share_ids)` in canonical address order.

@@ -42,11 +42,7 @@
 use std::collections::BTreeMap;
 
 use lemma_core::{
-    address::Address,
-    hash::Hash,
-    header::BlockHeader,
-    QuorumCert,
-    validator_set::ValidatorSet,
+    address::Address, hash::Hash, header::BlockHeader, validator_set::ValidatorSet, QuorumCert,
 };
 
 use crate::cert::{verify_quorum_cert, CertError};
@@ -230,8 +226,10 @@ pub fn verify_full(
     }
 
     // ── Checks 2–4: Cert verification (digest + membership + quorum) ──────────
-    verify_quorum_cert(qc, vset, header_digest, sig_results)
-        .map_err(|e| ProofError::CertFailed { index: 0, source: e })
+    verify_quorum_cert(qc, vset, header_digest, sig_results).map_err(|e| ProofError::CertFailed {
+        index: 0,
+        source: e,
+    })
 }
 
 // ── verify_epoch_change ───────────────────────────────────────────────────────
@@ -306,8 +304,12 @@ pub fn verify_epoch_change(
         }
 
         // Step B: Verify the quorum cert for this boundary header.
-        verify_quorum_cert(qc, current_vset, header_digests[i], &sig_results[i])
-            .map_err(|e| ProofError::CertFailed { index: i, source: e })?;
+        verify_quorum_cert(qc, current_vset, header_digests[i], &sig_results[i]).map_err(|e| {
+            ProofError::CertFailed {
+                index: i,
+                source: e,
+            }
+        })?;
 
         // Step C: Authenticate the next validator set via the boundary header.
         //

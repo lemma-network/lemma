@@ -18,9 +18,9 @@ use lemma_core::{
     hash::Hash,
     header::BlockHeader,
     signature::Signature,
-    QuorumCert,
     validator::{ConsensusKey, VotingPower},
     validator_set::{Member, ValidatorSet},
+    QuorumCert,
 };
 
 use crate::epoch::proof::{verify_epoch_change, verify_full, EpochChangeProof, ProofError};
@@ -43,20 +43,30 @@ fn make_vset(members: &[(u8, u128)]) -> ValidatorSet {
     let map: BTreeMap<_, _> = members
         .iter()
         .map(|&(b, p)| {
-            (addr(b), Member {
-                consensus_pubkey: ConsensusKey::from_bytes(vec![b; 32], vec![b; 32]),
-                power: power(p),
-            })
+            (
+                addr(b),
+                Member {
+                    consensus_pubkey: ConsensusKey::from_bytes(vec![b; 32], vec![b; 32]),
+                    power: power(p),
+                },
+            )
         })
         .collect();
     let total = map.values().fold(Amount::zero(), |a, m| {
         a.checked_add(m.power.as_amount()).unwrap()
     });
-    ValidatorSet { epoch: 0, members: map, total_power: total }
+    ValidatorSet {
+        epoch: 0,
+        members: map,
+        total_power: total,
+    }
 }
 
 fn make_cert(digest: Hash, signers: &[u8]) -> QuorumCert {
-    let map = signers.iter().map(|&b| (addr(b), Signature::Unsigned)).collect();
+    let map = signers
+        .iter()
+        .map(|&b| (addr(b), Signature::Unsigned))
+        .collect();
     QuorumCert::new(0, digest, map)
 }
 
@@ -76,22 +86,23 @@ fn make_boundary_header(
 ) -> BlockHeader {
     BlockHeader::new(
         height,
-        1_700_000_000 + height,           // timestamp
-        hash(0),                           // parent_hash
-        hash(0),                           // transactions_root
-        hash(0),                           // state_root
-        hash(0),                           // receipts_root
-        addr(0),                           // proposer
+        1_700_000_000 + height, // timestamp
+        hash(0),                // parent_hash
+        hash(0),                // transactions_root
+        hash(0),                // state_root
+        hash(0),                // receipts_root
+        addr(0),                // proposer
         epoch,
-        0,                                 // dag_round
-        hash(0),                           // dag_anchor
+        0,       // dag_round
+        hash(0), // dag_anchor
         validators_hash,
         next_validators_hash,
-        1_000_000,                         // gas_limit > 0
-        0,                                 // gas_used
-        Amount::from_drop(1_000_000_000),  // base_fee
-        vec![],                            // extra_data
-    ).expect("test header must be valid")
+        1_000_000,                        // gas_limit > 0
+        0,                                // gas_used
+        Amount::from_drop(1_000_000_000), // base_fee
+        vec![],                           // extra_data
+    )
+    .expect("test header must be valid")
 }
 
 // ── verify_full ───────────────────────────────────────────────────────────────
@@ -181,7 +192,14 @@ fn verify_epoch_change_rejects_length_mismatch_certs() {
     };
 
     let err = verify_epoch_change(&proof, &vset, &[digest], &[all_valid(&[1, 2, 3])]).unwrap_err();
-    assert!(matches!(err, ProofError::LengthMismatch { headers: 1, certs: 0, .. }));
+    assert!(matches!(
+        err,
+        ProofError::LengthMismatch {
+            headers: 1,
+            certs: 0,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -199,7 +217,14 @@ fn verify_epoch_change_rejects_injected_data_length_mismatch() {
 
     // Missing header_digests (length 0 vs 1 header)
     let err = verify_epoch_change(&proof, &vset, &[], &[all_valid(&[1, 2, 3])]).unwrap_err();
-    assert!(matches!(err, ProofError::InjectedDataLengthMismatch { headers: 1, digests: 0, .. }));
+    assert!(matches!(
+        err,
+        ProofError::InjectedDataLengthMismatch {
+            headers: 1,
+            digests: 0,
+            ..
+        }
+    ));
 }
 
 // ── verify_epoch_change: single-hop ──────────────────────────────────────────
@@ -248,9 +273,13 @@ fn verify_epoch_change_rejects_wrong_next_vset_hash() {
         next_validator_sets: vec![forged_next], // wrong!
     };
 
-    let err = verify_epoch_change(&proof, &vset_n, &[digest], &[all_valid(&[1, 2, 3])]).unwrap_err();
+    let err =
+        verify_epoch_change(&proof, &vset_n, &[digest], &[all_valid(&[1, 2, 3])]).unwrap_err();
     assert!(
-        matches!(err, ProofError::NextValidatorSetHashMismatch { index: 0, .. }),
+        matches!(
+            err,
+            ProofError::NextValidatorSetHashMismatch { index: 0, .. }
+        ),
         "forged next_vset must → NextValidatorSetHashMismatch"
     );
 }
@@ -272,7 +301,8 @@ fn verify_epoch_change_rejects_wrong_validators_hash_in_header() {
         next_validator_sets: vec![vset_n1],
     };
 
-    let err = verify_epoch_change(&proof, &vset_n, &[digest], &[all_valid(&[1, 2, 3])]).unwrap_err();
+    let err =
+        verify_epoch_change(&proof, &vset_n, &[digest], &[all_valid(&[1, 2, 3])]).unwrap_err();
     assert!(
         matches!(err, ProofError::ValidatorSetHashMismatch { index: 0, .. }),
         "wrong validators_hash in boundary header must → ValidatorSetHashMismatch"
@@ -307,7 +337,7 @@ fn verify_epoch_change_rejects_insufficient_quorum() {
 #[test]
 fn verify_epoch_change_multi_hop_passes() {
     // Epoch N → N+1 → N+2 (two boundary headers).
-    let vset_n  = make_vset(&[(1, 100), (2, 100), (3, 100)]); // initial trust
+    let vset_n = make_vset(&[(1, 100), (2, 100), (3, 100)]); // initial trust
     let vset_n1 = make_vset(&[(4, 100), (5, 100), (6, 100)]);
     let vset_n2 = make_vset(&[(7, 100), (8, 100), (9, 100)]);
 
@@ -327,17 +357,19 @@ fn verify_epoch_change_multi_hop_passes() {
 
     assert!(
         verify_epoch_change(
-            &proof, &vset_n,
+            &proof,
+            &vset_n,
             &[digest_0, digest_1],
             &[all_valid(&[1, 2, 3]), all_valid(&[4, 5, 6])]
-        ).is_ok(),
+        )
+        .is_ok(),
         "valid two-hop epoch-change proof must pass"
     );
 }
 
 #[test]
 fn verify_epoch_change_multi_hop_fails_at_second_step() {
-    let vset_n  = make_vset(&[(1, 100), (2, 100), (3, 100)]);
+    let vset_n = make_vset(&[(1, 100), (2, 100), (3, 100)]);
     let vset_n1 = make_vset(&[(4, 100), (5, 100), (6, 100)]);
     let vset_n2 = make_vset(&[(7, 100), (8, 100), (9, 100)]);
     let forged_n2 = make_vset(&[(10, 100), (11, 100), (12, 100)]);
@@ -357,13 +389,18 @@ fn verify_epoch_change_multi_hop_fails_at_second_step() {
     };
 
     let err = verify_epoch_change(
-        &proof, &vset_n,
+        &proof,
+        &vset_n,
         &[digest_0, digest_1],
-        &[all_valid(&[1, 2, 3]), all_valid(&[4, 5, 6])]
-    ).unwrap_err();
+        &[all_valid(&[1, 2, 3]), all_valid(&[4, 5, 6])],
+    )
+    .unwrap_err();
 
     assert!(
-        matches!(err, ProofError::NextValidatorSetHashMismatch { index: 1, .. }),
+        matches!(
+            err,
+            ProofError::NextValidatorSetHashMismatch { index: 1, .. }
+        ),
         "forged vset at step 1 must → error at index 1"
     );
 }
@@ -386,7 +423,7 @@ fn verify_full_deterministic() {
 
 #[test]
 fn verify_epoch_change_deterministic() {
-    let vset_n  = make_vset(&[(1, 100), (2, 100), (3, 100)]);
+    let vset_n = make_vset(&[(1, 100), (2, 100), (3, 100)]);
     let vset_n1 = make_vset(&[(4, 100), (5, 100), (6, 100)]);
     let digest = hash(0xAB);
     let header = make_boundary_header(10, 0, vset_n.hash(), vset_n1.hash());
@@ -399,5 +436,9 @@ fn verify_epoch_change_deterministic() {
 
     let r1 = verify_epoch_change(&proof, &vset_n, &[digest], &[all_valid(&[1, 2, 3])]);
     let r2 = verify_epoch_change(&proof, &vset_n, &[digest], &[all_valid(&[1, 2, 3])]);
-    assert_eq!(r1.is_ok(), r2.is_ok(), "verify_epoch_change must be deterministic");
+    assert_eq!(
+        r1.is_ok(),
+        r2.is_ok(),
+        "verify_epoch_change must be deterministic"
+    );
 }

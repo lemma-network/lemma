@@ -26,11 +26,7 @@
 //! ```
 
 use lemma_core::{
-    address::Address,
-    block::Block,
-    genesis::GenesisConfig,
-    hash::Hash,
-    header::BlockHeader,
+    address::Address, block::Block, genesis::GenesisConfig, hash::Hash, header::BlockHeader,
     validator_set::ValidatorSet,
 };
 use lemma_storage::{account::Account, state::WorldState, ChainStore, LemmaDb};
@@ -104,20 +100,20 @@ pub fn init_chain(db: LemmaDb, genesis: &GenesisConfig) -> Result<InitOutcome, N
 
     // Step 8: assemble the genesis block header.
     let header = BlockHeader::new(
-        0,                          // height = 0
-        genesis.genesis_timestamp,  // timestamp
-        Hash::zero(),               // parent_hash — no predecessor
-        Hash::zero(),               // transactions_root — no transactions
+        0,                         // height = 0
+        genesis.genesis_timestamp, // timestamp
+        Hash::zero(),              // parent_hash — no predecessor
+        Hash::zero(),              // transactions_root — no transactions
         state_root,
-        Hash::zero(),               // receipts_root — no receipts
-        Address::zero(),            // proposer — none at genesis
-        0,                          // epoch = 0
-        0,                          // dag_round = 0
-        Hash::zero(),               // dag_anchor — none at genesis
+        Hash::zero(),    // receipts_root — no receipts
+        Address::zero(), // proposer — none at genesis
+        0,               // epoch = 0
+        0,               // dag_round = 0
+        Hash::zero(),    // dag_anchor — none at genesis
         validators_hash,
-        validators_hash,            // next_validators_hash = same set (epoch 0)
+        validators_hash, // next_validators_hash = same set (epoch 0)
         genesis.initial_gas_limit,
-        0,                          // gas_used = 0
+        0, // gas_used = 0
         genesis.initial_base_fee,
         vec![],
     )?;
@@ -127,8 +123,8 @@ pub fn init_chain(db: LemmaDb, genesis: &GenesisConfig) -> Result<InitOutcome, N
 
     // Step 10: compute the genesis block hash (canonical Blake3, AGENTS §2.2).
     // Serialize once; hash_bytes reuses those bytes for CF_BLOCK_HASH storage.
-    let block_bytes = bincode::serialize(&block)
-        .map_err(|e| NodeError::Serialization(e.to_string()))?;
+    let block_bytes =
+        bincode::serialize(&block).map_err(|e| NodeError::Serialization(e.to_string()))?;
     let genesis_hash = lemma_crypto::hash_bytes(&block_bytes);
 
     // Step 11: persist atomically via ChainStore (the canonical block-write path).
@@ -141,7 +137,10 @@ pub fn init_chain(db: LemmaDb, genesis: &GenesisConfig) -> Result<InitOutcome, N
     // If this ever matters: expose a put_block_raw(bytes, hash) on ChainStore.
     ChainStore::new(&db).put_block(&block, genesis_hash)?;
 
-    Ok(InitOutcome::Initialized { genesis_hash, accounts })
+    Ok(InitOutcome::Initialized {
+        genesis_hash,
+        accounts,
+    })
 }
 
 #[cfg(test)]

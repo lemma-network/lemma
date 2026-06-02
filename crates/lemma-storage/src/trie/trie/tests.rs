@@ -178,7 +178,12 @@ fn many_keys_all_retrievable() {
         t.insert(k, v.to_vec()).unwrap();
     }
     for (k, v) in &pairs {
-        assert_eq!(t.get(k).unwrap(), Some(v.to_vec()), "failed for key {:?}", k);
+        assert_eq!(
+            t.get(k).unwrap(),
+            Some(v.to_vec()),
+            "failed for key {:?}",
+            k
+        );
     }
 }
 
@@ -305,7 +310,8 @@ fn root_is_independent_of_insertion_order() {
     t2.insert(b"key1", b"val1".to_vec()).unwrap();
 
     assert_eq!(
-        t1.root(), t2.root(),
+        t1.root(),
+        t2.root(),
         "trie root must be independent of insertion order",
     );
 }
@@ -324,7 +330,8 @@ fn root_is_independent_of_insertion_order_prefix_keys() {
     t2.insert(b"ab", b"short".to_vec()).unwrap();
 
     assert_eq!(
-        t1.root(), t2.root(),
+        t1.root(),
+        t2.root(),
         "insertion order must not affect root for prefix-key pairs",
     );
 }
@@ -354,10 +361,10 @@ fn extension_split_inserts_third_key_at_branch_value() {
     let mut t = trie(&db);
     t.insert(b"abcdefgh", b"val_h".to_vec()).unwrap();
     t.insert(b"abcdefgx", b"val_x".to_vec()).unwrap();
-    t.insert(b"abcdefg",  b"prefix_val".to_vec()).unwrap();
+    t.insert(b"abcdefg", b"prefix_val".to_vec()).unwrap();
     assert_eq!(t.get(b"abcdefgh").unwrap(), Some(b"val_h".to_vec()));
     assert_eq!(t.get(b"abcdefgx").unwrap(), Some(b"val_x".to_vec()));
-    assert_eq!(t.get(b"abcdefg").unwrap(),  Some(b"prefix_val".to_vec()));
+    assert_eq!(t.get(b"abcdefg").unwrap(), Some(b"prefix_val".to_vec()));
 }
 
 #[test]
@@ -368,10 +375,10 @@ fn extension_split_then_diverge_within_prefix() {
     let mut t = trie(&db);
     t.insert(b"abcdefg_a", b"val1".to_vec()).unwrap();
     t.insert(b"abcdefg_b", b"val2".to_vec()).unwrap();
-    t.insert(b"abcde",     b"val3".to_vec()).unwrap();
+    t.insert(b"abcde", b"val3".to_vec()).unwrap();
     assert_eq!(t.get(b"abcdefg_a").unwrap(), Some(b"val1".to_vec()));
     assert_eq!(t.get(b"abcdefg_b").unwrap(), Some(b"val2".to_vec()));
-    assert_eq!(t.get(b"abcde").unwrap(),     Some(b"val3".to_vec()));
+    assert_eq!(t.get(b"abcde").unwrap(), Some(b"val3".to_vec()));
 }
 
 // ── W-6: Multi-level nesting ──────────────────────────────────────────────────
@@ -384,15 +391,15 @@ fn deep_nesting_three_levels_all_retrievable() {
     // All share "lem1q" prefix, then diverge.
     t.insert(b"lem1qaaabbbccc111", b"acc1".to_vec()).unwrap();
     t.insert(b"lem1qaaabbbccc222", b"acc2".to_vec()).unwrap();
-    t.insert(b"lem1qaaaxxx",       b"acc3".to_vec()).unwrap();
-    t.insert(b"lem1qzzz",          b"acc4".to_vec()).unwrap();
-    t.insert(b"lem1q",             b"root_acc".to_vec()).unwrap();
+    t.insert(b"lem1qaaaxxx", b"acc3".to_vec()).unwrap();
+    t.insert(b"lem1qzzz", b"acc4".to_vec()).unwrap();
+    t.insert(b"lem1q", b"root_acc".to_vec()).unwrap();
 
     assert_eq!(t.get(b"lem1qaaabbbccc111").unwrap(), Some(b"acc1".to_vec()));
     assert_eq!(t.get(b"lem1qaaabbbccc222").unwrap(), Some(b"acc2".to_vec()));
-    assert_eq!(t.get(b"lem1qaaaxxx").unwrap(),       Some(b"acc3".to_vec()));
-    assert_eq!(t.get(b"lem1qzzz").unwrap(),          Some(b"acc4".to_vec()));
-    assert_eq!(t.get(b"lem1q").unwrap(),             Some(b"root_acc".to_vec()));
+    assert_eq!(t.get(b"lem1qaaaxxx").unwrap(), Some(b"acc3".to_vec()));
+    assert_eq!(t.get(b"lem1qzzz").unwrap(), Some(b"acc4".to_vec()));
+    assert_eq!(t.get(b"lem1q").unwrap(), Some(b"root_acc".to_vec()));
     // Non-inserted keys must still return None.
     assert_eq!(t.get(b"lem1qaaa").unwrap(), None);
 }

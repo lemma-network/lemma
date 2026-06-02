@@ -18,11 +18,13 @@ use lemma_core::{
     validator_set::{Member, ValidatorSet},
 };
 
+use crate::epoch::UNBONDING_PERIOD_SECONDS;
 use crate::{
     dag::block::DagBlockRef,
-    slashing::evidence::{apply_double_sign, verify_double_sign, DoubleSignEvidence, EvidenceError},
+    slashing::evidence::{
+        apply_double_sign, verify_double_sign, DoubleSignEvidence, EvidenceError,
+    },
 };
-use crate::epoch::UNBONDING_PERIOD_SECONDS;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -44,13 +46,23 @@ fn make_vset_with(members: &[(u8, u128)]) -> ValidatorSet {
         .iter()
         .map(|&(b, p)| {
             let power = VotingPower(lem(p));
-            (addr(b), Member { consensus_pubkey: ConsensusKey::from_bytes(vec![b; 32], vec![b; 32]), power })
+            (
+                addr(b),
+                Member {
+                    consensus_pubkey: ConsensusKey::from_bytes(vec![b; 32], vec![b; 32]),
+                    power,
+                },
+            )
         })
         .collect();
     let total_power = map.values().fold(Amount::zero(), |a, m| {
         a.checked_add(m.power.as_amount()).unwrap()
     });
-    ValidatorSet { epoch: 0, members: map, total_power }
+    ValidatorSet {
+        epoch: 0,
+        members: map,
+        total_power,
+    }
 }
 
 fn make_validator_with_power(addr_byte: u8, active_lem: u128) -> Validator {
@@ -145,7 +157,13 @@ fn verify_rejects_when_sig_a_invalid() {
     let ev = make_valid_evidence(1, 20_000_000);
     let vset = make_vset_with(&[(1, 20_000_000)]);
     let err = verify_double_sign(&ev, &vset, false, true, FRESH_TIME, &empty_dedup()).unwrap_err();
-    assert!(matches!(err, EvidenceError::InvalidSignature { sig_a_ok: false, sig_b_ok: true }));
+    assert!(matches!(
+        err,
+        EvidenceError::InvalidSignature {
+            sig_a_ok: false,
+            sig_b_ok: true
+        }
+    ));
 }
 
 #[test]
@@ -153,7 +171,13 @@ fn verify_rejects_when_sig_b_invalid() {
     let ev = make_valid_evidence(1, 20_000_000);
     let vset = make_vset_with(&[(1, 20_000_000)]);
     let err = verify_double_sign(&ev, &vset, true, false, FRESH_TIME, &empty_dedup()).unwrap_err();
-    assert!(matches!(err, EvidenceError::InvalidSignature { sig_a_ok: true, sig_b_ok: false }));
+    assert!(matches!(
+        err,
+        EvidenceError::InvalidSignature {
+            sig_a_ok: true,
+            sig_b_ok: false
+        }
+    ));
 }
 
 #[test]
@@ -161,7 +185,13 @@ fn verify_rejects_when_both_sigs_invalid() {
     let ev = make_valid_evidence(1, 20_000_000);
     let vset = make_vset_with(&[(1, 20_000_000)]);
     let err = verify_double_sign(&ev, &vset, false, false, FRESH_TIME, &empty_dedup()).unwrap_err();
-    assert!(matches!(err, EvidenceError::InvalidSignature { sig_a_ok: false, sig_b_ok: false }));
+    assert!(matches!(
+        err,
+        EvidenceError::InvalidSignature {
+            sig_a_ok: false,
+            sig_b_ok: false
+        }
+    ));
 }
 
 // ── Check 3: Committee membership ────────────────────────────────────────────
@@ -199,7 +229,10 @@ fn verify_accepts_evidence_one_second_before_expiry() {
     // age = EVIDENCE_MAX_AGE - 1 → still valid.
     let almost_expired = ev.infraction_time + UNBONDING_PERIOD_SECONDS - 1;
     let result = verify_double_sign(&ev, &vset, true, true, almost_expired, &empty_dedup());
-    assert!(result.is_ok(), "evidence one second before expiry must pass");
+    assert!(
+        result.is_ok(),
+        "evidence one second before expiry must pass"
+    );
 }
 
 #[test]
@@ -209,7 +242,10 @@ fn verify_handles_current_time_before_infraction_time() {
     let ev = make_valid_evidence(1, 20_000_000);
     let vset = make_vset_with(&[(1, 20_000_000)]);
     let result = verify_double_sign(&ev, &vset, true, true, 0, &empty_dedup());
-    assert!(result.is_ok(), "clock skew (current < infraction) must not panic; age = 0 passes");
+    assert!(
+        result.is_ok(),
+        "clock skew (current < infraction) must not panic; age = 0 passes"
+    );
 }
 
 // ── Check 5: Dedup ────────────────────────────────────────────────────────────
@@ -239,7 +275,10 @@ fn apply_double_sign_slashes_5_percent_and_tombstones() {
 
     assert_eq!(burned, lem(1_000_000), "5% of 20M LEM = 1M LEM burned");
     assert_eq!(v.self_stake.active, lem(19_000_000), "active reduced by 1M");
-    assert!(v.tombstoned, "validator must be tombstoned after double-sign");
+    assert!(
+        v.tombstoned,
+        "validator must be tombstoned after double-sign"
+    );
 }
 
 #[test]
@@ -271,7 +310,10 @@ fn apply_double_sign_slashes_post_infraction_unbonding() {
 
     // 5% of 25M = 1.25M from active, 5% of 5M = 250K from pending → total 1.5M
     assert_eq!(burned, lem(1_500_000));
-    assert_eq!(v.self_stake.pending_inactive[0].initial_balance, lem(4_750_000));
+    assert_eq!(
+        v.self_stake.pending_inactive[0].initial_balance,
+        lem(4_750_000)
+    );
 }
 
 #[test]
@@ -282,7 +324,10 @@ fn tombstoned_validator_cannot_re_bond() {
     let ev = make_valid_evidence(1, 20_000_000);
     apply_double_sign(&mut v, &ev).unwrap();
 
-    assert!(!v.is_active(), "tombstoned validator must not be active (spec §5.2)");
+    assert!(
+        !v.is_active(),
+        "tombstoned validator must not be active (spec §5.2)"
+    );
 }
 
 #[test]
@@ -315,7 +360,11 @@ fn apply_double_sign_deterministic() {
         let mut v = make_validator_with_power(1, 20_000_000);
         let ev = make_valid_evidence(1, 20_000_000);
         let burned = apply_double_sign(&mut v, &ev).unwrap();
-        (burned.as_drop(), v.self_stake.active.as_drop(), v.tombstoned)
+        (
+            burned.as_drop(),
+            v.self_stake.active.as_drop(),
+            v.tombstoned,
+        )
     };
     assert_eq!(run(), run(), "apply_double_sign must be deterministic");
 }

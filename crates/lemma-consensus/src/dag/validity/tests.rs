@@ -45,9 +45,19 @@ fn vset_4() -> ValidatorSet {
     let power = VotingPower(Amount::from_drop(10));
     let mut members = BTreeMap::new();
     for n in 1u8..=4 {
-        members.insert(addr(n), Member { consensus_pubkey: dummy_key(), power });
+        members.insert(
+            addr(n),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch: 1, members, total_power: Amount::from_drop(40) }
+    ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: Amount::from_drop(40),
+    }
 }
 
 fn make_block(round: u64, author_n: u8, ancestors: Vec<DagBlockRef>) -> DagBlock {
@@ -110,13 +120,25 @@ fn check_gc_boundary_round_above_gc_passes() {
 fn check_gc_boundary_round_exactly_at_gc_rejected() {
     // Strict >: round must be ABOVE gc_round, not equal.
     let err = check_gc_boundary(5, 5).unwrap_err();
-    assert!(matches!(err, ConsensusError::BelowGcBoundary { round: 5, gc_round: 5 }));
+    assert!(matches!(
+        err,
+        ConsensusError::BelowGcBoundary {
+            round: 5,
+            gc_round: 5
+        }
+    ));
 }
 
 #[test]
 fn check_gc_boundary_round_below_gc_rejected() {
     let err = check_gc_boundary(3, 10).unwrap_err();
-    assert!(matches!(err, ConsensusError::BelowGcBoundary { round: 3, gc_round: 10 }));
+    assert!(matches!(
+        err,
+        ConsensusError::BelowGcBoundary {
+            round: 3,
+            gc_round: 10
+        }
+    ));
 }
 
 #[test]
@@ -151,7 +173,10 @@ fn check_strong_link_quorum_exact_two_thirds_not_sufficient() {
     let ancestors = vec![block_ref(0, 1), block_ref(0, 2)];
     let block = make_block(1, 3, ancestors);
     let err = check_strong_link_quorum(&block, &vset).unwrap_err();
-    assert!(matches!(err, ConsensusError::InsufficientStrongLinks { .. }));
+    assert!(matches!(
+        err,
+        ConsensusError::InsufficientStrongLinks { .. }
+    ));
 }
 
 #[test]
@@ -165,7 +190,10 @@ fn check_strong_link_quorum_non_member_ancestors_do_not_count() {
     ];
     let block = make_block(1, 3, ancestors);
     let err = check_strong_link_quorum(&block, &vset).unwrap_err();
-    assert!(matches!(err, ConsensusError::InsufficientStrongLinks { .. }));
+    assert!(matches!(
+        err,
+        ConsensusError::InsufficientStrongLinks { .. }
+    ));
 }
 
 #[test]
@@ -185,7 +213,10 @@ fn check_strong_link_quorum_weak_links_do_not_count_toward_quorum() {
     ];
     let block = make_block(2, 4, ancestors);
     let err = check_strong_link_quorum(&block, &vset).unwrap_err();
-    assert!(matches!(err, ConsensusError::InsufficientStrongLinks { .. }));
+    assert!(matches!(
+        err,
+        ConsensusError::InsufficientStrongLinks { .. }
+    ));
 }
 
 // ── check_no_equivocation ─────────────────────────────────────────────────────

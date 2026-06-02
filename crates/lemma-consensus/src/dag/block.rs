@@ -79,13 +79,20 @@ impl DagBlockRef {
     /// Create a block reference.
     #[must_use]
     pub fn new(round: u64, author: Address, digest: Hash) -> Self {
-        Self { round, author, digest }
+        Self {
+            round,
+            author,
+            digest,
+        }
     }
 
     /// The slot `(round, author)` this reference points to.
     #[must_use]
     pub fn slot(&self) -> Slot {
-        Slot { round: self.round, author: self.author }
+        Slot {
+            round: self.round,
+            author: self.author,
+        }
     }
 }
 
@@ -160,7 +167,10 @@ impl CommitVote {
     /// Create a commit vote.
     #[must_use]
     pub fn new(commit_index: u64, leader: DagBlockRef) -> Self {
-        Self { commit_index, leader }
+        Self {
+            commit_index,
+            leader,
+        }
     }
 }
 
@@ -290,7 +300,10 @@ impl DagBlock {
     /// The slot `(round, author)` of this block.
     #[must_use]
     pub fn slot(&self) -> Slot {
-        Slot { round: self.round, author: self.author }
+        Slot {
+            round: self.round,
+            author: self.author,
+        }
     }
 
     /// Verify that the stored `digest` matches a fresh recomputation of the body.

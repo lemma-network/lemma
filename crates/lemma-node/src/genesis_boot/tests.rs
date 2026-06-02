@@ -47,13 +47,13 @@ fn make_validator(byte: u8, active: Amount) -> Validator {
         tombstoned: false,
         self_stake: Stake {
             active,
-            pending_active:   Amount::zero(),
+            pending_active: Amount::zero(),
             pending_inactive: vec![],
-            inactive:         Amount::zero(),
+            inactive: Amount::zero(),
         },
-        delegated:      Amount::zero(),
+        delegated: Amount::zero(),
         commission_bps: 0,
-        jailed_until:   None,
+        jailed_until: None,
     }
 }
 
@@ -67,10 +67,10 @@ fn minimal_genesis() -> GenesisConfig {
     genesis_validators.insert(addr(0xA0), make_validator(0xA0, validator_stake_drop()));
 
     GenesisConfig {
-        chain_id:            1,
-        genesis_timestamp:   1_700_000_000,
-        initial_gas_limit:   30_000_000,
-        initial_base_fee:    Amount::from_drop(1_000_000_000), // 1 Drip
+        chain_id: 1,
+        genesis_timestamp: 1_700_000_000,
+        initial_gas_limit: 30_000_000,
+        initial_base_fee: Amount::from_drop(1_000_000_000), // 1 Drip
         initial_balances,
         genesis_validators,
     }
@@ -82,11 +82,11 @@ fn devnet_genesis() -> GenesisConfig {
     genesis_validators.insert(addr(0xB0), make_validator(0xB0, validator_stake_drop()));
 
     GenesisConfig {
-        chain_id:          3,
+        chain_id: 3,
         genesis_timestamp: 0,
         initial_gas_limit: 10_000_000,
-        initial_base_fee:  Amount::zero(),
-        initial_balances:  BTreeMap::new(),
+        initial_base_fee: Amount::zero(),
+        initial_balances: BTreeMap::new(),
         genesis_validators,
     }
 }
@@ -130,7 +130,10 @@ fn init_chain_persists_genesis_block_at_height_0() {
         .get(lemma_storage::db::CF_BLOCK_HASH, genesis_hash.as_bytes())
         .expect("get CF_BLOCK_HASH must succeed")
         .expect("genesis block must be present by hash");
-    assert_eq!(block_bytes, by_hash, "block stored by height and hash must be identical");
+    assert_eq!(
+        block_bytes, by_hash,
+        "block stored by height and hash must be identical"
+    );
 }
 
 #[test]
@@ -212,8 +215,10 @@ fn init_chain_idempotent_does_not_overwrite_existing_state() {
     let (db, dir) = open_temp_db();
     let genesis = minimal_genesis();
 
-    let InitOutcome::Initialized { genesis_hash: hash1, .. } =
-        init_chain(db, &genesis).expect("first init must succeed")
+    let InitOutcome::Initialized {
+        genesis_hash: hash1,
+        ..
+    } = init_chain(db, &genesis).expect("first init must succeed")
     else {
         panic!("expected Initialized");
     };
@@ -228,7 +233,11 @@ fn init_chain_idempotent_does_not_overwrite_existing_state() {
         .get(lemma_storage::db::CF_METADATA, b"latest_hash")
         .expect("get metadata must succeed")
         .expect("latest_hash must still be present");
-    assert_eq!(hash_bytes.as_slice(), hash1.as_bytes(), "hash must be unchanged");
+    assert_eq!(
+        hash_bytes.as_slice(),
+        hash1.as_bytes(),
+        "hash must be unchanged"
+    );
 }
 
 // ── Devnet (empty balances) ───────────────────────────────────────────────────
@@ -301,13 +310,20 @@ fn init_chain_same_genesis_produces_same_hash_across_two_dbs() {
 
     let (hash_a, hash_b) = match (outcome_a, outcome_b) {
         (
-            InitOutcome::Initialized { genesis_hash: h_a, .. },
-            InitOutcome::Initialized { genesis_hash: h_b, .. },
+            InitOutcome::Initialized {
+                genesis_hash: h_a, ..
+            },
+            InitOutcome::Initialized {
+                genesis_hash: h_b, ..
+            },
         ) => (h_a, h_b),
         _ => panic!("both must be Initialized"),
     };
 
-    assert_eq!(hash_a, hash_b, "same genesis must produce identical hash on every node");
+    assert_eq!(
+        hash_a, hash_b,
+        "same genesis must produce identical hash on every node"
+    );
 }
 
 // ── ValidatorSet::from_active_validators (canonical constructor) ───────────────
@@ -342,7 +358,11 @@ fn from_active_validators_is_deterministic() {
     let set1 = ValidatorSet::from_active_validators(0, &v1).expect("v1 must build");
     let set2 = ValidatorSet::from_active_validators(0, &v2).expect("v2 must build");
 
-    assert_eq!(set1.hash(), set2.hash(), "validator set hash must be order-independent");
+    assert_eq!(
+        set1.hash(),
+        set2.hash(),
+        "validator set hash must be order-independent"
+    );
 }
 
 #[test]

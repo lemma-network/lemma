@@ -46,7 +46,13 @@ fn make_commit(index: u64, blocks: Vec<DagBlockRef>) -> Commit {
         .first()
         .copied()
         .unwrap_or_else(|| DagBlockRef::new(1, Address::zero(), Hash::zero()));
-    Commit { index, previous_digest: Hash::zero(), timestamp_ms: 0, leader, blocks }
+    Commit {
+        index,
+        previous_digest: Hash::zero(),
+        timestamp_ms: 0,
+        leader,
+        blocks,
+    }
 }
 
 /// Build a `ValidatorSet` from discriminator bytes (each → distinct address).
@@ -66,7 +72,11 @@ fn make_vset(addr_bytes: &[u8]) -> ValidatorSet {
         );
     }
     let total = Amount::from_drop(addr_bytes.len() as u128 * 1_000_000_000_000_000_000);
-    ValidatorSet { epoch: 1, members, total_power: total }
+    ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: total,
+    }
 }
 
 /// Return committee addresses in BTreeMap sorted order (Address Ord).
@@ -132,7 +142,7 @@ fn from_commits_multiple_authors_scored_independently() {
     let a1 = addr(1);
     let commits = vec![
         make_commit(1, vec![bref(1, a0), bref(2, a0)]), // a0 gets 2
-        make_commit(2, vec![bref(3, a1)]),               // a1 gets 1
+        make_commit(2, vec![bref(3, a1)]),              // a1 gets 1
     ];
     let scores = ReputationScores::from_commits(&commits);
     assert_eq!(scores.score(&a0), 2);
@@ -148,9 +158,7 @@ fn score_absent_author_returns_zero() {
 #[test]
 fn score_returns_accumulated_count() {
     let a = addr(3);
-    let scores = ReputationScores::from_commits(&[
-        make_commit(1, vec![bref(1, a), bref(2, a)]),
-    ]);
+    let scores = ReputationScores::from_commits(&[make_commit(1, vec![bref(1, a), bref(2, a)])]);
     assert_eq!(scores.score(&a), 2);
 }
 
@@ -233,8 +241,11 @@ fn from_scores_swap_count_zero_returns_identity() {
 
 #[test]
 fn from_scores_empty_committee_returns_identity() {
-    let vset =
-        ValidatorSet { epoch: 1, members: BTreeMap::new(), total_power: Amount::zero() };
+    let vset = ValidatorSet {
+        epoch: 1,
+        members: BTreeMap::new(),
+        total_power: Amount::zero(),
+    };
     let table = LeaderSwapTable::from_scores(&ReputationScores::empty(), &vset, 1);
     assert!(table.is_identity());
 }
@@ -244,7 +255,10 @@ fn from_scores_single_member_committee_returns_identity() {
     // n=1, n/2=0 → actual=0 → identity (cannot swap the only member with itself).
     let vset = make_vset(&[0]);
     let table = LeaderSwapTable::from_scores(&ReputationScores::empty(), &vset, 1);
-    assert!(table.is_identity(), "single-member committee must produce identity swap");
+    assert!(
+        table.is_identity(),
+        "single-member committee must produce identity swap"
+    );
 }
 
 #[test]
@@ -252,7 +266,10 @@ fn from_scores_no_swap_when_all_scores_equal() {
     // All scores 0 (empty ReputationScores) → no evidence of failure → no swaps.
     let vset = make_vset(&[0, 1, 2, 3]);
     let table = LeaderSwapTable::from_scores(&ReputationScores::empty(), &vset, 1);
-    assert!(table.is_identity(), "equal scores must not produce any swap");
+    assert!(
+        table.is_identity(),
+        "equal scores must not produce any swap"
+    );
 }
 
 #[test]
@@ -262,13 +279,16 @@ fn from_scores_swaps_worst_for_best() {
     let addrs = sorted_addrs(&vset);
 
     // Give the highest-address member the most blocks; others get 0 or 1.
-    let commits = vec![make_commit(1, vec![
-        bref(1, addrs[3]),
-        bref(2, addrs[3]),
-        bref(3, addrs[3]),
-        bref(4, addrs[1]), // middle performers
-        bref(5, addrs[2]),
-    ])];
+    let commits = vec![make_commit(
+        1,
+        vec![
+            bref(1, addrs[3]),
+            bref(2, addrs[3]),
+            bref(3, addrs[3]),
+            bref(4, addrs[1]), // middle performers
+            bref(5, addrs[2]),
+        ],
+    )];
     let scores = ReputationScores::from_commits(&commits);
     // scores: addrs[0]=0, addrs[1]=1, addrs[2]=1, addrs[3]=3
     // sort(score,addr): [addrs[0], addrs[1], addrs[2], addrs[3]]
@@ -280,7 +300,11 @@ fn from_scores_swaps_worst_for_best() {
     assert_eq!(table.swap(addrs[0], 0), addrs[3], "worst replaced by best");
     assert_eq!(table.swap(addrs[1], 0), addrs[1], "mid member unchanged");
     assert_eq!(table.swap(addrs[2], 0), addrs[2], "mid member unchanged");
-    assert_eq!(table.swap(addrs[3], 0), addrs[3], "good member not swapped out");
+    assert_eq!(
+        table.swap(addrs[3], 0),
+        addrs[3],
+        "good member not swapped out"
+    );
     assert!(!table.is_identity());
 }
 
@@ -336,7 +360,11 @@ fn swap_returns_replacement_for_bad_authority_across_rounds() {
 
     // Swap is epoch-fixed: same replacement regardless of round.
     assert_eq!(table.swap(addrs[0], 0), addrs[3]);
-    assert_eq!(table.swap(addrs[0], 42), addrs[3], "round must not affect swap result");
+    assert_eq!(
+        table.swap(addrs[0], 42),
+        addrs[3],
+        "round must not affect swap result"
+    );
     assert_eq!(table.swap(addrs[0], u64::MAX), addrs[3]);
 }
 
@@ -365,11 +393,10 @@ fn swapped_target_is_always_a_committee_member() {
     let addrs = sorted_addrs(&vset);
     let committee: std::collections::BTreeSet<Address> = addrs.iter().copied().collect();
 
-    let commits = vec![make_commit(1, vec![
-        bref(1, addrs[3]),
-        bref(2, addrs[3]),
-        bref(3, addrs[3]),
-    ])];
+    let commits = vec![make_commit(
+        1,
+        vec![bref(1, addrs[3]), bref(2, addrs[3]), bref(3, addrs[3])],
+    )];
     let scores = ReputationScores::from_commits(&commits);
     let f = (vset.len() - 1) / 3;
     let table = LeaderSwapTable::from_scores(&scores, &vset, f);
@@ -392,11 +419,10 @@ fn is_identity_true_when_no_swaps_exist() {
 fn is_identity_false_when_swaps_exist() {
     let vset = make_vset(&[0, 1, 2, 3]);
     let addrs = sorted_addrs(&vset);
-    let commits = vec![make_commit(1, vec![
-        bref(1, addrs[3]),
-        bref(2, addrs[3]),
-        bref(3, addrs[3]),
-    ])];
+    let commits = vec![make_commit(
+        1,
+        vec![bref(1, addrs[3]), bref(2, addrs[3]), bref(3, addrs[3])],
+    )];
     let scores = ReputationScores::from_commits(&commits);
     let table = LeaderSwapTable::from_scores(&scores, &vset, 1);
     assert!(!table.is_identity());
@@ -417,13 +443,25 @@ fn from_scores_caps_swap_count_at_half_committee() {
     let scores = ReputationScores::from_commits(&[make_commit(1, blocks)]);
 
     let table = LeaderSwapTable::from_scores(&scores, &vset, 3); // capped to 2
-    // Cross-pairing (D9f): bad=[addrs[0],addrs[1]], good-reversed=[addrs[3],addrs[2]]
-    //   addrs[0] (score 0) → addrs[3] (score 3): 0 < 3 → swap
-    //   addrs[1] (score 1) → addrs[2] (score 2): 1 < 2 → swap
+                                                                 // Cross-pairing (D9f): bad=[addrs[0],addrs[1]], good-reversed=[addrs[3],addrs[2]]
+                                                                 //   addrs[0] (score 0) → addrs[3] (score 3): 0 < 3 → swap
+                                                                 //   addrs[1] (score 1) → addrs[2] (score 2): 1 < 2 → swap
     assert_eq!(table.swap(addrs[0], 0), addrs[3], "worst bad → best good");
-    assert_eq!(table.swap(addrs[1], 0), addrs[2], "second-worst bad → second-best good");
-    assert_eq!(table.swap(addrs[2], 0), addrs[2], "good source not swapped out");
-    assert_eq!(table.swap(addrs[3], 0), addrs[3], "good source not swapped out");
+    assert_eq!(
+        table.swap(addrs[1], 0),
+        addrs[2],
+        "second-worst bad → second-best good"
+    );
+    assert_eq!(
+        table.swap(addrs[2], 0),
+        addrs[2],
+        "good source not swapped out"
+    );
+    assert_eq!(
+        table.swap(addrs[3], 0),
+        addrs[3],
+        "good source not swapped out"
+    );
 }
 
 /// Integration: `LeaderSchedule::with_swap` + real swap table
@@ -434,11 +472,10 @@ fn integration_leader_schedule_uses_reputation_swap() {
     let vset = make_vset(&[0, 1, 2, 3]);
     let addrs = sorted_addrs(&vset);
 
-    let commits = vec![make_commit(1, vec![
-        bref(1, addrs[3]),
-        bref(2, addrs[3]),
-        bref(3, addrs[3]),
-    ])];
+    let commits = vec![make_commit(
+        1,
+        vec![bref(1, addrs[3]), bref(2, addrs[3]), bref(3, addrs[3])],
+    )];
     let scores = ReputationScores::from_commits(&commits);
     let f = (vset.len() - 1) / 3; // f=1 for n=4
     let table = LeaderSwapTable::from_scores(&scores, &vset, f);

@@ -109,19 +109,37 @@ impl ValidatorSet {
                 continue;
             }
             let power = v.voting_power().map_err(|e| {
-                CoreError::Validator(ValidatorError::PowerOverflow { address: *addr, source: e })
+                CoreError::Validator(ValidatorError::PowerOverflow {
+                    address: *addr,
+                    source: e,
+                })
             })?;
             total_power = total_power.checked_add(power.as_amount()).map_err(|e| {
-                CoreError::Validator(ValidatorError::PowerOverflow { address: *addr, source: e })
+                CoreError::Validator(ValidatorError::PowerOverflow {
+                    address: *addr,
+                    source: e,
+                })
             })?;
-            members.insert(*addr, Member { consensus_pubkey: v.consensus_pubkey.clone(), power });
+            members.insert(
+                *addr,
+                Member {
+                    consensus_pubkey: v.consensus_pubkey.clone(),
+                    power,
+                },
+            );
         }
 
         if members.is_empty() {
-            return Err(CoreError::Validator(ValidatorError::EmptyValidatorSet { epoch }));
+            return Err(CoreError::Validator(ValidatorError::EmptyValidatorSet {
+                epoch,
+            }));
         }
 
-        Ok(ValidatorSet { epoch, members, total_power })
+        Ok(ValidatorSet {
+            epoch,
+            members,
+            total_power,
+        })
     }
 
     /// Compute the Blake3 hash of this validator set.

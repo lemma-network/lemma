@@ -25,13 +25,13 @@
 
 use lemma_core::{address::Address, error::AmountError};
 
-pub(crate) mod transition;
 pub mod proof;
 pub mod recovery;
+pub(crate) mod transition;
 
-pub use transition::advance_epoch;
-pub use proof::{verify_full, verify_epoch_change, EpochChangeProof, ProofError};
+pub use proof::{verify_epoch_change, verify_full, EpochChangeProof, ProofError};
 pub use recovery::{force_epoch_close, RecoveryError, RecoveryOutput};
+pub use transition::advance_epoch;
 
 #[cfg(test)]
 mod tests;
@@ -71,8 +71,7 @@ pub const UNBONDING_PERIOD_SECONDS: u64 = 14 * 24 * 60 * 60; // 1_209_600 s
 /// it as an injectable `min_stake: Amount` argument so governance proposals can
 /// change it (spec §4.1 step 7 "Apply buffered protocol/config changes").
 /// Seed from `GenesisConfig` at chain startup.
-pub const GENESIS_MIN_VALIDATOR_STAKE_DROP: u128 =
-    20_000_000 * lemma_core::DROPS_PER_LEM; // 20 M LEM (2% of 1B supply, DB-1)
+pub const GENESIS_MIN_VALIDATOR_STAKE_DROP: u128 = 20_000_000 * lemma_core::DROPS_PER_LEM; // 20 M LEM (2% of 1B supply, DB-1)
 
 // ── EpochOutput ───────────────────────────────────────────────────────────────
 

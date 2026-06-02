@@ -68,25 +68,35 @@ fn make_epoch(number: u64, validators: &BTreeMap<Address, Validator>) -> Epoch {
         .iter()
         .filter(|(_, v)| v.is_active())
         .map(|(a, v)| {
-            (*a, Member {
-                consensus_pubkey: v.consensus_pubkey.clone(),
-                power: v.voting_power().unwrap(),
-            })
+            (
+                *a,
+                Member {
+                    consensus_pubkey: v.consensus_pubkey.clone(),
+                    power: v.voting_power().unwrap(),
+                },
+            )
         })
         .collect();
-    let total = members
-        .values()
-        .fold(Amount::zero(), |a, m| a.checked_add(m.power.as_amount()).unwrap());
+    let total = members.values().fold(Amount::zero(), |a, m| {
+        a.checked_add(m.power.as_amount()).unwrap()
+    });
     Epoch {
         number,
         start_height: 0,
         start_timestamp: 0,
-        validators: ValidatorSet { epoch: number, members, total_power: total },
+        validators: ValidatorSet {
+            epoch: number,
+            members,
+            total_power: total,
+        },
     }
 }
 
 fn make_cert(digest: Hash, signers: &[u8]) -> QuorumCert {
-    let map = signers.iter().map(|&b| (addr(b), Signature::Unsigned)).collect();
+    let map = signers
+        .iter()
+        .map(|&b| (addr(b), Signature::Unsigned))
+        .collect();
     QuorumCert::new(0, digest, map)
 }
 
@@ -128,18 +138,31 @@ fn force_epoch_close_valid_cert_applies_settlement() {
     let sigs = all_valid(&[1, 2, 3]);
 
     let out = force_epoch_close(
-        &epoch, &mut vs, &[],
-        Amount::zero(),  // zero supply → zero inflation (simplifies test)
-        10,              // at_commit_index
-        10,              // last_final_commit_index
-        cert.clone(), digest, &sigs,
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(), // zero supply → zero inflation (simplifies test)
+        10,             // at_commit_index
+        10,             // last_final_commit_index
+        cert.clone(),
+        digest,
+        &sigs,
         &empty_dedup(),
-        BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-    ).unwrap();
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
+    )
+    .unwrap();
 
-    assert_eq!(out.epoch_output.epoch.number, 1, "settlement must advance to epoch 1");
+    assert_eq!(
+        out.epoch_output.epoch.number, 1,
+        "settlement must advance to epoch 1"
+    );
     assert_eq!(out.at_commit_index, 10);
-    assert_eq!(out.recovery_cert, cert, "cert returned in output for caller to persist");
+    assert_eq!(
+        out.recovery_cert, cert,
+        "cert returned in output for caller to persist"
+    );
 }
 
 #[test]
@@ -149,10 +172,21 @@ fn force_epoch_close_output_next_validators_hash_matches_vset() {
     let cert = make_cert(digest, &[1, 2, 3]);
 
     let out = force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        5, 5, cert, digest, &all_valid(&[1, 2, 3]),
-        &empty_dedup(), BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-    ).unwrap();
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        5,
+        5,
+        cert,
+        digest,
+        &all_valid(&[1, 2, 3]),
+        &empty_dedup(),
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
+    )
+    .unwrap();
 
     assert_eq!(
         out.epoch_output.next_validators_hash,
@@ -174,10 +208,21 @@ fn force_epoch_close_rejects_insufficient_quorum() {
     let initial_active = vs[&addr(1)].self_stake.active;
 
     let err = force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        5, 5, cert, digest, &sigs,
-        &empty_dedup(), BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-    ).unwrap_err();
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        5,
+        5,
+        cert,
+        digest,
+        &sigs,
+        &empty_dedup(),
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
+    )
+    .unwrap_err();
 
     assert!(
         matches!(err, RecoveryError::InsufficientQuorum { .. }),
@@ -185,7 +230,8 @@ fn force_epoch_close_rejects_insufficient_quorum() {
     );
     // State must be unchanged (atomicity: pre-checks before any mutation).
     assert_eq!(
-        vs[&addr(1)].self_stake.active, initial_active,
+        vs[&addr(1)].self_stake.active,
+        initial_active,
         "validator state must be unchanged after rejected recovery"
     );
 }
@@ -197,10 +243,21 @@ fn force_epoch_close_rejects_zero_signers() {
     let cert = make_cert(digest, &[]); // no signers
 
     let err = force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        5, 5, cert, digest, &BTreeMap::new(),
-        &empty_dedup(), BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-    ).unwrap_err();
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        5,
+        5,
+        cert,
+        digest,
+        &BTreeMap::new(),
+        &empty_dedup(),
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
+    )
+    .unwrap_err();
 
     assert!(matches!(err, RecoveryError::InsufficientQuorum { .. }));
 }
@@ -215,12 +272,21 @@ fn force_epoch_close_rejects_at_commit_index_above_last_final() {
     let cert = make_cert(digest, &[1, 2, 3]);
 
     let err = force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        100,  // at_commit_index = 100
-        99,   // last_final_commit_index = 99 (below 100!)
-        cert, digest, &all_valid(&[1, 2, 3]),
-        &empty_dedup(), BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-    ).unwrap_err();
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        100, // at_commit_index = 100
+        99,  // last_final_commit_index = 99 (below 100!)
+        cert,
+        digest,
+        &all_valid(&[1, 2, 3]),
+        &empty_dedup(),
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
+    )
+    .unwrap_err();
 
     assert!(
         matches!(
@@ -242,10 +308,19 @@ fn force_epoch_close_accepts_at_commit_exactly_equal_to_last_final() {
 
     // at_commit == last_final → closing AT a finalized commit (allowed).
     let result = force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        50, 50, // equal → closing AT the final commit
-        cert, digest, &all_valid(&[1, 2, 3]),
-        &empty_dedup(), BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        50,
+        50, // equal → closing AT the final commit
+        cert,
+        digest,
+        &all_valid(&[1, 2, 3]),
+        &empty_dedup(),
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
     );
 
     assert!(result.is_ok(), "at_commit == last_final must be accepted");
@@ -265,16 +340,29 @@ fn force_epoch_close_rejects_duplicate() {
     dedup.insert((0u64, 5u64));
 
     let err = force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        5, 5,
-        cert, digest, &all_valid(&[1, 2, 3]),
-        &dedup, BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-    ).unwrap_err();
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        5,
+        5,
+        cert,
+        digest,
+        &all_valid(&[1, 2, 3]),
+        &dedup,
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
+    )
+    .unwrap_err();
 
     assert!(
         matches!(
             err,
-            RecoveryError::Duplicate { epoch_number: 0, at_commit_index: 5 }
+            RecoveryError::Duplicate {
+                epoch_number: 0,
+                at_commit_index: 5
+            }
         ),
         "already-processed recovery must → Duplicate"
     );
@@ -291,13 +379,25 @@ fn force_epoch_close_different_commit_index_not_duplicate() {
     dedup.insert((0u64, 5u64));
 
     let result = force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        10, 10,  // different commit index → not in dedup
-        cert, digest, &all_valid(&[1, 2, 3]),
-        &dedup, BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        10,
+        10, // different commit index → not in dedup
+        cert,
+        digest,
+        &all_valid(&[1, 2, 3]),
+        &dedup,
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
     );
 
-    assert!(result.is_ok(), "different commit index must not be treated as duplicate");
+    assert!(
+        result.is_ok(),
+        "different commit index must not be treated as duplicate"
+    );
 }
 
 // ── Ordering: pre-checks run before settlement ────────────────────────────────
@@ -310,14 +410,25 @@ fn state_unchanged_after_rollback_forbidden() {
     let cert = make_cert(digest, &[1, 2, 3]);
 
     force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        999, 5, // at_commit > last_final → rejected
-        cert, digest, &all_valid(&[1, 2, 3]),
-        &empty_dedup(), BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-    ).unwrap_err();
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        999,
+        5, // at_commit > last_final → rejected
+        cert,
+        digest,
+        &all_valid(&[1, 2, 3]),
+        &empty_dedup(),
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
+    )
+    .unwrap_err();
 
     assert_eq!(
-        vs[&addr(1)].self_stake.active, initial_epoch,
+        vs[&addr(1)].self_stake.active,
+        initial_epoch,
         "validator state must be unchanged after pre-check failure"
     );
 }
@@ -336,13 +447,21 @@ fn force_epoch_close_rejects_wrong_recovery_cert_digest() {
     let cert = make_cert(cert_digest, &[1, 2, 3]);
 
     let err = force_epoch_close(
-        &epoch, &mut vs, &[], Amount::zero(),
-        5, 5,
+        &epoch,
+        &mut vs,
+        &[],
+        Amount::zero(),
+        5,
+        5,
         cert,
         wrong_digest, // wrong expected digest → DigestMismatch inside CertError
         &all_valid(&[1, 2, 3]),
-        &empty_dedup(), BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-    ).unwrap_err();
+        &empty_dedup(),
+        BLOCK_TIME,
+        BLOCK_HEIGHT,
+        min_stake(),
+    )
+    .unwrap_err();
 
     // The quorum check fails because cert.header_digest ≠ wrong_digest.
     assert!(
@@ -361,11 +480,21 @@ fn force_epoch_close_deterministic_same_inputs_same_output() {
         let digest = recovery_digest();
         let cert = make_cert(digest, &[1, 2, 3]);
         let out = force_epoch_close(
-            &epoch, &mut vs, &[], Amount::zero(),
-            10, 10,
-            cert, digest, &all_valid(&[1, 2, 3]),
-            &empty_dedup(), BLOCK_TIME, BLOCK_HEIGHT, min_stake(),
-        ).unwrap();
+            &epoch,
+            &mut vs,
+            &[],
+            Amount::zero(),
+            10,
+            10,
+            cert,
+            digest,
+            &all_valid(&[1, 2, 3]),
+            &empty_dedup(),
+            BLOCK_TIME,
+            BLOCK_HEIGHT,
+            min_stake(),
+        )
+        .unwrap();
         out.epoch_output.next_validators_hash
     };
 

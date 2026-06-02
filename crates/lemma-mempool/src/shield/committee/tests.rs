@@ -45,10 +45,17 @@ fn vset_with_shares(epoch: u64, validators: &[(u8, u64)]) -> ValidatorSet {
             .unwrap();
         members.insert(
             addr(byte),
-            Member { consensus_pubkey: dummy_key(), power },
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
         );
     }
-    ValidatorSet { epoch, members, total_power }
+    ValidatorSet {
+        epoch,
+        members,
+        total_power,
+    }
 }
 
 // ── Partition completeness ─────────────────────────────────────────────────────
@@ -66,7 +73,10 @@ fn partition_covers_all_share_ids_exactly_once() {
     all_ids.sort_unstable();
 
     let expected: Vec<u16> = (1..=10).collect();
-    assert_eq!(all_ids, expected, "ShareIds must cover 1..=W with no gaps or duplicates");
+    assert_eq!(
+        all_ids, expected,
+        "ShareIds must cover 1..=W with no gaps or duplicates"
+    );
 }
 
 #[test]
@@ -75,7 +85,10 @@ fn partition_starts_at_one_not_zero() {
     let committee = ShieldCommittee::from_validator_set(&vset).unwrap();
 
     for (_, ids) in committee.iter() {
-        assert!(!ids.contains(&0), "ShareId 0 is forbidden (Lagrange rejects x=0)");
+        assert!(
+            !ids.contains(&0),
+            "ShareId 0 is forbidden (Lagrange rejects x=0)"
+        );
     }
 }
 
@@ -130,7 +143,11 @@ fn stake_below_granularity_rounds_to_zero_and_is_rejected() {
         },
     );
     let total = Amount::from_drop(2 * WEIGHT_GRANULARITY_DROP - 1);
-    let vset = ValidatorSet { epoch: 0, members, total_power: total };
+    let vset = ValidatorSet {
+        epoch: 0,
+        members,
+        total_power: total,
+    };
 
     let err = ShieldCommittee::from_validator_set(&vset).unwrap_err();
     assert!(
@@ -162,7 +179,10 @@ fn same_validator_set_produces_identical_committee() {
 
     let ids1: Vec<_> = c1.iter().map(|(a, ids)| (*a, ids.to_vec())).collect();
     let ids2: Vec<_> = c2.iter().map(|(a, ids)| (*a, ids.to_vec())).collect();
-    assert_eq!(ids1, ids2, "committee must be deterministic for identical inputs");
+    assert_eq!(
+        ids1, ids2,
+        "committee must be deterministic for identical inputs"
+    );
 }
 
 // ── Edge cases ────────────────────────────────────────────────────────────────

@@ -55,10 +55,22 @@ fn vset_with_shares(epoch: u64, validators: &[(u8, u64)]) -> ValidatorSet {
     for &(byte, shares) in validators {
         let power_drop = u128::from(shares) * WEIGHT_GRANULARITY_DROP;
         let power = VotingPower(Amount::from_drop(power_drop));
-        total_power = total_power.checked_add(Amount::from_drop(power_drop)).unwrap();
-        members.insert(addr(byte), Member { consensus_pubkey: dummy_key(), power });
+        total_power = total_power
+            .checked_add(Amount::from_drop(power_drop))
+            .unwrap();
+        members.insert(
+            addr(byte),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch, members, total_power }
+    ValidatorSet {
+        epoch,
+        members,
+        total_power,
+    }
 }
 
 fn test_epoch_keys(committee: &ShieldCommittee) -> (BTreeMap<u16, G2Affine>, Vec<Fr>) {
@@ -111,7 +123,10 @@ fn deal_reshare_is_deterministic() {
     let (committee, eks, _) = setup();
     let t1 = deal_reshare(test_tau(), &committee, &eks, &mut seeded_rng(42)).unwrap();
     let t2 = deal_reshare(test_tau(), &committee, &eks, &mut seeded_rng(42)).unwrap();
-    assert_eq!(t1.coeff_comms, t2.coeff_comms, "same seed → same coeff_comms");
+    assert_eq!(
+        t1.coeff_comms, t2.coeff_comms,
+        "same seed → same coeff_comms"
+    );
     assert_eq!(t1.enc_shares, t2.enc_shares, "same seed → same enc_shares");
     assert_eq!(t1.tag, t2.tag, "same seed → same tag");
 }
@@ -121,8 +136,16 @@ fn deal_reshare_has_correct_share_count() {
     let (committee, eks, _) = setup();
     let tr = deal_reshare(test_tau(), &committee, &eks, &mut seeded_rng(7)).unwrap();
     let params = committee.params();
-    assert_eq!(tr.coeff_comms.len(), params.t as usize + 1, "must have t+1 coeff_comms");
-    assert_eq!(tr.enc_shares.len(), params.w as usize, "must have W enc_shares");
+    assert_eq!(
+        tr.coeff_comms.len(),
+        params.t as usize + 1,
+        "must have t+1 coeff_comms"
+    );
+    assert_eq!(
+        tr.enc_shares.len(),
+        params.w as usize,
+        "must have W enc_shares"
+    );
 }
 
 // ── verify_reshare ────────────────────────────────────────────────────────────
@@ -298,7 +321,11 @@ fn combine_shares_rejects_mismatched_keysets() {
     let last = *z_zero_truncated.keys().next_back().unwrap();
     z_zero_truncated.remove(&last);
     let err = combine_shares(&z_old, &z_zero_truncated).unwrap_err();
-    assert_eq!(err, ShieldError::InvalidTranscript, "mismatched keysets must be rejected");
+    assert_eq!(
+        err,
+        ShieldError::InvalidTranscript,
+        "mismatched keysets must be rejected"
+    );
 }
 
 #[test]
@@ -324,15 +351,24 @@ fn reshare_to_new_committee_deals_correctly() {
     let tr = deal_reshare(tau.clone(), &new_committee, &eks_new, &mut seeded_rng(77)).unwrap();
 
     // F_0 == 𝒪 and tag == 𝒪 (key-invariance: same Y).
-    assert!(tr.coeff_comms[0].is_zero(), "F_0 must be identity for new committee too");
-    assert!(tr.tag.is_zero(), "tag must be identity for new committee too");
+    assert!(
+        tr.coeff_comms[0].is_zero(),
+        "F_0 must be identity for new committee too"
+    );
+    assert!(
+        tr.tag.is_zero(),
+        "tag must be identity for new committee too"
+    );
 
     // Enc_shares cover the new committee's share IDs exactly (1..=W_new=8).
     let w_new = new_committee.total_weight() as u16;
     let expected_ids: Vec<u16> = (1..=w_new).collect();
     let mut actual_ids: Vec<u16> = tr.enc_shares.keys().copied().collect();
     actual_ids.sort_unstable();
-    assert_eq!(actual_ids, expected_ids, "enc_shares must cover new committee IDs 1..=W_new");
+    assert_eq!(
+        actual_ids, expected_ids,
+        "enc_shares must cover new committee IDs 1..=W_new"
+    );
 
     // verify_reshare must pass for the new committee.
     assert!(
@@ -367,8 +403,13 @@ fn key_invariance_round_trip() {
         .take(2)
         .enumerate()
         .map(|(i, &addr)| {
-            let tr = deal(tau_dkg.clone(), &committee, &eks, &mut seeded_rng(100 + i as u64))
-                .unwrap();
+            let tr = deal(
+                tau_dkg.clone(),
+                &committee,
+                &eks,
+                &mut seeded_rng(100 + i as u64),
+            )
+            .unwrap();
             (addr, (tr, true))
         })
         .collect();
@@ -385,15 +426,24 @@ fn key_invariance_round_trip() {
         .collect();
 
     // ── Step 3: Encrypt plaintext under Y ────────────────────────────────────
-    let aad = ShieldAad { chain_id: 1, epoch: 1, submitter_nonce: 0 };
+    let aad = ShieldAad {
+        chain_id: 1,
+        epoch: 1,
+        submitter_nonce: 0,
+    };
     let plaintext = b"key-invariance-test";
     let ct = encrypt(&y, aad, plaintext).unwrap();
 
     // ── Step 4: Each validator deals a reshare transcript → aggregate ─────────
     let reshare_transcripts: Vec<PvssTranscript> = (0..3)
         .map(|i| {
-            deal_reshare(tau_reshare.clone(), &committee, &eks, &mut seeded_rng(200 + i as u64))
-                .unwrap()
+            deal_reshare(
+                tau_reshare.clone(),
+                &committee,
+                &eks,
+                &mut seeded_rng(200 + i as u64),
+            )
+            .unwrap()
         })
         .collect();
     let zero_agg = aggregate(&reshare_transcripts).unwrap();
@@ -410,7 +460,10 @@ fn key_invariance_round_trip() {
         .map(|(idx, (_, share_ids))| {
             let z_zero = recover_share(&dks[idx], &zero_agg, share_ids).unwrap();
             let z_new = combine_shares(&z_old_per_validator[idx], &z_zero).unwrap();
-            CombineShare { validator_index: idx as u16, z_shares: z_new.into_iter().collect() }
+            CombineShare {
+                validator_index: idx as u16,
+                z_shares: z_new.into_iter().collect(),
+            }
         })
         .collect();
 

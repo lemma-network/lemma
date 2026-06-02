@@ -21,11 +21,11 @@ fn write_config_file(json: &str) -> NamedTempFile {
 
 fn valid_config() -> NodeConfig {
     NodeConfig {
-        data_dir:          PathBuf::from("/tmp/lemma-data"),
-        genesis_path:      PathBuf::from("/tmp/genesis.json"),
+        data_dir: PathBuf::from("/tmp/lemma-data"),
+        genesis_path: PathBuf::from("/tmp/genesis.json"),
         block_interval_ms: 500,
-        listen_addr:       "/ip4/0.0.0.0/tcp/0".to_string(),
-        bootstrap_peers:   vec![],
+        listen_addr: "/ip4/0.0.0.0/tcp/0".to_string(),
+        bootstrap_peers: vec![],
     }
 }
 
@@ -71,7 +71,10 @@ fn validate_accepts_valid_config() {
 
 #[test]
 fn validate_rejects_empty_data_dir() {
-    let cfg = NodeConfig { data_dir: PathBuf::from(""), ..valid_config() };
+    let cfg = NodeConfig {
+        data_dir: PathBuf::from(""),
+        ..valid_config()
+    };
     let err = cfg.validate().expect_err("empty data_dir must error");
     let msg = err.to_string();
     assert!(matches!(err, NodeError::Config(_)));
@@ -80,7 +83,10 @@ fn validate_rejects_empty_data_dir() {
 
 #[test]
 fn validate_rejects_empty_genesis_path() {
-    let cfg = NodeConfig { genesis_path: PathBuf::from(""), ..valid_config() };
+    let cfg = NodeConfig {
+        genesis_path: PathBuf::from(""),
+        ..valid_config()
+    };
     let err = cfg.validate().expect_err("empty genesis_path must error");
     assert!(matches!(err, NodeError::Config(_)));
 }
@@ -105,7 +111,10 @@ fn load_accepts_explicit_block_interval() {
 
 #[test]
 fn validate_rejects_zero_block_interval() {
-    let cfg = NodeConfig { block_interval_ms: 0, ..valid_config() };
+    let cfg = NodeConfig {
+        block_interval_ms: 0,
+        ..valid_config()
+    };
     let err = cfg.validate().expect_err("zero interval must error");
     assert!(matches!(err, NodeError::Config(_)));
 }
@@ -154,7 +163,9 @@ fn validate_rejects_invalid_bootstrap_peer() {
         bootstrap_peers: vec!["not-a-multiaddr".to_string()],
         ..valid_config()
     };
-    let err = cfg.validate().expect_err("invalid bootstrap peer must error");
+    let err = cfg
+        .validate()
+        .expect_err("invalid bootstrap peer must error");
     let msg = err.to_string();
     assert!(matches!(err, NodeError::Config(_)));
     assert!(msg.contains("bootstrap peer"), "got: {msg}");
@@ -166,7 +177,8 @@ fn validate_accepts_valid_listen_addr_fixed_port() {
         listen_addr: "/ip4/0.0.0.0/tcp/30303".to_string(),
         ..valid_config()
     };
-    cfg.validate().expect("valid fixed-port listen_addr must pass");
+    cfg.validate()
+        .expect("valid fixed-port listen_addr must pass");
 }
 
 #[test]

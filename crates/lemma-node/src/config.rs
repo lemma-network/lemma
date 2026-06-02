@@ -116,9 +116,9 @@ impl NodeConfig {
             return Err(NodeError::Config("block_interval_ms must be > 0".into()));
         }
         // Validate multiaddr strings early so startup fails fast with a clear message.
-        self.listen_addr
-            .parse::<libp2p::Multiaddr>()
-            .map_err(|e| NodeError::Config(format!("invalid listen_addr '{}': {e}", self.listen_addr)))?;
+        self.listen_addr.parse::<libp2p::Multiaddr>().map_err(|e| {
+            NodeError::Config(format!("invalid listen_addr '{}': {e}", self.listen_addr))
+        })?;
         for peer in &self.bootstrap_peers {
             peer.parse::<libp2p::Multiaddr>()
                 .map_err(|e| NodeError::Config(format!("invalid bootstrap peer '{peer}': {e}")))?;

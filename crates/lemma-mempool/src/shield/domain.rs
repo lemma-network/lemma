@@ -119,7 +119,12 @@ impl ShieldDomain {
         // Safe cast: w ≤ u16::MAX checked above.
         let share_ids: Vec<ShareId> = (1u16..=w as u16).collect();
 
-        Ok(Self { inner, share_ids, lambda_full: OnceLock::new(), share_count: w })
+        Ok(Self {
+            inner,
+            share_ids,
+            lambda_full: OnceLock::new(),
+            share_count: w,
+        })
     }
 
     /// Total share count `W` (the logical domain size).
@@ -169,8 +174,7 @@ impl ShieldDomain {
         // On the (unreachable) library-error path, store an empty Vec so the
         // lookup below returns None — never panics (AGENTS §7.2).
         let cache = self.lambda_full.get_or_init(|| {
-            lagrange_basis_at_0_for_all::<Fr>(self.share_ids.clone())
-                .unwrap_or_default()
+            lagrange_basis_at_0_for_all::<Fr>(self.share_ids.clone()).unwrap_or_default()
         });
         // share_id is 1-based; cache is 0-indexed.
         cache.get(usize::from(share_id) - 1).copied()

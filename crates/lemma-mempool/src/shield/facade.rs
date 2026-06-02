@@ -69,7 +69,11 @@ impl Shield {
     /// - [`ShieldError::FftDomainFailed`] — FFT domain construction failed (unreachable for valid W).
     pub fn new(committee: ShieldCommittee) -> Result<Self, ShieldError> {
         let domain = ShieldDomain::new(committee.total_weight())?;
-        Ok(Self { committee, domain, epoch_key: None })
+        Ok(Self {
+            committee,
+            domain,
+            epoch_key: None,
+        })
     }
 
     /// Set the epoch threshold public key `Y` after DKG completes (§4.6).
@@ -225,7 +229,10 @@ impl Shield {
     ) -> Result<DkgOutput, ShieldError> {
         let total_w = new_committee.total_weight();
         // Quorum = ⌈2/3·W_new⌉ (same formula as run_dkg, §4.6 / §5.2).
-        let quorum = total_w.checked_mul(2).map(|v| v.div_ceil(3)).unwrap_or(u64::MAX);
+        let quorum = total_w
+            .checked_mul(2)
+            .map(|v| v.div_ceil(3))
+            .unwrap_or(u64::MAX);
 
         // TODO(shield): if a 3rd DKG-style driver appears, extract a shared
         // `select_to_quorum(survivors, quorum)` helper (AGENTS §2.1). Two call-sites
@@ -270,7 +277,10 @@ impl Shield {
         }
 
         if accumulated < quorum {
-            return Err(ShieldError::DkgQuorumNotReached { have: accumulated, need: quorum });
+            return Err(ShieldError::DkgQuorumNotReached {
+                have: accumulated,
+                need: quorum,
+            });
         }
 
         // Step 4: aggregate the selected zero-transcripts (§4.4 reused).
@@ -279,7 +289,12 @@ impl Shield {
         // from the pre-existing epoch key, not from this output).
         let y = agg.coeff_comms[0];
 
-        Ok(DkgOutput { y, aggregate: agg, selected_dealers, faulty_dealers: faulty })
+        Ok(DkgOutput {
+            y,
+            aggregate: agg,
+            selected_dealers,
+            faulty_dealers: faulty,
+        })
     }
 }
 

@@ -18,8 +18,7 @@ fn empty_path() -> NibblePath {
 
 fn path_from_nibbles(nibbles: &[u8]) -> NibblePath {
     // All test fixtures use known-valid nibble values (0..=15).
-    NibblePath::from_nibbles(nibbles.to_vec())
-        .expect("test fixture nibbles must be 0..=15")
+    NibblePath::from_nibbles(nibbles.to_vec()).expect("test fixture nibbles must be 0..=15")
 }
 
 fn path_from_byte(byte: u8) -> NibblePath {
@@ -45,7 +44,10 @@ fn branch_all_none() -> TrieNode {
 fn branch_with_child(nibble: usize, child_fill: u8) -> TrieNode {
     let mut children = [None; 16];
     children[nibble] = Some(nonzero_hash(child_fill));
-    TrieNode::Branch { children, value: None }
+    TrieNode::Branch {
+        children,
+        value: None,
+    }
 }
 
 // ── NibblePath::from_bytes ────────────────────────────────────────────────────
@@ -325,10 +327,9 @@ fn extension_node_is_not_branch_or_leaf() {
 #[test]
 fn extension_node_stores_correct_prefix_and_child() {
     let child_hash = nonzero_hash(0xCC);
-    let TrieNode::Extension { prefix, child } = TrieNode::extension(
-        path_from_nibbles(&[7, 8]),
-        child_hash,
-    ) else {
+    let TrieNode::Extension { prefix, child } =
+        TrieNode::extension(path_from_nibbles(&[7, 8]), child_hash)
+    else {
         panic!("expected Extension");
     };
     assert_eq!(prefix.as_slice(), &[7, 8]);
@@ -461,7 +462,7 @@ fn bincode_encoded_leaf_with_known_hash_has_stable_size() {
     // consistent with Account.code_hash on disk (same 72-byte encoding).
     // If Hash::Serialize ever changes, this test fails before consensus breaks.
     let leaf = TrieNode::leaf(
-        NibblePath::from_bytes(&[0xAB]),   // 2 nibbles
+        NibblePath::from_bytes(&[0xAB]), // 2 nibbles
         b"v".to_vec(),
     );
     let encoded = bincode::serialize(&leaf).expect("serialize must succeed");
@@ -529,7 +530,9 @@ fn prepend_nibble_on_empty_path_produces_single_nibble_path() {
 fn set_child_stores_hash_at_nibble_index() {
     let mut branch = TrieNode::empty_branch();
     let h = nonzero_hash(0xAB);
-    branch.set_child(5, h).expect("set_child on Branch must succeed");
+    branch
+        .set_child(5, h)
+        .expect("set_child on Branch must succeed");
     assert_eq!(branch.get_child(5), Some(h));
 }
 

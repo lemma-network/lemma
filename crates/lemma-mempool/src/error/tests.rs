@@ -28,7 +28,9 @@ fn zero_address() -> Address {
 
 /// A cheap `StorageError` with no external deps, used by wrapping-variant tests.
 fn storage_error() -> StorageError {
-    StorageError::AccountNotFound { address: "lem1q000test".to_string() }
+    StorageError::AccountNotFound {
+        address: "lem1q000test".to_string(),
+    }
 }
 
 /// A cheap `CryptoError` with no external deps, used by wrapping-variant tests.
@@ -40,10 +42,15 @@ fn crypto_error() -> CryptoError {
 
 #[test]
 fn invalid_signature_display_contains_hash() {
-    let e = MempoolError::InvalidSignature { tx_hash: zero_hash() };
+    let e = MempoolError::InvalidSignature {
+        tx_hash: zero_hash(),
+    };
     let s = e.to_string();
     assert!(!s.is_empty(), "error message must not be empty");
-    assert!(s.contains("invalid transaction signature"), "expected variant context in: {s}");
+    assert!(
+        s.contains("invalid transaction signature"),
+        "expected variant context in: {s}"
+    );
 }
 
 #[test]
@@ -85,7 +92,9 @@ fn insufficient_balance_display_contains_amounts() {
 
 #[test]
 fn zero_gas_limit_display_contains_hash() {
-    let e = MempoolError::ZeroGasLimit { tx_hash: zero_hash() };
+    let e = MempoolError::ZeroGasLimit {
+        tx_hash: zero_hash(),
+    };
     assert!(e.to_string().contains("gas_limit"));
 }
 
@@ -127,7 +136,10 @@ fn transaction_too_large_display_contains_sizes() {
 
 #[test]
 fn pool_full_display_contains_capacity() {
-    let e = MempoolError::PoolFull { tx_hash: zero_hash(), capacity: 4096 };
+    let e = MempoolError::PoolFull {
+        tx_hash: zero_hash(),
+        capacity: 4096,
+    };
     assert!(e.to_string().contains("4096"));
 }
 
@@ -148,7 +160,10 @@ fn replacement_underpriced_display_contains_prices() {
 
 #[test]
 fn rate_limited_display_contains_retry() {
-    let e = MempoolError::RateLimited { sender: zero_address(), retry_after_ms: 2_000 };
+    let e = MempoolError::RateLimited {
+        sender: zero_address(),
+        retry_after_ms: 2_000,
+    };
     assert!(e.to_string().contains("2000"));
 }
 
@@ -163,7 +178,9 @@ fn circuit_breaker_display_contains_reason() {
 
 #[test]
 fn transaction_not_found_display_contains_hash() {
-    let e = MempoolError::TransactionNotFound { tx_hash: zero_hash() };
+    let e = MempoolError::TransactionNotFound {
+        tx_hash: zero_hash(),
+    };
     assert!(e.to_string().contains("not found"));
 }
 
@@ -171,111 +188,163 @@ fn transaction_not_found_display_contains_hash() {
 
 #[test]
 fn invalid_tx_predicate_true_for_invalid_signature() {
-    assert!(MempoolError::InvalidSignature { tx_hash: zero_hash() }.is_invalid_tx());
+    assert!(MempoolError::InvalidSignature {
+        tx_hash: zero_hash()
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_true_for_nonce_too_low() {
     assert!(MempoolError::NonceTooLow {
-        sender: zero_address(), tx_nonce: 0, account_nonce: 1
-    }.is_invalid_tx());
+        sender: zero_address(),
+        tx_nonce: 0,
+        account_nonce: 1
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_true_for_nonce_gap() {
     assert!(MempoolError::NonceGapTooLarge {
-        sender: zero_address(), tx_nonce: 100, account_nonce: 0, max_gap: 64
-    }.is_invalid_tx());
+        sender: zero_address(),
+        tx_nonce: 100,
+        account_nonce: 0,
+        max_gap: 64
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_true_for_insufficient_balance() {
     assert!(MempoolError::InsufficientBalance {
-        sender: zero_address(), required: 100, available: 1
-    }.is_invalid_tx());
+        sender: zero_address(),
+        required: 100,
+        available: 1
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_true_for_zero_gas() {
-    assert!(MempoolError::ZeroGasLimit { tx_hash: zero_hash() }.is_invalid_tx());
+    assert!(MempoolError::ZeroGasLimit {
+        tx_hash: zero_hash()
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_true_for_gas_price_too_low() {
     assert!(MempoolError::GasPriceTooLow {
-        tx_hash: zero_hash(), provided: 1, base_fee: 100
-    }.is_invalid_tx());
+        tx_hash: zero_hash(),
+        provided: 1,
+        base_fee: 100
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_true_for_chain_id_mismatch() {
     assert!(MempoolError::ChainIdMismatch {
-        tx_hash: zero_hash(), tx_chain_id: 2, expected_chain_id: 1
-    }.is_invalid_tx());
+        tx_hash: zero_hash(),
+        tx_chain_id: 2,
+        expected_chain_id: 1
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_true_for_too_large() {
     assert!(MempoolError::TransactionTooLarge {
-        tx_hash: zero_hash(), size: 200_000, max_size: 65_536
-    }.is_invalid_tx());
+        tx_hash: zero_hash(),
+        size: 200_000,
+        max_size: 65_536
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_false_for_pool_full() {
-    assert!(!MempoolError::PoolFull { tx_hash: zero_hash(), capacity: 100 }.is_invalid_tx());
+    assert!(!MempoolError::PoolFull {
+        tx_hash: zero_hash(),
+        capacity: 100
+    }
+    .is_invalid_tx());
 }
 
 #[test]
 fn invalid_tx_predicate_false_for_rate_limited() {
     assert!(!MempoolError::RateLimited {
-        sender: zero_address(), retry_after_ms: 1000
-    }.is_invalid_tx());
+        sender: zero_address(),
+        retry_after_ms: 1000
+    }
+    .is_invalid_tx());
 }
 
 // ── Predicate: is_retriable ───────────────────────────────────────────────────
 
 #[test]
 fn retriable_predicate_true_for_pool_full() {
-    assert!(MempoolError::PoolFull { tx_hash: zero_hash(), capacity: 100 }.is_retriable());
+    assert!(MempoolError::PoolFull {
+        tx_hash: zero_hash(),
+        capacity: 100
+    }
+    .is_retriable());
 }
 
 #[test]
 fn retriable_predicate_true_for_rate_limited() {
     assert!(MempoolError::RateLimited {
-        sender: zero_address(), retry_after_ms: 500
-    }.is_retriable());
+        sender: zero_address(),
+        retry_after_ms: 500
+    }
+    .is_retriable());
 }
 
 #[test]
 fn retriable_predicate_true_for_circuit_breaker() {
     assert!(MempoolError::CircuitBreakerRejected {
-        tx_hash: zero_hash(), reason: "busy"
-    }.is_retriable());
+        tx_hash: zero_hash(),
+        reason: "busy"
+    }
+    .is_retriable());
 }
 
 #[test]
 fn retriable_predicate_false_for_invalid_signature() {
-    assert!(!MempoolError::InvalidSignature { tx_hash: zero_hash() }.is_retriable());
+    assert!(!MempoolError::InvalidSignature {
+        tx_hash: zero_hash()
+    }
+    .is_retriable());
 }
 
 #[test]
 fn retriable_predicate_false_for_chain_id_mismatch() {
     assert!(!MempoolError::ChainIdMismatch {
-        tx_hash: zero_hash(), tx_chain_id: 99, expected_chain_id: 1
-    }.is_retriable());
+        tx_hash: zero_hash(),
+        tx_chain_id: 99,
+        expected_chain_id: 1
+    }
+    .is_retriable());
 }
 
 // ── Predicate: is_internal ────────────────────────────────────────────────────
 
 #[test]
 fn internal_predicate_false_for_invalid_signature() {
-    assert!(!MempoolError::InvalidSignature { tx_hash: zero_hash() }.is_internal());
+    assert!(!MempoolError::InvalidSignature {
+        tx_hash: zero_hash()
+    }
+    .is_internal());
 }
 
 #[test]
 fn internal_predicate_false_for_pool_full() {
-    assert!(!MempoolError::PoolFull { tx_hash: zero_hash(), capacity: 10 }.is_internal());
+    assert!(!MempoolError::PoolFull {
+        tx_hash: zero_hash(),
+        capacity: 10
+    }
+    .is_internal());
 }
 
 // ── Display: wrapping variants (S1) ──────────────────────────────────────────
@@ -288,7 +357,10 @@ fn state_lookup_failed_display_contains_address_and_source() {
     };
     let s = e.to_string();
     assert!(!s.is_empty());
-    assert!(s.contains("state lookup failed"), "display missing context: {s}");
+    assert!(
+        s.contains("state lookup failed"),
+        "display missing context: {s}"
+    );
 }
 
 #[test]
@@ -330,24 +402,20 @@ fn crypto_error_source_chain_is_wired() {
 
 #[test]
 fn internal_predicate_true_for_state_lookup_failed() {
-    assert!(
-        MempoolError::StateLookupFailed {
-            address: zero_address(),
-            source: storage_error(),
-        }
-        .is_internal()
-    );
+    assert!(MempoolError::StateLookupFailed {
+        address: zero_address(),
+        source: storage_error(),
+    }
+    .is_internal());
 }
 
 #[test]
 fn internal_predicate_true_for_crypto_error() {
-    assert!(
-        MempoolError::CryptoError {
-            tx_hash: zero_hash(),
-            source: crypto_error(),
-        }
-        .is_internal()
-    );
+    assert!(MempoolError::CryptoError {
+        tx_hash: zero_hash(),
+        source: crypto_error(),
+    }
+    .is_internal());
 }
 
 // ── W1: ReplacementUnderpriced is a permanent caller mistake ──────────────────
@@ -356,8 +424,11 @@ fn internal_predicate_true_for_crypto_error() {
 fn invalid_tx_predicate_true_for_replacement_underpriced() {
     assert!(
         MempoolError::ReplacementUnderpriced {
-            sender: zero_address(), nonce: 0,
-            old_price: 100, new_price: 100, min_bump_bps: 50,
+            sender: zero_address(),
+            nonce: 0,
+            old_price: 100,
+            new_price: 100,
+            min_bump_bps: 50,
         }
         .is_invalid_tx(),
         "underpriced replacement is a permanent caller mistake"
@@ -369,8 +440,11 @@ fn invalid_tx_predicate_true_for_replacement_underpriced() {
 #[test]
 fn replacement_underpriced_is_not_retriable_or_internal() {
     let e = MempoolError::ReplacementUnderpriced {
-        sender: zero_address(), nonce: 0,
-        old_price: 100, new_price: 100, min_bump_bps: 50,
+        sender: zero_address(),
+        nonce: 0,
+        old_price: 100,
+        new_price: 100,
+        min_bump_bps: 50,
     };
     assert!(!e.is_retriable(), "replacement should not be retriable");
     assert!(!e.is_internal(), "replacement should not be internal");
@@ -378,7 +452,9 @@ fn replacement_underpriced_is_not_retriable_or_internal() {
 
 #[test]
 fn predicates_are_mutually_exclusive_for_transaction_not_found() {
-    let e = MempoolError::TransactionNotFound { tx_hash: zero_hash() };
+    let e = MempoolError::TransactionNotFound {
+        tx_hash: zero_hash(),
+    };
     assert!(!e.is_invalid_tx());
     assert!(!e.is_retriable());
     assert!(!e.is_internal());

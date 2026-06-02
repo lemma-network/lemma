@@ -1,8 +1,8 @@
 //! Tests for `shield::params`.
 
 use super::{
-    ShieldParams, HKDF_INFO_AEAD_KEY, HKDF_INFO_NONCE, HKDF_SALT, MAX_SHIELD_PAYLOAD_BYTES,
-    DST_H2F, DST_H2G2, WEIGHT_GRANULARITY_DROP,
+    ShieldParams, DST_H2F, DST_H2G2, HKDF_INFO_AEAD_KEY, HKDF_INFO_NONCE, HKDF_SALT,
+    MAX_SHIELD_PAYLOAD_BYTES, WEIGHT_GRANULARITY_DROP,
 };
 use crate::shield::ShieldError;
 use lemma_core::amount::DROPS_PER_LEM;

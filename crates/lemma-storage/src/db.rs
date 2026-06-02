@@ -151,10 +151,7 @@ impl LemmaDb {
     /// `rocksdb::BoundColumnFamily` type in the public API.
     ///
     /// [`open`]: LemmaDb::open
-    fn resolve_cf(
-        &self,
-        name: &'static str,
-    ) -> Result<impl AsColumnFamilyRef + '_, StorageError> {
+    fn resolve_cf(&self, name: &'static str) -> Result<impl AsColumnFamilyRef + '_, StorageError> {
         self.db
             .cf_handle(name)
             .ok_or(StorageError::ColumnFamilyNotFound { name })
@@ -179,11 +176,7 @@ impl LemmaDb {
     /// - [`StorageError::ColumnFamilyNotFound`] — `cf_name` is not one of the
     ///   8 registered constants.
     /// - [`StorageError::Database`] — RocksDB I/O failure.
-    pub fn get(
-        &self,
-        cf_name: &'static str,
-        key: &[u8],
-    ) -> Result<Option<Vec<u8>>, StorageError> {
+    pub fn get(&self, cf_name: &'static str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let cf = self.resolve_cf(cf_name)?;
         Ok(self.db.get_cf(&cf, key)?)
     }
@@ -203,12 +196,7 @@ impl LemmaDb {
     ///
     /// [`write_batch`]: LemmaDb::write_batch
     /// [`get`]: LemmaDb::get
-    pub fn put(
-        &self,
-        cf_name: &'static str,
-        key: &[u8],
-        value: &[u8],
-    ) -> Result<(), StorageError> {
+    pub fn put(&self, cf_name: &'static str, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         let cf = self.resolve_cf(cf_name)?;
         Ok(self.db.put_cf(&cf, key, value)?)
     }

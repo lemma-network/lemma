@@ -125,7 +125,9 @@ pub fn decryption_share(
         return Err(ShieldError::InvalidKey);
     }
     // Safe unwrap: is_zero() guard ensures inverse exists in 𝔽_r.
-    let dk_inv = dk_i.inverse().expect("non-zero field element is invertible");
+    let dk_inv = dk_i
+        .inverse()
+        .expect("non-zero field element is invertible");
 
     // D_i = [dk_i^{-1}] U  (§2.3 "fast path": one 𝔾₁ scalar-mult, no pairing).
     let d: G1Affine = (G1Projective::from(ct.u) * dk_inv).into_affine();
@@ -164,7 +166,11 @@ pub fn decryption_share(
         validator_index,
         d,
         cm,
-        proof: ShareProof { t_u, t_g, response: proof_u.response },
+        proof: ShareProof {
+            t_u,
+            t_g,
+            response: proof_u.response,
+        },
     })
 }
 
@@ -201,13 +207,19 @@ pub fn verify_share(
     )?;
 
     // 1. DLEQ on base U: [s]U == t_U + [c]D_i
-    let pok_u = PokDiscreteLog::<G1Affine> { t: share.proof.t_u, response: share.proof.response };
+    let pok_u = PokDiscreteLog::<G1Affine> {
+        t: share.proof.t_u,
+        response: share.proof.response,
+    };
     if !pok_u.verify(&share.d, &ct.u, &c) {
         return Err(ShieldError::InvalidProof);
     }
 
     // 2. DLEQ on base G: [s]G == t_G + [c]cm_i
-    let pok_g = PokDiscreteLog::<G1Affine> { t: share.proof.t_g, response: share.proof.response };
+    let pok_g = PokDiscreteLog::<G1Affine> {
+        t: share.proof.t_g,
+        response: share.proof.response,
+    };
     if !pok_g.verify(&share.cm, &G1Affine::generator(), &c) {
         return Err(ShieldError::InvalidProof);
     }
@@ -292,9 +304,9 @@ pub fn verify_share_batch(
     let mut g2_inputs: Vec<G2Affine> = Vec::with_capacity(per_validator.len() + 1);
 
     for (vidx, d_alphas) in &per_validator {
-        let ek = ek_for
-            .get(vidx)
-            .ok_or_else(|| ShieldError::Serialization("internal: missing ek for validator".into()))?;
+        let ek = ek_for.get(vidx).ok_or_else(|| {
+            ShieldError::Serialization("internal: missing ek for validator".into())
+        })?;
 
         // Σ_j [α_{i,j}] D_{i,j} — accumulated via scalar-mult (correct for all batch sizes)
         let msm_d: G1Affine = d_alphas
@@ -343,14 +355,22 @@ fn dleq_challenge(
 ) -> Result<Fr, ShieldError> {
     let mut transcript: Vec<u8> = Vec::with_capacity(288);
     PokDiscreteLogProtocol::<G1Affine>::compute_challenge_contribution(
-        &base_u, &y_u, &t_u, &mut transcript,
+        &base_u,
+        &y_u,
+        &t_u,
+        &mut transcript,
     )
     .map_err(|e| ShieldError::Serialization(format!("{e:?}")))?;
     PokDiscreteLogProtocol::<G1Affine>::compute_challenge_contribution(
-        &base_g, &y_g, &t_g, &mut transcript,
+        &base_g,
+        &y_g,
+        &t_g,
+        &mut transcript,
     )
     .map_err(|e| ShieldError::Serialization(format!("{e:?}")))?;
-    Ok(compute_random_oracle_challenge::<Fr, Blake2b512>(&transcript))
+    Ok(compute_random_oracle_challenge::<Fr, Blake2b512>(
+        &transcript,
+    ))
 }
 
 /// Derive Fiat–Shamir challenges `α_k ∈ 𝔽_r` for the share batch (§2.4, §7.5).
@@ -366,14 +386,16 @@ fn batch_share_challenges(
             .d
             .serialize_compressed(&mut transcript)
             .map_err(|e| ShieldError::Serialization(format!("{e:?}")))?;
-        ct.u
-            .serialize_compressed(&mut transcript)
+        ct.u.serialize_compressed(&mut transcript)
             .map_err(|e| ShieldError::Serialization(format!("{e:?}")))?;
         ek.serialize_compressed(&mut transcript)
             .map_err(|e| ShieldError::Serialization(format!("{e:?}")))?;
     }
     // Counter-mode Blake2b512 expansion (§7.5) — canonical implementation in fs.
-    Ok(crate::shield::fs::expand_challenges(&transcript, entries.len()))
+    Ok(crate::shield::fs::expand_challenges(
+        &transcript,
+        entries.len(),
+    ))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -13,13 +13,21 @@ use crate::shield::{params::MAX_SHIELD_PAYLOAD_BYTES, ShieldError};
 
 #[test]
 fn shield_aad_to_bytes_is_24_bytes() {
-    let aad = ShieldAad { chain_id: 1, epoch: 42, submitter_nonce: 999 };
+    let aad = ShieldAad {
+        chain_id: 1,
+        epoch: 42,
+        submitter_nonce: 999,
+    };
     assert_eq!(aad.to_bytes().len(), AAD_BYTES);
 }
 
 #[test]
 fn shield_aad_roundtrip() {
-    let aad = ShieldAad { chain_id: 0xDEAD_BEEF_1234_5678, epoch: 7, submitter_nonce: 0 };
+    let aad = ShieldAad {
+        chain_id: 0xDEAD_BEEF_1234_5678,
+        epoch: 7,
+        submitter_nonce: 0,
+    };
     let bytes = aad.to_bytes();
     let decoded = ShieldAad::from_bytes(&bytes);
     assert_eq!(aad, decoded);
@@ -27,28 +35,52 @@ fn shield_aad_roundtrip() {
 
 #[test]
 fn shield_aad_zero_roundtrip() {
-    let aad = ShieldAad { chain_id: 0, epoch: 0, submitter_nonce: 0 };
+    let aad = ShieldAad {
+        chain_id: 0,
+        epoch: 0,
+        submitter_nonce: 0,
+    };
     assert_eq!(aad, ShieldAad::from_bytes(&aad.to_bytes()));
 }
 
 #[test]
 fn shield_aad_max_roundtrip() {
-    let aad = ShieldAad { chain_id: u64::MAX, epoch: u64::MAX, submitter_nonce: u64::MAX };
+    let aad = ShieldAad {
+        chain_id: u64::MAX,
+        epoch: u64::MAX,
+        submitter_nonce: u64::MAX,
+    };
     assert_eq!(aad, ShieldAad::from_bytes(&aad.to_bytes()));
 }
 
 #[test]
 fn shield_aad_different_fields_produce_different_bytes() {
-    let a = ShieldAad { chain_id: 1, epoch: 2, submitter_nonce: 3 };
-    let b = ShieldAad { chain_id: 1, epoch: 2, submitter_nonce: 4 };
-    let c = ShieldAad { chain_id: 1, epoch: 3, submitter_nonce: 3 };
+    let a = ShieldAad {
+        chain_id: 1,
+        epoch: 2,
+        submitter_nonce: 3,
+    };
+    let b = ShieldAad {
+        chain_id: 1,
+        epoch: 2,
+        submitter_nonce: 4,
+    };
+    let c = ShieldAad {
+        chain_id: 1,
+        epoch: 3,
+        submitter_nonce: 3,
+    };
     assert_ne!(a.to_bytes(), b.to_bytes());
     assert_ne!(a.to_bytes(), c.to_bytes());
 }
 
 #[test]
 fn shield_aad_to_bytes_is_deterministic() {
-    let aad = ShieldAad { chain_id: 42, epoch: 1, submitter_nonce: 7 };
+    let aad = ShieldAad {
+        chain_id: 42,
+        epoch: 1,
+        submitter_nonce: 7,
+    };
     assert_eq!(aad.to_bytes(), aad.to_bytes());
 }
 
@@ -61,7 +93,11 @@ fn valid_ciphertext(payload: Vec<u8>) -> Ciphertext {
     Ciphertext {
         u: G1Affine::generator(),
         w: G2Affine::generator(),
-        aad: ShieldAad { chain_id: 1, epoch: 5, submitter_nonce: 0 },
+        aad: ShieldAad {
+            chain_id: 1,
+            epoch: 5,
+            submitter_nonce: 0,
+        },
         payload,
     }
 }
@@ -111,14 +147,20 @@ fn ciphertext_to_bytes_is_deterministic() {
 fn from_bytes_rejects_too_short() {
     let short = vec![0u8; MIN_CIPHERTEXT_BYTES - 1];
     assert!(
-        matches!(Ciphertext::from_bytes(&short), Err(ShieldError::Serialization(_))),
+        matches!(
+            Ciphertext::from_bytes(&short),
+            Err(ShieldError::Serialization(_))
+        ),
         "expected Serialization error for truncated input"
     );
 }
 
 #[test]
 fn from_bytes_rejects_empty() {
-    assert!(matches!(Ciphertext::from_bytes(&[]), Err(ShieldError::Serialization(_))));
+    assert!(matches!(
+        Ciphertext::from_bytes(&[]),
+        Err(ShieldError::Serialization(_))
+    ));
 }
 
 #[test]
@@ -144,7 +186,10 @@ fn from_bytes_rejects_truncated_payload() {
     let len_offset = bytes.len() - 4;
     bytes[len_offset..len_offset + 4].copy_from_slice(&10u32.to_be_bytes());
     // No payload bytes follow — should error.
-    assert!(matches!(Ciphertext::from_bytes(&bytes), Err(ShieldError::Serialization(_))));
+    assert!(matches!(
+        Ciphertext::from_bytes(&bytes),
+        Err(ShieldError::Serialization(_))
+    ));
 }
 
 #[test]

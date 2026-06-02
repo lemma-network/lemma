@@ -34,11 +34,7 @@
 
 use libp2p::{gossipsub, PeerId};
 
-use crate::{
-    config,
-    error::NetworkError,
-    messages::GossipMessage,
-};
+use crate::{config, error::NetworkError, messages::GossipMessage};
 
 // ── GossipTopics ──────────────────────────────────────────────────────────────
 
@@ -73,8 +69,8 @@ impl GossipTopics {
     pub fn new() -> Self {
         GossipTopics {
             blocks: gossipsub::IdentTopic::new(config::TOPIC_BLOCKS),
-            dag:    gossipsub::IdentTopic::new(config::TOPIC_DAG),
-            tx:     gossipsub::IdentTopic::new(config::TOPIC_TX),
+            dag: gossipsub::IdentTopic::new(config::TOPIC_DAG),
+            tx: gossipsub::IdentTopic::new(config::TOPIC_TX),
         }
     }
 
@@ -90,8 +86,8 @@ impl GossipTopics {
     pub fn for_message(&self, msg: &GossipMessage) -> &gossipsub::IdentTopic {
         match msg.topic() {
             t if t == config::TOPIC_BLOCKS => &self.blocks,
-            t if t == config::TOPIC_TX    => &self.tx,
-            t if t == config::TOPIC_DAG   => &self.dag,
+            t if t == config::TOPIC_TX => &self.tx,
+            t if t == config::TOPIC_DAG => &self.dag,
             other => {
                 tracing::warn!(
                     topic = other,
@@ -129,8 +125,8 @@ pub fn subscribe_all(
 ) -> Result<(), NetworkError> {
     let to_subscribe = [
         (&topics.blocks, config::TOPIC_BLOCKS),
-        (&topics.dag,    config::TOPIC_DAG),
-        (&topics.tx,     config::TOPIC_TX),
+        (&topics.dag, config::TOPIC_DAG),
+        (&topics.tx, config::TOPIC_TX),
     ];
 
     for (topic, name) in to_subscribe {
@@ -178,10 +174,11 @@ pub fn publish(
 
     let topic = topics.for_message(msg);
 
-    gs.publish(topic.hash(), bytes).map_err(|e| NetworkError::Publish {
-        topic: topic_str,
-        reason: format!("{e}"),
-    })
+    gs.publish(topic.hash(), bytes)
+        .map_err(|e| NetworkError::Publish {
+            topic: topic_str,
+            reason: format!("{e}"),
+        })
 }
 
 // ── decode_incoming ───────────────────────────────────────────────────────────
@@ -201,10 +198,7 @@ pub fn publish(
 ///
 /// The 1 MiB size guard from [`GossipMessage::decode`] fires before JSON
 /// parsing begins (defence-in-depth against memory exhaustion).
-pub fn decode_incoming(
-    peer: &PeerId,
-    data: &[u8],
-) -> Result<GossipMessage, NetworkError> {
+pub fn decode_incoming(peer: &PeerId, data: &[u8]) -> Result<GossipMessage, NetworkError> {
     GossipMessage::decode(data).map_err(|e| NetworkError::InvalidMessage {
         peer: *peer,
         reason: format!("{e}"),

@@ -22,8 +22,8 @@
 //! | [`keccak256`] | Keccak-256 | EVM compatibility layer: Solidity ABI encoding, `lemma-vm` host function |
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};  // `Digest` re-exports `digest::Digest`; covers Keccak256 too
-use sha3::Keccak256;          // sha3 0.12 and sha2 0.11 share the same digest 0.11 train
+use sha2::{Digest, Sha256}; // `Digest` re-exports `digest::Digest`; covers Keccak256 too
+use sha3::Keccak256; // sha3 0.12 and sha2 0.11 share the same digest 0.11 train
 
 use lemma_core::Hash;
 
@@ -103,8 +103,9 @@ pub fn hash_bytes(data: &[u8]) -> Hash {
 /// assert_eq!(hash(&Point { x: 1, y: 2 }), hash(&Point { x: 1, y: 2 }));
 /// ```
 pub fn hash<T: Serialize>(data: &T) -> Result<Hash, CryptoError> {
-    let bytes = bincode::serialize(data)
-        .map_err(|e| CryptoError::SerializationFailed { reason: e.to_string() })?;
+    let bytes = bincode::serialize(data).map_err(|e| CryptoError::SerializationFailed {
+        reason: e.to_string(),
+    })?;
     Ok(hash_bytes(&bytes))
 }
 

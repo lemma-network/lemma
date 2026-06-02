@@ -476,11 +476,7 @@ pub fn try_decide(
                 //
                 // SAFETY: collect is necessary — `decided_above` is a
                 // filtered/reversed slice, not a raw index into `leaders`.
-                let decided_above: Vec<LeaderStatus> = leaders
-                    .iter()
-                    .rev()
-                    .cloned()
-                    .collect();
+                let decided_above: Vec<LeaderStatus> = leaders.iter().rev().cloned().collect();
                 try_indirect_decide(slot, &decided_above, dag, vset)?
             }
         };

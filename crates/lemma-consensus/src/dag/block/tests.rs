@@ -40,7 +40,11 @@ fn test_block() -> DagBlock {
             author: addr(1),
             timestamp_ms: 1_000,
             ancestors: vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
-            payload: vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
+            payload: vec![TxBatchRef {
+                digest: hash(20),
+                author: addr(4),
+                size: 512,
+            }],
             commit_votes: vec![CommitVote::new(3, block_ref(3, 1, 9))],
         },
         Signature::Unsigned,
@@ -57,10 +61,16 @@ fn test_block_different_signature() -> DagBlock {
             author: addr(1),
             timestamp_ms: 1_000,
             ancestors: vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
-            payload: vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
+            payload: vec![TxBatchRef {
+                digest: hash(20),
+                author: addr(4),
+                size: 512,
+            }],
             commit_votes: vec![CommitVote::new(3, block_ref(3, 1, 9))],
         },
-        Signature::Classical { bytes: vec![0xAB; 64] },
+        Signature::Classical {
+            bytes: vec![0xAB; 64],
+        },
     )
 }
 
@@ -88,12 +98,24 @@ fn compute_digest_excludes_signature_field() {
 /// Helper: build a block from `test_block()` with one field overridden.
 /// Reduces copy-paste in the "digest changes when X changes" tests.
 fn block_with(
-    epoch: u64, round: u64, author: Address, timestamp_ms: u64,
-    ancestors: Vec<DagBlockRef>, payload: Vec<TxBatchRef>,
+    epoch: u64,
+    round: u64,
+    author: Address,
+    timestamp_ms: u64,
+    ancestors: Vec<DagBlockRef>,
+    payload: Vec<TxBatchRef>,
     commit_votes: Vec<CommitVote>,
 ) -> DagBlock {
     DagBlock::new(
-        DagBlockBody { epoch, round, author, timestamp_ms, ancestors, payload, commit_votes },
+        DagBlockBody {
+            epoch,
+            round,
+            author,
+            timestamp_ms,
+            ancestors,
+            payload,
+            commit_votes,
+        },
         Signature::Unsigned,
     )
 }
@@ -101,70 +123,133 @@ fn block_with(
 #[test]
 fn compute_digest_changes_when_epoch_changes() {
     let a = test_block();
-    let b = block_with(99, 5, addr(1), 1_000,
+    let b = block_with(
+        99,
+        5,
+        addr(1),
+        1_000,
         vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
-        vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
-        vec![CommitVote::new(3, block_ref(3, 1, 9))]);
+        vec![TxBatchRef {
+            digest: hash(20),
+            author: addr(4),
+            size: 512,
+        }],
+        vec![CommitVote::new(3, block_ref(3, 1, 9))],
+    );
     assert_ne!(a.digest, b.digest);
 }
 
 #[test]
 fn compute_digest_changes_when_round_changes() {
     let a = test_block();
-    let b = block_with(1, 6, addr(1), 1_000,
+    let b = block_with(
+        1,
+        6,
+        addr(1),
+        1_000,
         vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
-        vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
-        vec![CommitVote::new(3, block_ref(3, 1, 9))]);
+        vec![TxBatchRef {
+            digest: hash(20),
+            author: addr(4),
+            size: 512,
+        }],
+        vec![CommitVote::new(3, block_ref(3, 1, 9))],
+    );
     assert_ne!(a.digest, b.digest);
 }
 
 #[test]
 fn compute_digest_changes_when_author_changes() {
     let a = test_block();
-    let b = block_with(1, 5, addr(2), 1_000,
+    let b = block_with(
+        1,
+        5,
+        addr(2),
+        1_000,
         vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
-        vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
-        vec![CommitVote::new(3, block_ref(3, 1, 9))]);
+        vec![TxBatchRef {
+            digest: hash(20),
+            author: addr(4),
+            size: 512,
+        }],
+        vec![CommitVote::new(3, block_ref(3, 1, 9))],
+    );
     assert_ne!(a.digest, b.digest);
 }
 
 #[test]
 fn compute_digest_changes_when_timestamp_changes() {
     let a = test_block();
-    let b = block_with(1, 5, addr(1), 9_999,
+    let b = block_with(
+        1,
+        5,
+        addr(1),
+        9_999,
         vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
-        vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
-        vec![CommitVote::new(3, block_ref(3, 1, 9))]);
+        vec![TxBatchRef {
+            digest: hash(20),
+            author: addr(4),
+            size: 512,
+        }],
+        vec![CommitVote::new(3, block_ref(3, 1, 9))],
+    );
     assert_ne!(a.digest, b.digest);
 }
 
 #[test]
 fn compute_digest_changes_when_ancestors_change() {
     let a = test_block();
-    let b = block_with(1, 5, addr(1), 1_000,
+    let b = block_with(
+        1,
+        5,
+        addr(1),
+        1_000,
         vec![block_ref(4, 2, 10)], // one ancestor removed
-        vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
-        vec![CommitVote::new(3, block_ref(3, 1, 9))]);
+        vec![TxBatchRef {
+            digest: hash(20),
+            author: addr(4),
+            size: 512,
+        }],
+        vec![CommitVote::new(3, block_ref(3, 1, 9))],
+    );
     assert_ne!(a.digest, b.digest);
 }
 
 #[test]
 fn compute_digest_changes_when_payload_changes() {
     let a = test_block();
-    let b = block_with(1, 5, addr(1), 1_000,
+    let b = block_with(
+        1,
+        5,
+        addr(1),
+        1_000,
         vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
-        vec![TxBatchRef { digest: hash(21), author: addr(4), size: 512 }], // digest changed
-        vec![CommitVote::new(3, block_ref(3, 1, 9))]);
+        vec![TxBatchRef {
+            digest: hash(21),
+            author: addr(4),
+            size: 512,
+        }], // digest changed
+        vec![CommitVote::new(3, block_ref(3, 1, 9))],
+    );
     assert_ne!(a.digest, b.digest);
 }
 
 #[test]
 fn compute_digest_changes_when_commit_votes_change() {
     let a = test_block();
-    let b = block_with(1, 5, addr(1), 1_000,
+    let b = block_with(
+        1,
+        5,
+        addr(1),
+        1_000,
         vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
-        vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
-        vec![]); // no commit votes
+        vec![TxBatchRef {
+            digest: hash(20),
+            author: addr(4),
+            size: 512,
+        }],
+        vec![],
+    ); // no commit votes
     assert_ne!(a.digest, b.digest);
 }
 
@@ -177,10 +262,19 @@ fn compute_digest_changes_when_commit_votes_change() {
 fn compute_digest_changes_when_ancestor_order_swapped() {
     // test_block: ancestors = [ref(4,2,10), ref(4,3,11)]
     let a = test_block();
-    let b = block_with(1, 5, addr(1), 1_000,
+    let b = block_with(
+        1,
+        5,
+        addr(1),
+        1_000,
         vec![block_ref(4, 3, 11), block_ref(4, 2, 10)], // same refs, reversed
-        vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
-        vec![CommitVote::new(3, block_ref(3, 1, 9))]);
+        vec![TxBatchRef {
+            digest: hash(20),
+            author: addr(4),
+            size: 512,
+        }],
+        vec![CommitVote::new(3, block_ref(3, 1, 9))],
+    );
     assert_ne!(
         a.digest, b.digest,
         "ancestor order must be reflected in the digest (Vec is ordered, not a set)"
@@ -189,16 +283,34 @@ fn compute_digest_changes_when_ancestor_order_swapped() {
 
 #[test]
 fn compute_digest_changes_when_payload_order_swapped() {
-    let payload_a = TxBatchRef { digest: hash(20), author: addr(4), size: 512 };
-    let payload_b = TxBatchRef { digest: hash(21), author: addr(5), size: 256 };
-    let a = block_with(1, 5, addr(1), 1_000,
+    let payload_a = TxBatchRef {
+        digest: hash(20),
+        author: addr(4),
+        size: 512,
+    };
+    let payload_b = TxBatchRef {
+        digest: hash(21),
+        author: addr(5),
+        size: 256,
+    };
+    let a = block_with(
+        1,
+        5,
+        addr(1),
+        1_000,
         vec![block_ref(4, 2, 10)],
         vec![payload_a, payload_b],
-        vec![]);
-    let b = block_with(1, 5, addr(1), 1_000,
+        vec![],
+    );
+    let b = block_with(
+        1,
+        5,
+        addr(1),
+        1_000,
         vec![block_ref(4, 2, 10)],
         vec![payload_b, payload_a], // same refs, reversed
-        vec![]);
+        vec![],
+    );
     assert_ne!(
         a.digest, b.digest,
         "payload order must be reflected in the digest"
@@ -214,16 +326,30 @@ fn compute_digest_changes_when_payload_order_swapped() {
 #[test]
 fn compute_digest_length_prefix_distinguishes_empty_vs_nonempty_fields() {
     // Block A: 2 ancestors, 0 payload entries.
-    let a = block_with(1, 5, addr(1), 1_000,
+    let a = block_with(
+        1,
+        5,
+        addr(1),
+        1_000,
         vec![block_ref(4, 2, 10), block_ref(4, 3, 11)],
         vec![],
-        vec![]);
+        vec![],
+    );
     // Block B: 0 ancestors, 1 payload entry.
     // Despite both having the same *total* field count they differ structurally.
-    let b = block_with(1, 5, addr(1), 1_000,
+    let b = block_with(
+        1,
+        5,
+        addr(1),
+        1_000,
         vec![],
-        vec![TxBatchRef { digest: hash(20), author: addr(4), size: 512 }],
-        vec![]);
+        vec![TxBatchRef {
+            digest: hash(20),
+            author: addr(4),
+            size: 512,
+        }],
+        vec![],
+    );
     assert_ne!(
         a.digest, b.digest,
         "length-prefix encoding must distinguish different field boundaries"
@@ -234,7 +360,10 @@ fn compute_digest_length_prefix_distinguishes_empty_vs_nonempty_fields() {
 fn compute_digest_empty_ancestors_and_payload_is_valid() {
     // Genesis-like block with no ancestors or payload must still produce a digest.
     let b = block_with(0, 0, addr(1), 0, vec![], vec![], vec![]);
-    assert!(!b.digest.is_zero(), "empty-body block must produce nonzero digest");
+    assert!(
+        !b.digest.is_zero(),
+        "empty-body block must produce nonzero digest"
+    );
     assert!(b.verify_digest());
 }
 

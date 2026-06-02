@@ -47,7 +47,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use lemma_core::block::Block;
@@ -61,7 +61,7 @@ use lemma_storage::db::LemmaDb;
 
 use crate::{
     error::NodeError,
-    sync::{ApplyOutcome, StructuralVerifier, SyncTracker, apply_synced_block},
+    sync::{apply_synced_block, ApplyOutcome, StructuralVerifier, SyncTracker},
 };
 
 // ── run_network_dispatch ──────────────────────────────────────────────────────
@@ -107,11 +107,10 @@ pub async fn run_network_dispatch(
     mut event_rx: mpsc::Receiver<NetworkEvent>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), NodeError> {
-    let verifier  = StructuralVerifier;
-    let mut tracker   = SyncTracker::new();
-    let mut sync_tick = tokio::time::interval(
-        std::time::Duration::from_millis(SYNC_RETRY_INTERVAL_MS)
-    );
+    let verifier = StructuralVerifier;
+    let mut tracker = SyncTracker::new();
+    let mut sync_tick =
+        tokio::time::interval(std::time::Duration::from_millis(SYNC_RETRY_INTERVAL_MS));
     // Skip missed ticks: if the loop was busy, don't burst catch-up requests.
     sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -214,7 +213,11 @@ async fn handle_network_event(
         }
 
         // ── Inbound range request — serve from ChainStore ────────────────────
-        NetworkEvent::RangeRequest { from, request, channel } => {
+        NetworkEvent::RangeRequest {
+            from,
+            request,
+            channel,
+        } => {
             serve_range_request(from, request, channel, db, handle).await?;
         }
 
@@ -303,7 +306,11 @@ async fn handle_block_received(
         }
         std::cmp::Ordering::Less => {
             // Already have this height.
-            debug!(height, local_tip = tip_height, "received block already in chain");
+            debug!(
+                height,
+                local_tip = tip_height,
+                "received block already in chain"
+            );
         }
     }
 
@@ -365,13 +372,11 @@ async fn serve_range_request(
 ) -> Result<(), NodeError> {
     use lemma_network::messages::RangeResponse;
 
-    let blocks      = fetch_range(db, &request);
+    let blocks = fetch_range(db, &request);
     let block_count = blocks.len();
-    let response    = RangeResponse::new(blocks);
+    let response = RangeResponse::new(blocks);
 
-    handle
-        .send_range_response(channel, response)
-        .await?;
+    handle.send_range_response(channel, response).await?;
 
     debug!(
         peer        = %from,

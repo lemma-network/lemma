@@ -17,7 +17,6 @@ use lemma_core::Address;
 #[non_exhaustive]
 pub enum ShieldError {
     // ── S1: foundation — params / committee / domain ──────────────────────────
-
     /// Committee total weight `W` is too small for viable threshold parameters.
     ///
     /// Minimum viable `W = 4` yields `t = 0` (secrecy threshold) and `p = 2`
@@ -70,7 +69,6 @@ pub enum ShieldError {
     Lagrange(String),
 
     // ── S2: ciphertext + TPKE encrypt/validate ────────────────────────────────
-
     /// A submitted or deserialized ciphertext failed the pairing validity check.
     ///
     /// Either `e(U, H_𝔾₂(U,aad)) ≠ e(G,W)` (malformed) or a deserialized
@@ -112,7 +110,6 @@ pub enum ShieldError {
     HashToCurve(String),
 
     // ── S3–S4: decryption shares + combine ───────────────────────────────────
-
     /// Fewer than `p+1` contributing shares for `combine` (§2.5, §4.2).
     ///
     /// `p = ⌊2W/3⌋` (privacy threshold). Decryption requires weight `≥ p+1`
@@ -141,7 +138,6 @@ pub enum ShieldError {
     InvalidShare,
 
     // ── S5: PVSS deal + verify ────────────────────────────────────────────────
-
     /// A PVSS transcript failed the §4.3 constant-term tag, FFT share, or
     /// batched multi-pairing correctness check.
     ///

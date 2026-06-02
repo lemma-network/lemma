@@ -247,8 +247,14 @@ fn accounts_with_different_balance_are_not_equal() {
 
 #[test]
 fn accounts_with_different_nonce_are_not_equal() {
-    let a = Account { nonce: 1, ..eoa_with_balance(100) };
-    let b = Account { nonce: 2, ..eoa_with_balance(100) };
+    let a = Account {
+        nonce: 1,
+        ..eoa_with_balance(100)
+    };
+    let b = Account {
+        nonce: 2,
+        ..eoa_with_balance(100)
+    };
     assert_ne!(a, b);
 }
 
@@ -261,8 +267,14 @@ fn accounts_with_different_code_hash_are_not_equal() {
 
 #[test]
 fn accounts_with_different_storage_root_are_not_equal() {
-    let a = Account { storage_root: nonzero_code_hash(), ..zero_account() };
-    let b = Account { storage_root: nonzero_storage_root(), ..zero_account() };
+    let a = Account {
+        storage_root: nonzero_code_hash(),
+        ..zero_account()
+    };
+    let b = Account {
+        storage_root: nonzero_storage_root(),
+        ..zero_account()
+    };
     assert_ne!(a, b);
 }
 

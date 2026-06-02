@@ -20,7 +20,10 @@ fn expand_challenges_is_deterministic() {
     let tr = b"test-transcript-bytes";
     let a = expand_challenges(tr, 4);
     let b = expand_challenges(tr, 4);
-    assert_eq!(a, b, "same transcript + count must produce identical challenges");
+    assert_eq!(
+        a, b,
+        "same transcript + count must produce identical challenges"
+    );
 }
 
 #[test]
@@ -35,15 +38,24 @@ fn expand_challenges_produces_correct_count() {
 fn expand_challenges_differ_per_index() {
     let tr = b"transcript";
     let cs = expand_challenges(tr, 3);
-    assert_ne!(cs[0], cs[1], "counter 0 and 1 must produce different challenges");
-    assert_ne!(cs[1], cs[2], "counter 1 and 2 must produce different challenges");
+    assert_ne!(
+        cs[0], cs[1],
+        "counter 0 and 1 must produce different challenges"
+    );
+    assert_ne!(
+        cs[1], cs[2],
+        "counter 1 and 2 must produce different challenges"
+    );
 }
 
 #[test]
 fn expand_challenges_differ_per_transcript() {
     let a = expand_challenges(b"transcript-a", 3);
     let b = expand_challenges(b"transcript-b", 3);
-    assert_ne!(a, b, "different transcripts must produce different challenge sets");
+    assert_ne!(
+        a, b,
+        "different transcripts must produce different challenge sets"
+    );
 }
 
 // ── hash_to_g2_with_dst ───────────────────────────────────────────────────────
@@ -59,7 +71,10 @@ fn hash_to_g2_with_dst_is_deterministic() {
 fn hash_to_g2_different_dsts_produce_different_points() {
     let a = hash_to_g2_with_dst(DST_H2G2, b"").unwrap();
     let b = hash_to_g2_with_dst(DST_PVSS_U1, b"").unwrap();
-    assert_ne!(a, b, "different DSTs must produce independent points (no hidden dlog)");
+    assert_ne!(
+        a, b,
+        "different DSTs must produce independent points (no hidden dlog)"
+    );
 }
 
 #[test]

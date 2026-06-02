@@ -11,16 +11,10 @@
 //!   sum invariant for valid inputs.
 
 use lemma_core::{
-    address::Address,
-    amount::Amount,
-    error::AmountError,
-    hash::Hash,
-    header::BlockHeader,
+    address::Address, amount::Amount, error::AmountError, hash::Hash, header::BlockHeader,
 };
 
-use crate::fee::{
-    calculate_base_fee, distribute_fee, FeeDistribution, MIN_BASE_FEE_DROP,
-};
+use crate::fee::{calculate_base_fee, distribute_fee, FeeDistribution, MIN_BASE_FEE_DROP};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -117,7 +111,10 @@ fn increase_capped_at_12_5_percent() {
     assert_eq!(next, drip(1125));
     // Verify: increase ≤ 12.5% of original
     let increase = next.as_drop() - base.as_drop();
-    assert!(increase * 8 <= base.as_drop(), "increase exceeded 12.5% cap");
+    assert!(
+        increase * 8 <= base.as_drop(),
+        "increase exceeded 12.5% cap"
+    );
 }
 
 #[test]
@@ -129,7 +126,10 @@ fn decrease_capped_at_12_5_percent() {
     // delta = 125 Drip → new = 875 Drip
     assert_eq!(next, drip(875));
     let decrease = base.as_drop() - next.as_drop();
-    assert!(decrease * 8 <= base.as_drop(), "decrease exceeded 12.5% cap");
+    assert!(
+        decrease * 8 <= base.as_drop(),
+        "decrease exceeded 12.5% cap"
+    );
 }
 
 #[test]
@@ -143,8 +143,11 @@ fn min_delta_1_drop_when_formula_truncates_to_zero() {
     let target = gas_limit / 2;
     let parent = gas_header(gas_limit, target + 1, drip(2));
     let next = calculate_base_fee(&parent).unwrap();
-    assert_eq!(next, Amount::from_drop(2 * ONE_DRIP + 1),
-        "min-delta must ensure at least 1 Drop increase when delta truncates to 0");
+    assert_eq!(
+        next,
+        Amount::from_drop(2 * ONE_DRIP + 1),
+        "min-delta must ensure at least 1 Drop increase when delta truncates to 0"
+    );
 }
 
 #[test]
@@ -156,8 +159,11 @@ fn decrease_from_below_floor_clamps_up_to_min_base_fee() {
     // Verifies the clamp is the final operation (applied even when starting below floor).
     let parent = gas_header(20_000_000, 0, drop_(500_000_000));
     let next = calculate_base_fee(&parent).unwrap();
-    assert_eq!(next.as_drop(), MIN_BASE_FEE_DROP,
-        "decrease starting below floor must clamp UP to MIN_BASE_FEE");
+    assert_eq!(
+        next.as_drop(),
+        MIN_BASE_FEE_DROP,
+        "decrease starting below floor must clamp UP to MIN_BASE_FEE"
+    );
 }
 
 #[test]
@@ -175,8 +181,11 @@ fn genesis_zero_base_fee_ramps_to_min_base_fee() {
     // initial_base_fee = 0 (genesis devnet start). Any utilization → MIN_BASE_FEE.
     let parent = gas_header(20_000_000, 10_000_000, Amount::zero()); // at target
     let next = calculate_base_fee(&parent).unwrap();
-    assert_eq!(next.as_drop(), MIN_BASE_FEE_DROP,
-        "genesis base_fee=0 must clamp to MIN_BASE_FEE at block 1");
+    assert_eq!(
+        next.as_drop(),
+        MIN_BASE_FEE_DROP,
+        "genesis base_fee=0 must clamp to MIN_BASE_FEE at block 1"
+    );
 }
 
 #[test]
@@ -206,7 +215,10 @@ fn gas_limit_one_returns_parent_fee_clamped() {
     assert_eq!(calculate_base_fee(&parent).unwrap(), drip(5));
     // With base_fee below MIN:
     let parent2 = gas_header(1, 0, Amount::zero());
-    assert_eq!(calculate_base_fee(&parent2).unwrap().as_drop(), MIN_BASE_FEE_DROP);
+    assert_eq!(
+        calculate_base_fee(&parent2).unwrap().as_drop(),
+        MIN_BASE_FEE_DROP
+    );
 }
 
 #[test]
@@ -265,13 +277,17 @@ fn burned_plus_tip_equals_total_charged() {
     let gas_used = 21_000u64;
     let base_fee = drip(5);
     let gas_price = drip(8);
-    let FeeDistribution { burned, to_proposer } =
-        distribute_fee(gas_used, base_fee, gas_price).unwrap();
+    let FeeDistribution {
+        burned,
+        to_proposer,
+    } = distribute_fee(gas_used, base_fee, gas_price).unwrap();
 
     let total = burned.checked_add(to_proposer).unwrap();
     let expected = gas_price.checked_mul(gas_used as u128).unwrap();
-    assert_eq!(total, expected,
-        "burned + to_proposer must equal gas_price × gas_used exactly");
+    assert_eq!(
+        total, expected,
+        "burned + to_proposer must equal gas_price × gas_used exactly"
+    );
 }
 
 #[test]

@@ -127,9 +127,13 @@ pub fn validate_transaction(
     validate_signature(tx, sender_pubkey)?;
 
     // Steps 6–7 — nonce (one state read, shared with balance read below)
-    let account = state
-        .get_account(&tx.sender)
-        .map_err(|source| MempoolError::StateLookupFailed { address: tx.sender, source })?;
+    let account =
+        state
+            .get_account(&tx.sender)
+            .map_err(|source| MempoolError::StateLookupFailed {
+                address: tx.sender,
+                source,
+            })?;
 
     let (account_nonce, account_balance) = account
         .map(|a| (a.nonce, a.balance))
@@ -217,7 +221,10 @@ fn validate_signature(tx: &Transaction, sender_pubkey: &PublicKey) -> Result<(),
         }
         // Other CryptoErrors (e.g. SerializationFailed, KeyGenerationFailed)
         // are internal/structural faults unrelated to the caller's submission.
-        source => MempoolError::CryptoError { tx_hash: tx.hash, source },
+        source => MempoolError::CryptoError {
+            tx_hash: tx.hash,
+            source,
+        },
     })
 }
 
@@ -263,13 +270,14 @@ fn validate_balance(tx: &Transaction, account_balance: Amount) -> Result<(), Mem
         })?;
 
     // total_cost = gas_cost + value
-    let total_cost = gas_cost
-        .checked_add(tx.value)
-        .map_err(|_| MempoolError::InsufficientBalance {
-            sender: tx.sender,
-            required: u128::MAX,
-            available: account_balance.as_drop(),
-        })?;
+    let total_cost =
+        gas_cost
+            .checked_add(tx.value)
+            .map_err(|_| MempoolError::InsufficientBalance {
+                sender: tx.sender,
+                required: u128::MAX,
+                available: account_balance.as_drop(),
+            })?;
 
     if account_balance.as_drop() < total_cost.as_drop() {
         return Err(MempoolError::InsufficientBalance {

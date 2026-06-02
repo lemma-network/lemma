@@ -21,8 +21,7 @@ fn peer_a() -> PeerId {
     use libp2p::identity::{ed25519, Keypair};
     // try_from_bytes zeroes the slice after consuming it; `mut` is intentional.
     let mut seed = [0u8; 32];
-    let secret =
-        ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed seed is always valid");
+    let secret = ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed seed is always valid");
     Keypair::from(ed25519::Keypair::from(secret))
         .public()
         .to_peer_id()
@@ -33,8 +32,7 @@ fn peer_b() -> PeerId {
     use libp2p::identity::{ed25519, Keypair};
     // try_from_bytes zeroes the slice after consuming it; `mut` is intentional.
     let mut seed = [1u8; 32];
-    let secret =
-        ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed seed is always valid");
+    let secret = ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed seed is always valid");
     Keypair::from(ed25519::Keypair::from(secret))
         .public()
         .to_peer_id()
@@ -42,16 +40,12 @@ fn peer_b() -> PeerId {
 
 /// A loopback TCP multiaddr without a peer-id component.
 fn addr_no_peer() -> Multiaddr {
-    format!("/ip4/127.0.0.1/tcp/{TEST_PORT_A}")
-        .parse()
-        .unwrap()
+    format!("/ip4/127.0.0.1/tcp/{TEST_PORT_A}").parse().unwrap()
 }
 
 /// A second loopback TCP multiaddr (different port) without a peer-id component.
 fn addr_no_peer_b() -> Multiaddr {
-    format!("/ip4/127.0.0.1/tcp/{TEST_PORT_B}")
-        .parse()
-        .unwrap()
+    format!("/ip4/127.0.0.1/tcp/{TEST_PORT_B}").parse().unwrap()
 }
 
 /// A loopback TCP multiaddr WITH an embedded /p2p/<peer_id> component.
@@ -77,7 +71,10 @@ fn mdns_discovered_adds_peer_to_table() {
     let event = MdnsEvent::Discovered(vec![(peer, addr.clone())]);
     handle_mdns_event(&event, &mut table);
 
-    assert!(table.peer_info(&peer).is_some(), "peer must be in table after Discovered");
+    assert!(
+        table.peer_info(&peer).is_some(),
+        "peer must be in table after Discovered"
+    );
 }
 
 #[test]
@@ -104,7 +101,11 @@ fn mdns_discovered_returns_new_peer_id() {
     let event = MdnsEvent::Discovered(vec![(peer, addr_no_peer())]);
     let newly_added = handle_mdns_event(&event, &mut table);
 
-    assert_eq!(newly_added, vec![peer], "newly discovered peer must be in returned list");
+    assert_eq!(
+        newly_added,
+        vec![peer],
+        "newly discovered peer must be in returned list"
+    );
 }
 
 #[test]
@@ -149,13 +150,14 @@ fn mdns_discovered_returns_only_new_peers_from_mixed_batch() {
     // Pre-add A.
     table.add_peer(a);
 
-    let event = MdnsEvent::Discovered(vec![
-        (a, addr_no_peer()),
-        (b, addr_no_peer_b()),
-    ]);
+    let event = MdnsEvent::Discovered(vec![(a, addr_no_peer()), (b, addr_no_peer_b())]);
     let newly_added = handle_mdns_event(&event, &mut table);
 
-    assert_eq!(newly_added, vec![b], "only B must be reported as newly added");
+    assert_eq!(
+        newly_added,
+        vec![b],
+        "only B must be reported as newly added"
+    );
 }
 
 #[test]
@@ -176,7 +178,10 @@ fn mdns_expired_does_not_remove_peer_from_table() {
     let addr = addr_no_peer();
 
     // Discover then expire.
-    handle_mdns_event(&MdnsEvent::Discovered(vec![(peer, addr.clone())]), &mut table);
+    handle_mdns_event(
+        &MdnsEvent::Discovered(vec![(peer, addr.clone())]),
+        &mut table,
+    );
     handle_mdns_event(&MdnsEvent::Expired(vec![(peer, addr)]), &mut table);
 
     assert!(
@@ -191,10 +196,16 @@ fn mdns_expired_returns_empty_vec() {
     let peer = peer_a();
     let addr = addr_no_peer();
 
-    handle_mdns_event(&MdnsEvent::Discovered(vec![(peer, addr.clone())]), &mut table);
+    handle_mdns_event(
+        &MdnsEvent::Discovered(vec![(peer, addr.clone())]),
+        &mut table,
+    );
     let result = handle_mdns_event(&MdnsEvent::Expired(vec![(peer, addr)]), &mut table);
 
-    assert!(result.is_empty(), "Expired must return empty newly_added list");
+    assert!(
+        result.is_empty(),
+        "Expired must return empty newly_added list"
+    );
 }
 
 #[test]
@@ -213,10 +224,16 @@ fn kad_routable_peer_adds_peer_and_address() {
     let peer = peer_a();
     let addr = addr_no_peer();
 
-    let event = KadEvent::RoutablePeer { peer, address: addr.clone() };
+    let event = KadEvent::RoutablePeer {
+        peer,
+        address: addr.clone(),
+    };
     handle_kademlia_event(&event, &mut table);
 
-    assert!(table.peer_info(&peer).is_some(), "RoutablePeer must add peer to table");
+    assert!(
+        table.peer_info(&peer).is_some(),
+        "RoutablePeer must add peer to table"
+    );
     assert!(
         table.peer_info(&peer).unwrap().addresses.contains(&addr),
         "RoutablePeer must add address to peer info"
@@ -231,10 +248,16 @@ fn kad_pending_routable_peer_adds_peer_and_address() {
     let peer = peer_a();
     let addr = addr_no_peer();
 
-    let event = KadEvent::PendingRoutablePeer { peer, address: addr.clone() };
+    let event = KadEvent::PendingRoutablePeer {
+        peer,
+        address: addr.clone(),
+    };
     handle_kademlia_event(&event, &mut table);
 
-    assert!(table.peer_info(&peer).is_some(), "PendingRoutablePeer must add peer");
+    assert!(
+        table.peer_info(&peer).is_some(),
+        "PendingRoutablePeer must add peer"
+    );
     assert!(
         table.peer_info(&peer).unwrap().addresses.contains(&addr),
         "PendingRoutablePeer must add address"
@@ -275,7 +298,10 @@ fn kad_routing_updated_adds_peer_and_all_addresses() {
     };
     handle_kademlia_event(&event, &mut table);
 
-    assert!(table.peer_info(&peer).is_some(), "RoutingUpdated must add peer");
+    assert!(
+        table.peer_info(&peer).is_some(),
+        "RoutingUpdated must add peer"
+    );
     assert!(
         table.peer_info(&peer).unwrap().addresses.contains(&addr),
         "RoutingUpdated must add the address"
@@ -356,7 +382,9 @@ fn kad_inbound_request_is_ignored() {
 
     // Construct an InboundRequest event (GetProvider is the simplest variant).
     let event = KadEvent::InboundRequest {
-        request: InboundRequest::FindNode { num_closer_peers: 0 },
+        request: InboundRequest::FindNode {
+            num_closer_peers: 0,
+        },
     };
 
     // Must not panic or modify the table.
@@ -374,7 +402,10 @@ fn parse_bootstrap_peers_extracts_peer_id_from_valid_address() {
     let result = parse_bootstrap_peers(&[addr.clone()]);
 
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].0, peer, "extracted PeerId must match embedded /p2p/ component");
+    assert_eq!(
+        result[0].0, peer,
+        "extracted PeerId must match embedded /p2p/ component"
+    );
     assert_eq!(result[0].1, addr, "Multiaddr must be returned unchanged");
 }
 
@@ -384,10 +415,7 @@ fn parse_bootstrap_peers_skips_address_without_peer_id() {
 
     let result = parse_bootstrap_peers(&[addr]);
 
-    assert!(
-        result.is_empty(),
-        "address without /p2p/ must be skipped"
-    );
+    assert!(result.is_empty(), "address without /p2p/ must be skipped");
 }
 
 #[test]
@@ -437,5 +465,8 @@ fn bootstrap_addr_with_p2p_component_is_accepted() {
     let result = parse_bootstrap_peers(&[addr]);
 
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].0, original, "PeerId must survive Multiaddr encoding roundtrip");
+    assert_eq!(
+        result[0].0, original,
+        "PeerId must survive Multiaddr encoding roundtrip"
+    );
 }

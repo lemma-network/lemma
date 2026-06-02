@@ -50,11 +50,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use lemma_core::{
-    block::Block,
-    error::BlockError,
-    hash::Hash,
-};
+use lemma_core::{block::Block, error::BlockError, hash::Hash};
 use lemma_storage::{chain::ChainStore, db::LemmaDb};
 
 use crate::error::NodeError;
@@ -142,12 +138,8 @@ pub trait BlockVerifier: Send + Sync {
     /// # Errors
     ///
     /// Returns a [`VerifyError`] variant describing the first failed check.
-    fn verify(
-        &self,
-        block: &Block,
-        prev_hash: Hash,
-        prev_height: u64,
-    ) -> Result<Hash, VerifyError>;
+    fn verify(&self, block: &Block, prev_hash: Hash, prev_height: u64)
+        -> Result<Hash, VerifyError>;
 }
 
 // ── StructuralVerifier ────────────────────────────────────────────────────────
@@ -244,7 +236,11 @@ pub struct SyncTracker {
 impl SyncTracker {
     /// Create a new tracker with no peers seen.
     pub fn new() -> Self {
-        SyncTracker { highest_seen: 0, requested_up_to: 0, last_peer: None }
+        SyncTracker {
+            highest_seen: 0,
+            requested_up_to: 0,
+            last_peer: None,
+        }
     }
 
     /// Record a new observation from a peer.
@@ -279,11 +275,7 @@ impl SyncTracker {
     ///
     /// Returns `None` when already up-to-date or when the gap was already
     /// requested and is in flight.
-    pub fn next_request(
-        &mut self,
-        local_tip: u64,
-        max_range: u64,
-    ) -> Option<(u64, u64)> {
+    pub fn next_request(&mut self, local_tip: u64, max_range: u64) -> Option<(u64, u64)> {
         // Nothing to do if we're at or ahead of the network tip.
         // saturating_add: tip overflow is unreachable but AGENTS §7.4 bans bare + 1.
         if self.highest_seen <= local_tip.saturating_add(1) {
@@ -400,7 +392,10 @@ pub async fn apply_synced_block(
 
     // ── Step 5: write ─────────────────────────────────────────────────────────
     ChainStore::new(db).put_block(block, computed_hash)?;
-    Ok(ApplyOutcome::Applied { height: block.height(), hash: computed_hash })
+    Ok(ApplyOutcome::Applied {
+        height: block.height(),
+        hash: computed_hash,
+    })
 }
 
 // ── compute_block_hash ────────────────────────────────────────────────────────
@@ -419,7 +414,9 @@ pub async fn apply_synced_block(
 pub fn compute_block_hash(block: &Block) -> Result<Hash, VerifyError> {
     bincode::serialize(block)
         .map(|bytes| lemma_crypto::hash_bytes(&bytes))
-        .map_err(|e| VerifyError::Serialization { reason: e.to_string() })
+        .map_err(|e| VerifyError::Serialization {
+            reason: e.to_string(),
+        })
 }
 
 #[cfg(test)]

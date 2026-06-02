@@ -14,13 +14,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
-use lemma_core::{
-    address::Address,
-    amount::Amount,
-    block::Block,
-    hash::Hash,
-    header::BlockHeader,
-};
+use lemma_core::{address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader};
 use lemma_storage::{chain::ChainStore, db::LemmaDb};
 
 use super::*;
@@ -29,17 +23,29 @@ use super::*;
 
 fn open_temp_db() -> (LemmaDb, TempDir) {
     let dir = TempDir::new().expect("TempDir");
-    let db  = LemmaDb::open(dir.path()).expect("LemmaDb::open");
+    let db = LemmaDb::open(dir.path()).expect("LemmaDb::open");
     (db, dir)
 }
 
 fn make_block(height: u64, parent_hash: Hash) -> Block {
     let vh = Hash::from_bytes([0xBB; 32]);
-    let h  = BlockHeader::new(
-        height, 1_700_000_000 + height, parent_hash,
-        Hash::zero(), Hash::zero(), Hash::zero(),
-        Address::zero(), 0, 0, Hash::zero(), vh, vh,
-        30_000_000, 0, Amount::from_drop(1_000_000_000), vec![],
+    let h = BlockHeader::new(
+        height,
+        1_700_000_000 + height,
+        parent_hash,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        vh,
+        vh,
+        30_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
     )
     .expect("header");
     Block::new(h, vec![], vec![]).expect("block")
@@ -50,8 +56,10 @@ fn seed_n_blocks(db: &LemmaDb, n: u64) -> Hash {
     let mut prev = Hash::zero();
     for h in 0..n {
         let block = make_block(h, prev);
-        let hash  = compute_block_hash(&block).expect("hash");
-        ChainStore::new(db).put_block(&block, hash).expect("put_block");
+        let hash = compute_block_hash(&block).expect("hash");
+        ChainStore::new(db)
+            .put_block(&block, hash)
+            .expect("put_block");
         prev = hash;
     }
     prev
@@ -65,7 +73,7 @@ fn verifier() -> StructuralVerifier {
 
 #[test]
 fn compute_block_hash_is_deterministic() {
-    let block  = make_block(1, Hash::zero());
+    let block = make_block(1, Hash::zero());
     let hash_a = compute_block_hash(&block).expect("hash");
     let hash_b = compute_block_hash(&block).expect("hash");
     assert_eq!(hash_a, hash_b);
@@ -83,29 +91,36 @@ fn compute_block_hash_differs_for_different_heights() {
 #[test]
 fn verify_accepts_valid_sequential_block() {
     let genesis = make_block(0, Hash::zero());
-    let g_hash  = compute_block_hash(&genesis).expect("g_hash");
-    let block1  = make_block(1, g_hash);
-    let result  = verifier().verify(&block1, g_hash, 0);
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+    let block1 = make_block(1, g_hash);
+    let result = verifier().verify(&block1, g_hash, 0);
     assert!(result.is_ok(), "valid block must pass: {result:?}");
 }
 
 #[test]
 fn verify_rejects_wrong_height() {
     let genesis = make_block(0, Hash::zero());
-    let g_hash  = compute_block_hash(&genesis).expect("g_hash");
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
     // Block at height 3 — wrong, expected 1.
-    let block3  = make_block(3, g_hash);
-    let err     = verifier().verify(&block3, g_hash, 0).expect_err("must fail");
-    assert!(matches!(err, VerifyError::HeightMismatch { expected: 1, .. }), "got: {err}");
+    let block3 = make_block(3, g_hash);
+    let err = verifier()
+        .verify(&block3, g_hash, 0)
+        .expect_err("must fail");
+    assert!(
+        matches!(err, VerifyError::HeightMismatch { expected: 1, .. }),
+        "got: {err}"
+    );
 }
 
 #[test]
 fn verify_rejects_wrong_parent_hash() {
     let wrong_prev = Hash::from_bytes([0xDE; 32]);
-    let real_prev  = Hash::from_bytes([0xAD; 32]);
+    let real_prev = Hash::from_bytes([0xAD; 32]);
     // Block claims parent = wrong_prev, but local tip has real_prev.
     let block1 = make_block(1, wrong_prev);
-    let err    = verifier().verify(&block1, real_prev, 0).expect_err("must fail");
+    let err = verifier()
+        .verify(&block1, real_prev, 0)
+        .expect_err("must fail");
     assert!(
         matches!(err, VerifyError::ParentHashMismatch { expected, .. } if expected == real_prev),
         "got: {err}"
@@ -115,18 +130,31 @@ fn verify_rejects_wrong_parent_hash() {
 #[test]
 fn verify_returns_correct_hash() {
     let genesis = make_block(0, Hash::zero());
-    let g_hash  = compute_block_hash(&genesis).expect("g_hash");
-    let block1  = make_block(1, g_hash);
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+    let block1 = make_block(1, g_hash);
     let expected_hash = compute_block_hash(&block1).expect("expected");
-    let result_hash   = verifier().verify(&block1, g_hash, 0).expect("verify");
-    assert_eq!(result_hash, expected_hash, "returned hash must match canonical hash");
+    let result_hash = verifier().verify(&block1, g_hash, 0).expect("verify");
+    assert_eq!(
+        result_hash, expected_hash,
+        "returned hash must match canonical hash"
+    );
 }
 
 #[test]
 fn verify_rejects_height_overflow() {
-    let block   = make_block(0, Hash::zero()); // height doesn't matter here
-    let err     = verifier().verify(&block, Hash::zero(), u64::MAX).expect_err("must fail");
-    assert!(matches!(err, VerifyError::HeightOverflow { prev_height: u64::MAX }), "got: {err}");
+    let block = make_block(0, Hash::zero()); // height doesn't matter here
+    let err = verifier()
+        .verify(&block, Hash::zero(), u64::MAX)
+        .expect_err("must fail");
+    assert!(
+        matches!(
+            err,
+            VerifyError::HeightOverflow {
+                prev_height: u64::MAX
+            }
+        ),
+        "got: {err}"
+    );
 }
 
 // ── ApplyOutcome::Stale ───────────────────────────────────────────────────────
@@ -144,20 +172,20 @@ async fn apply_synced_block_returns_stale_when_tip_advances_under_lock() {
     // releases the lock. The task wakes up, re-checks tip=1 ≠ prev=0 → Stale.
     let (db, _dir) = open_temp_db();
     seed_n_blocks(&db, 1); // genesis (tip = 0)
-    let db   = Arc::new(db);
+    let db = Arc::new(db);
     let lock = Arc::new(Mutex::new(()));
 
     let tip_hash = ChainStore::new(&db).tip().unwrap().unwrap().1;
-    let block1   = make_block(1, tip_hash);
-    let hash1    = compute_block_hash(&block1).expect("hash1");
+    let block1 = make_block(1, tip_hash);
+    let hash1 = compute_block_hash(&block1).expect("hash1");
 
     // Acquire lock BEFORE spawning apply — task will block at step 3.
     let guard = lock.lock().await;
 
-    let db2    = Arc::clone(&db);
-    let lock2  = Arc::clone(&lock);
+    let db2 = Arc::clone(&db);
+    let lock2 = Arc::clone(&lock);
     let block2 = block1.clone();
-    let task   = tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         apply_synced_block(&block2, &db2, &lock2, &StructuralVerifier).await
     });
 
@@ -165,13 +193,22 @@ async fn apply_synced_block_returns_stale_when_tip_advances_under_lock() {
     tokio::task::yield_now().await;
 
     // Now advance the tip while holding the lock (simulate producer winning race).
-    ChainStore::new(&db).put_block(&block1, hash1).expect("producer write");
+    ChainStore::new(&db)
+        .put_block(&block1, hash1)
+        .expect("producer write");
 
     // Release lock — task wakes up, re-reads tip=1 ≠ prev_height=0 → Stale.
     drop(guard);
 
-    let outcome = task.await.expect("task must not panic").expect("must not error");
-    assert_eq!(outcome, ApplyOutcome::Stale, "must be Stale when tip advanced under lock");
+    let outcome = task
+        .await
+        .expect("task must not panic")
+        .expect("must not error");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Stale,
+        "must be Stale when tip advanced under lock"
+    );
     assert_eq!(ChainStore::new(&db).latest_height().unwrap().unwrap(), 1);
 }
 
@@ -191,7 +228,10 @@ fn tracker_no_request_when_one_ahead() {
     // immediately via gossip and be applied directly).
     let mut t = SyncTracker::new();
     t.observe(5, libp2p::PeerId::random());
-    assert!(t.next_request(4, 256).is_none(), "exactly +1 is not a range-sync gap");
+    assert!(
+        t.next_request(4, 256).is_none(),
+        "exactly +1 is not a range-sync gap"
+    );
 }
 
 #[test]
@@ -218,7 +258,7 @@ fn tracker_does_not_re_request_inflight_range() {
     let mut t = SyncTracker::new();
     t.observe(10, libp2p::PeerId::random());
     t.next_request(2, 256); // issues request for 3..=10
-    // Second call: same gap, same highest_seen — must not re-issue.
+                            // Second call: same gap, same highest_seen — must not re-issue.
     assert!(
         t.next_request(2, 256).is_none(),
         "must not re-request already-in-flight range"
@@ -230,7 +270,7 @@ fn tracker_on_tip_advanced_clears_watermark() {
     let mut t = SyncTracker::new();
     t.observe(10, libp2p::PeerId::random());
     t.next_request(2, 256); // requested_up_to = 10
-    // Tip advances to 10 (all blocks applied).
+                            // Tip advances to 10 (all blocks applied).
     t.on_tip_advanced(10);
     // New higher block arrives at 15.
     t.observe(15, libp2p::PeerId::random());
@@ -263,8 +303,8 @@ fn tracker_retries_after_partial_response_via_on_tip_advanced() {
     // Tip advances to 100 via on_tip_advanced.
     // next_request should issue 101..=256 (still within the original requested
     // watermark), then after on_tip_advanced(256) → 257..=300.
-    let mut t    = SyncTracker::new();
-    let peer     = libp2p::PeerId::random();
+    let mut t = SyncTracker::new();
+    let peer = libp2p::PeerId::random();
     t.observe(300, peer);
 
     // Chunk 1 requested: 1..=256.
@@ -275,7 +315,11 @@ fn tracker_retries_after_partial_response_via_on_tip_advanced() {
     // next_request(100, 256): highest_seen(300) > requested_up_to(256) → issue 101..=256.
     t.on_tip_advanced(100);
     let r2 = t.next_request(100, 256).expect("retry of remainder");
-    assert_eq!(r2, (101, 300), "must retry remaining gap after partial response");
+    assert_eq!(
+        r2,
+        (101, 300),
+        "must retry remaining gap after partial response"
+    );
 }
 
 // ── apply_synced_block ────────────────────────────────────────────────────────
@@ -284,11 +328,11 @@ fn tracker_retries_after_partial_response_via_on_tip_advanced() {
 async fn apply_synced_block_applies_valid_block() {
     let (db, _dir) = open_temp_db();
     seed_n_blocks(&db, 1); // genesis at height 0
-    let db    = Arc::new(db);
-    let lock  = Arc::new(Mutex::new(()));
+    let db = Arc::new(db);
+    let lock = Arc::new(Mutex::new(()));
 
     let tip_hash = ChainStore::new(&db).tip().unwrap().unwrap().1;
-    let block1   = make_block(1, tip_hash);
+    let block1 = make_block(1, tip_hash);
 
     let outcome = apply_synced_block(&block1, &db, &lock, &verifier())
         .await
@@ -305,12 +349,12 @@ async fn apply_synced_block_applies_valid_block() {
 async fn apply_synced_block_returns_verify_error_on_bad_parent() {
     let (db, _dir) = open_temp_db();
     seed_n_blocks(&db, 1);
-    let db   = Arc::new(db);
+    let db = Arc::new(db);
     let lock = Arc::new(Mutex::new(()));
 
     // Wrong parent_hash.
     let block1 = make_block(1, Hash::from_bytes([0xFF; 32]));
-    let err    = apply_synced_block(&block1, &db, &lock, &verifier())
+    let err = apply_synced_block(&block1, &db, &lock, &verifier())
         .await
         .expect_err("must error on bad parent");
     assert!(matches!(err, NodeError::Verify(_)), "got: {err}");
@@ -321,7 +365,7 @@ async fn apply_synced_block_returns_verify_error_on_bad_parent() {
 #[tokio::test]
 async fn apply_synced_block_returns_no_tip_on_uninitialised_chain() {
     let (db, _dir) = open_temp_db();
-    let db   = Arc::new(db);
+    let db = Arc::new(db);
     let lock = Arc::new(Mutex::new(()));
     let block = make_block(1, Hash::zero());
     let outcome = apply_synced_block(&block, &db, &lock, &verifier())
@@ -342,7 +386,7 @@ async fn apply_synced_block_sequential_range_syncs_correctly() {
     seed_n_blocks(&db_dst, 1);
 
     let db_dst = Arc::new(db_dst);
-    let lock   = Arc::new(Mutex::new(()));
+    let lock = Arc::new(Mutex::new(()));
 
     for h in 1u64..=5 {
         let block = ChainStore::new(&db_src)

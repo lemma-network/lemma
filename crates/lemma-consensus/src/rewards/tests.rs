@@ -44,13 +44,23 @@ fn make_vset(members: &[(u8, u128)]) -> ValidatorSet {
         .iter()
         .map(|&(b, p)| {
             let power = VotingPower(lem(p));
-            (addr(b), Member { consensus_pubkey: dummy_key(b), power })
+            (
+                addr(b),
+                Member {
+                    consensus_pubkey: dummy_key(b),
+                    power,
+                },
+            )
         })
         .collect();
-    let total_power = map
-        .values()
-        .fold(Amount::zero(), |acc, m| acc.checked_add(m.power.as_amount()).unwrap());
-    ValidatorSet { epoch: 0, members: map, total_power }
+    let total_power = map.values().fold(Amount::zero(), |acc, m| {
+        acc.checked_add(m.power.as_amount()).unwrap()
+    });
+    ValidatorSet {
+        epoch: 0,
+        members: map,
+        total_power,
+    }
 }
 
 /// Build a validator map matching a vset (for distribute_rewards mutations).
@@ -84,7 +94,10 @@ fn dummy_key(b: u8) -> ConsensusKey {
 
 /// Verify the `distributed + burned_remainder == pool` invariant.
 fn assert_pool_invariant(outcome: &RewardOutcome, pool: Amount) {
-    let reconstructed = outcome.distributed.checked_add(outcome.burned_remainder).unwrap();
+    let reconstructed = outcome
+        .distributed
+        .checked_add(outcome.burned_remainder)
+        .unwrap();
     assert_eq!(
         reconstructed, pool,
         "invariant violated: distributed + burned_remainder != pool"
@@ -106,7 +119,10 @@ fn check_inflation_rate(epoch: u64, expected_bps: u32) {
         .unwrap()
         .checked_div(u128::from(EPOCHS_PER_YEAR))
         .unwrap();
-    assert_eq!(minted, expected, "epoch {epoch}: wrong inflation (expected {expected_bps} bps)");
+    assert_eq!(
+        minted, expected,
+        "epoch {epoch}: wrong inflation (expected {expected_bps} bps)"
+    );
 }
 
 #[test]
@@ -184,7 +200,10 @@ fn inflation_1b_lem_year1_approximately_54794_lem_per_epoch() {
     // Expected: 1e27 × 200 / 10_000 / 365 = 54_794_520_547_945_205_479_452 Drop
     //         ≈ 54_794.52 LEM (truncated to 54_794 LEM + some drops)
     let lem_part = minted.as_drop() / DROPS_PER_LEM;
-    assert_eq!(lem_part, 54_794, "~54,794 LEM per epoch for 1B supply at 2%/yr");
+    assert_eq!(
+        lem_part, 54_794,
+        "~54,794 LEM per epoch for 1B supply at 2%/yr"
+    );
 }
 
 // ── distribute_rewards: single validator ─────────────────────────────────────
@@ -199,8 +218,14 @@ fn distribute_single_validator_gets_pool_rounded_to_drip() {
 
     // Single validator → 100% of pool (before Drip rounding).
     // pool_drip = 1_000, power_drip = total_power_drip → share = pool_drip × 1 / 1 = 1_000 Drip
-    assert_eq!(outcome.distributed, pool, "single validator should receive full pool");
-    assert!(outcome.burned_remainder.is_zero(), "no remainder with exact Drip pool");
+    assert_eq!(
+        outcome.distributed, pool,
+        "single validator should receive full pool"
+    );
+    assert!(
+        outcome.burned_remainder.is_zero(),
+        "no remainder with exact Drip pool"
+    );
     assert_pool_invariant(&outcome, pool);
 }
 
@@ -245,8 +270,16 @@ fn distribute_two_validators_equal_power_get_equal_shares() {
 
     let outcome = distribute_rewards(&mut vs, &vset, pool).unwrap();
 
-    let share1 = vs[&addr(1)].self_stake.active.checked_sub(lem(20_000_000)).unwrap();
-    let share2 = vs[&addr(2)].self_stake.active.checked_sub(lem(20_000_000)).unwrap();
+    let share1 = vs[&addr(1)]
+        .self_stake
+        .active
+        .checked_sub(lem(20_000_000))
+        .unwrap();
+    let share2 = vs[&addr(2)]
+        .self_stake
+        .active
+        .checked_sub(lem(20_000_000))
+        .unwrap();
     assert_eq!(share1, share2, "equal power → equal shares");
     assert_pool_invariant(&outcome, pool);
 }
@@ -261,8 +294,16 @@ fn distribute_two_validators_unequal_power_proportional_shares() {
 
     let outcome = distribute_rewards(&mut vs, &vset, pool).unwrap();
 
-    let share1 = vs[&addr(1)].self_stake.active.checked_sub(lem(30_000_000)).unwrap();
-    let share2 = vs[&addr(2)].self_stake.active.checked_sub(lem(10_000_000)).unwrap();
+    let share1 = vs[&addr(1)]
+        .self_stake
+        .active
+        .checked_sub(lem(30_000_000))
+        .unwrap();
+    let share2 = vs[&addr(2)]
+        .self_stake
+        .active
+        .checked_sub(lem(10_000_000))
+        .unwrap();
 
     // 3:1 ratio — shares must reflect proportional power
     // share1/share2 == 3 (when pool divides evenly)
@@ -319,8 +360,14 @@ fn distribute_empty_vset_burns_entire_pool() {
 
     let outcome = distribute_rewards(&mut vs, &empty_vset, pool).unwrap();
 
-    assert!(outcome.distributed.is_zero(), "no validators → nothing distributed");
-    assert_eq!(outcome.burned_remainder, pool, "entire pool must be burned as remainder");
+    assert!(
+        outcome.distributed.is_zero(),
+        "no validators → nothing distributed"
+    );
+    assert_eq!(
+        outcome.burned_remainder, pool,
+        "entire pool must be burned as remainder"
+    );
     assert_pool_invariant(&outcome, pool);
 }
 
@@ -337,7 +384,9 @@ fn distribute_deterministic_same_input_same_output() {
         // Outcome unused — this test asserts determinism via the mutated balances.
         let _ = distribute_rewards(&mut vs, &vset, pool).unwrap();
         // Return all active balances (sorted by address — BTreeMap order).
-        vs.values().map(|v| v.self_stake.active.as_drop()).collect::<Vec<_>>()
+        vs.values()
+            .map(|v| v.self_stake.active.as_drop())
+            .collect::<Vec<_>>()
     };
 
     assert_eq!(run(), run(), "distribute_rewards must be deterministic");
@@ -377,8 +426,16 @@ fn distribute_commission_bps_nonzero_does_not_affect_self_only_v1() {
 
     // Both validators have equal power → equal shares (commission doesn't split
     // anything yet in v1, where delegated == 0 for all).
-    let share1 = vs[&addr(1)].self_stake.active.checked_sub(lem(20_000_000)).unwrap();
-    let share2 = vs[&addr(2)].self_stake.active.checked_sub(lem(20_000_000)).unwrap();
+    let share1 = vs[&addr(1)]
+        .self_stake
+        .active
+        .checked_sub(lem(20_000_000))
+        .unwrap();
+    let share2 = vs[&addr(2)]
+        .self_stake
+        .active
+        .checked_sub(lem(20_000_000))
+        .unwrap();
     assert_eq!(
         share1, share2,
         "commission_bps is a v1 no-op (no delegators); both validators earn equal shares"

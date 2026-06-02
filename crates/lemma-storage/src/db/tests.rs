@@ -30,7 +30,10 @@ fn open_temp_db() -> (LemmaDb, tempfile::TempDir) {
 fn open_creates_database_at_fresh_path() {
     let dir = tempdir().expect("tempdir creation must succeed");
     let result = LemmaDb::open(dir.path());
-    assert!(result.is_ok(), "open should succeed on a fresh directory: {result:?}");
+    assert!(
+        result.is_ok(),
+        "open should succeed on a fresh directory: {result:?}"
+    );
 }
 
 #[test]
@@ -39,7 +42,10 @@ fn open_existing_database_reopens_cleanly() {
     let dir = tempdir().expect("tempdir creation must succeed");
     let _ = LemmaDb::open(dir.path()).expect("first open must succeed");
     let result = LemmaDb::open(dir.path());
-    assert!(result.is_ok(), "reopening an existing database must succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "reopening an existing database must succeed: {result:?}"
+    );
 }
 
 #[test]
@@ -49,7 +55,8 @@ fn open_preserves_data_across_reopen() {
     {
         // Drop `db` before reopening — RocksDB requires exclusive access.
         let db = LemmaDb::open(dir.path()).expect("first open must succeed");
-        db.put(CF_METADATA, b"key", b"value").expect("put must succeed");
+        db.put(CF_METADATA, b"key", b"value")
+            .expect("put must succeed");
     } // `db` dropped here, releasing the RocksDB lock
 
     // Read back in second session.
@@ -91,7 +98,11 @@ fn all_column_families_are_accessible_after_open() {
             "put into CF '{cf_name}' should succeed after open, got: {result:?}",
         );
         let val = db.get(cf_name, b"probe").unwrap();
-        assert_eq!(val, Some(b"1".to_vec()), "get from CF '{cf_name}' must return written value");
+        assert_eq!(
+            val,
+            Some(b"1".to_vec()),
+            "get from CF '{cf_name}' must return written value"
+        );
     }
 }
 
@@ -139,8 +150,10 @@ fn get_returns_none_after_delete() {
 #[test]
 fn put_overwrites_existing_value() {
     let (db, _dir) = open_temp_db();
-    db.put(CF_METADATA, b"latest_height", &42u64.to_be_bytes()).unwrap();
-    db.put(CF_METADATA, b"latest_height", &99u64.to_be_bytes()).unwrap();
+    db.put(CF_METADATA, b"latest_height", &42u64.to_be_bytes())
+        .unwrap();
+    db.put(CF_METADATA, b"latest_height", &99u64.to_be_bytes())
+        .unwrap();
     let val = db.get(CF_METADATA, b"latest_height").unwrap().unwrap();
     assert_eq!(val, 99u64.to_be_bytes().to_vec());
 }
@@ -159,7 +172,8 @@ fn put_and_get_across_different_column_families_are_independent() {
     // The same key in two different CFs must hold independent values.
     let (db, _dir) = open_temp_db();
     db.put(CF_STATE, b"shared_key", b"state_value").unwrap();
-    db.put(CF_METADATA, b"shared_key", b"metadata_value").unwrap();
+    db.put(CF_METADATA, b"shared_key", b"metadata_value")
+        .unwrap();
 
     assert_eq!(
         db.get(CF_STATE, b"shared_key").unwrap(),
@@ -178,7 +192,10 @@ fn delete_nonexistent_key_succeeds() {
     // Deleting a key that doesn't exist is a no-op — must not return an error.
     let (db, _dir) = open_temp_db();
     let result = db.delete(CF_STATE, b"ghost_key");
-    assert!(result.is_ok(), "delete of missing key must succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "delete of missing key must succeed: {result:?}"
+    );
 }
 
 #[test]
@@ -190,7 +207,11 @@ fn delete_removes_key_from_correct_column_family_only() {
     // Delete from CF_STATE only.
     db.delete(CF_STATE, b"k").unwrap();
 
-    assert_eq!(db.get(CF_STATE, b"k").unwrap(), None, "CF_STATE key must be deleted");
+    assert_eq!(
+        db.get(CF_STATE, b"k").unwrap(),
+        None,
+        "CF_STATE key must be deleted"
+    );
     assert_eq!(
         db.get(CF_METADATA, b"k").unwrap(),
         Some(b"meta_v".to_vec()),
@@ -204,14 +225,26 @@ fn delete_removes_key_from_correct_column_family_only() {
 fn write_batch_commits_multiple_puts() {
     let (db, _dir) = open_temp_db();
     let mut batch = db.new_batch();
-    db.batch_put(&mut batch, CF_BLOCKS, &1u64.to_be_bytes(), b"block_1").unwrap();
-    db.batch_put(&mut batch, CF_BLOCKS, &2u64.to_be_bytes(), b"block_2").unwrap();
-    db.batch_put(&mut batch, CF_BLOCKS, &3u64.to_be_bytes(), b"block_3").unwrap();
+    db.batch_put(&mut batch, CF_BLOCKS, &1u64.to_be_bytes(), b"block_1")
+        .unwrap();
+    db.batch_put(&mut batch, CF_BLOCKS, &2u64.to_be_bytes(), b"block_2")
+        .unwrap();
+    db.batch_put(&mut batch, CF_BLOCKS, &3u64.to_be_bytes(), b"block_3")
+        .unwrap();
     db.write_batch(batch).unwrap();
 
-    assert_eq!(db.get(CF_BLOCKS, &1u64.to_be_bytes()).unwrap(), Some(b"block_1".to_vec()));
-    assert_eq!(db.get(CF_BLOCKS, &2u64.to_be_bytes()).unwrap(), Some(b"block_2".to_vec()));
-    assert_eq!(db.get(CF_BLOCKS, &3u64.to_be_bytes()).unwrap(), Some(b"block_3".to_vec()));
+    assert_eq!(
+        db.get(CF_BLOCKS, &1u64.to_be_bytes()).unwrap(),
+        Some(b"block_1".to_vec())
+    );
+    assert_eq!(
+        db.get(CF_BLOCKS, &2u64.to_be_bytes()).unwrap(),
+        Some(b"block_2".to_vec())
+    );
+    assert_eq!(
+        db.get(CF_BLOCKS, &3u64.to_be_bytes()).unwrap(),
+        Some(b"block_3".to_vec())
+    );
 }
 
 #[test]
@@ -223,14 +256,26 @@ fn write_batch_spans_multiple_column_families() {
     let tx_hash = [0xabu8; 32];
 
     let mut batch = db.new_batch();
-    db.batch_put(&mut batch, CF_BLOCKS, &height_key, b"block_bytes").unwrap();
-    db.batch_put(&mut batch, CF_RECEIPTS, &tx_hash, b"receipt_bytes").unwrap();
-    db.batch_put(&mut batch, CF_METADATA, b"latest_height", &height_key).unwrap();
+    db.batch_put(&mut batch, CF_BLOCKS, &height_key, b"block_bytes")
+        .unwrap();
+    db.batch_put(&mut batch, CF_RECEIPTS, &tx_hash, b"receipt_bytes")
+        .unwrap();
+    db.batch_put(&mut batch, CF_METADATA, b"latest_height", &height_key)
+        .unwrap();
     db.write_batch(batch).unwrap();
 
-    assert_eq!(db.get(CF_BLOCKS, &height_key).unwrap(), Some(b"block_bytes".to_vec()));
-    assert_eq!(db.get(CF_RECEIPTS, &tx_hash).unwrap(), Some(b"receipt_bytes".to_vec()));
-    assert_eq!(db.get(CF_METADATA, b"latest_height").unwrap(), Some(height_key.to_vec()));
+    assert_eq!(
+        db.get(CF_BLOCKS, &height_key).unwrap(),
+        Some(b"block_bytes".to_vec())
+    );
+    assert_eq!(
+        db.get(CF_RECEIPTS, &tx_hash).unwrap(),
+        Some(b"receipt_bytes".to_vec())
+    );
+    assert_eq!(
+        db.get(CF_METADATA, b"latest_height").unwrap(),
+        Some(height_key.to_vec())
+    );
 }
 
 #[test]
@@ -239,7 +284,8 @@ fn write_batch_delete_removes_key() {
     db.put(CF_TRIE_NODES, b"node_hash", b"node_bytes").unwrap();
 
     let mut batch = db.new_batch();
-    db.batch_delete(&mut batch, CF_TRIE_NODES, b"node_hash").unwrap();
+    db.batch_delete(&mut batch, CF_TRIE_NODES, b"node_hash")
+        .unwrap();
     db.write_batch(batch).unwrap();
 
     assert_eq!(db.get(CF_TRIE_NODES, b"node_hash").unwrap(), None);
@@ -251,7 +297,10 @@ fn empty_write_batch_succeeds() {
     let (db, _dir) = open_temp_db();
     let batch = db.new_batch();
     let result = db.write_batch(batch);
-    assert!(result.is_ok(), "empty batch commit must succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "empty batch commit must succeed: {result:?}"
+    );
 }
 
 #[test]
@@ -280,7 +329,10 @@ fn new_batch_produces_empty_batch() {
     db.write_batch(batch).unwrap();
 
     // Sentinel must still be there — empty batch changed nothing.
-    assert_eq!(db.get(CF_STATE, b"sentinel").unwrap(), Some(b"present".to_vec()));
+    assert_eq!(
+        db.get(CF_STATE, b"sentinel").unwrap(),
+        Some(b"present".to_vec())
+    );
 }
 
 // ── ColumnFamilyNotFound — negative-path coverage ────────────────────────────
@@ -290,7 +342,10 @@ fn get_unknown_column_family_returns_column_family_not_found() {
     let (db, _dir) = open_temp_db();
     let result = db.get("unknown_cf", b"key");
     assert!(
-        matches!(result, Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })),
+        matches!(
+            result,
+            Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })
+        ),
         "expected ColumnFamilyNotFound, got: {result:?}",
     );
 }
@@ -300,7 +355,10 @@ fn put_unknown_column_family_returns_column_family_not_found() {
     let (db, _dir) = open_temp_db();
     let result = db.put("unknown_cf", b"key", b"value");
     assert!(
-        matches!(result, Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })),
+        matches!(
+            result,
+            Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })
+        ),
         "expected ColumnFamilyNotFound, got: {result:?}",
     );
 }
@@ -310,7 +368,10 @@ fn delete_unknown_column_family_returns_column_family_not_found() {
     let (db, _dir) = open_temp_db();
     let result = db.delete("unknown_cf", b"key");
     assert!(
-        matches!(result, Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })),
+        matches!(
+            result,
+            Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })
+        ),
         "expected ColumnFamilyNotFound, got: {result:?}",
     );
 }
@@ -321,7 +382,10 @@ fn batch_put_unknown_column_family_returns_column_family_not_found() {
     let mut batch = db.new_batch();
     let result = db.batch_put(&mut batch, "unknown_cf", b"key", b"value");
     assert!(
-        matches!(result, Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })),
+        matches!(
+            result,
+            Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })
+        ),
         "expected ColumnFamilyNotFound, got: {result:?}",
     );
 }
@@ -332,7 +396,10 @@ fn batch_delete_unknown_column_family_returns_column_family_not_found() {
     let mut batch = db.new_batch();
     let result = db.batch_delete(&mut batch, "unknown_cf", b"key");
     assert!(
-        matches!(result, Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })),
+        matches!(
+            result,
+            Err(StorageError::ColumnFamilyNotFound { name: "unknown_cf" })
+        ),
         "expected ColumnFamilyNotFound, got: {result:?}",
     );
 }

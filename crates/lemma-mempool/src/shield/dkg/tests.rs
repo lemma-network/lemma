@@ -53,10 +53,22 @@ fn vset_with_shares(epoch: u64, validators: &[(u8, u64)]) -> ValidatorSet {
     for &(byte, shares) in validators {
         let power_drop = u128::from(shares) * WEIGHT_GRANULARITY_DROP;
         let power = VotingPower(Amount::from_drop(power_drop));
-        total_power = total_power.checked_add(Amount::from_drop(power_drop)).unwrap();
-        members.insert(addr(byte), Member { consensus_pubkey: dummy_key(), power });
+        total_power = total_power
+            .checked_add(Amount::from_drop(power_drop))
+            .unwrap();
+        members.insert(
+            addr(byte),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch, members, total_power }
+    ValidatorSet {
+        epoch,
+        members,
+        total_power,
+    }
 }
 
 fn test_epoch_keys(committee: &ShieldCommittee) -> (BTreeMap<u16, G2Affine>, Vec<Fr>) {
@@ -92,7 +104,13 @@ fn setup(n_dealers: usize) -> SetupResult {
     let dealer_addrs: Vec<Address> = committee.iter().map(|(a, _)| *a).collect();
     let mut posted = BTreeMap::new();
     for (i, &dealer) in dealer_addrs.iter().take(n_dealers).enumerate() {
-        let tr = deal(tau.clone(), &committee, &eks, &mut seeded_rng(100 + i as u64)).unwrap();
+        let tr = deal(
+            tau.clone(),
+            &committee,
+            &eks,
+            &mut seeded_rng(100 + i as u64),
+        )
+        .unwrap();
         posted.insert(dealer, (tr, true));
     }
     (committee, eks, posted)
@@ -113,7 +131,10 @@ fn first_committee_addr() -> Address {
 fn run_dkg_succeeds_with_full_committee() {
     let (committee, eks, posted) = setup(3);
     let result = run_dkg(&posted, &committee, &eks, &test_tau());
-    assert!(result.is_ok(), "run_dkg must succeed with all valid dealers: {result:?}");
+    assert!(
+        result.is_ok(),
+        "run_dkg must succeed with all valid dealers: {result:?}"
+    );
 }
 
 #[test]
@@ -121,8 +142,7 @@ fn run_dkg_y_equals_aggregate_f0() {
     let (committee, eks, posted) = setup(3);
     let out = run_dkg(&posted, &committee, &eks, &test_tau()).unwrap();
     assert_eq!(
-        out.y,
-        out.aggregate.coeff_comms[0],
+        out.y, out.aggregate.coeff_comms[0],
         "Y must always equal the aggregate transcript's F_0"
     );
 }
@@ -139,7 +159,10 @@ fn run_dkg_is_deterministic() {
     let mut y2 = Vec::new();
     out1.y.serialize_compressed(&mut y1).unwrap();
     out2.y.serialize_compressed(&mut y2).unwrap();
-    assert_eq!(y1, y2, "Y must be byte-identical across runs for the same inputs");
+    assert_eq!(
+        y1, y2,
+        "Y must be byte-identical across runs for the same inputs"
+    );
 
     assert_eq!(
         out1.aggregate.coeff_comms, out2.aggregate.coeff_comms,
@@ -251,6 +274,9 @@ fn run_dkg_selected_is_subset_of_posted() {
     let (committee, eks, posted) = setup(3);
     let out = run_dkg(&posted, &committee, &eks, &test_tau()).unwrap();
     for dealer in &out.selected_dealers {
-        assert!(posted.contains_key(dealer), "every selected dealer must have been in posted");
+        assert!(
+            posted.contains_key(dealer),
+            "every selected dealer must have been in posted"
+        );
     }
 }

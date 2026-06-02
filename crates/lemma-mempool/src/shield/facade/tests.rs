@@ -53,10 +53,22 @@ fn vset_with_shares(epoch: u64, validators: &[(u8, u64)]) -> ValidatorSet {
     for &(byte, shares) in validators {
         let power_drop = u128::from(shares) * WEIGHT_GRANULARITY_DROP;
         let power = VotingPower(Amount::from_drop(power_drop));
-        total_power = total_power.checked_add(Amount::from_drop(power_drop)).unwrap();
-        members.insert(addr(byte), Member { consensus_pubkey: dummy_key(), power });
+        total_power = total_power
+            .checked_add(Amount::from_drop(power_drop))
+            .unwrap();
+        members.insert(
+            addr(byte),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch, members, total_power }
+    ValidatorSet {
+        epoch,
+        members,
+        total_power,
+    }
 }
 
 fn test_epoch_keys(committee: &ShieldCommittee) -> (BTreeMap<u16, G2Affine>, Vec<Fr>) {
@@ -96,7 +108,13 @@ fn post_all_dealers(
         .iter()
         .enumerate()
         .map(|(i, (a, _))| {
-            let tr = deal(tau.to_vec(), committee, eks, &mut seeded_rng(100 + i as u64)).unwrap();
+            let tr = deal(
+                tau.to_vec(),
+                committee,
+                eks,
+                &mut seeded_rng(100 + i as u64),
+            )
+            .unwrap();
             (*a, (tr, true))
         })
         .collect()
@@ -113,7 +131,10 @@ fn combine_shares_from_aggregate(
         .enumerate()
         .map(|(idx, (_, share_ids))| {
             let z = recover_share(&dks[idx], aggregate, share_ids).unwrap();
-            CombineShare { validator_index: idx as u16, z_shares: z.into_iter().collect() }
+            CombineShare {
+                validator_index: idx as u16,
+                z_shares: z.into_iter().collect(),
+            }
         })
         .collect()
 }
@@ -123,7 +144,10 @@ fn combine_shares_from_aggregate(
 #[test]
 fn new_builds_handle_with_unset_epoch_key() {
     let shield = Shield::new(committee_w6()).unwrap();
-    assert!(shield.epoch_key().is_none(), "epoch key must be None before DKG");
+    assert!(
+        shield.epoch_key().is_none(),
+        "epoch key must be None before DKG"
+    );
     assert_eq!(shield.committee().total_weight(), 6, "committee W=6");
 }
 
@@ -140,7 +164,11 @@ fn params_matches_committee() {
     let committee = committee_w6();
     let expected = *committee.params();
     let shield = Shield::new(committee).unwrap();
-    assert_eq!(*shield.params(), expected, "params must come from the committee");
+    assert_eq!(
+        *shield.params(),
+        expected,
+        "params must come from the committee"
+    );
 }
 
 // ── Ingress ────────────────────────────────────────────────────────────────────
@@ -149,7 +177,11 @@ fn params_matches_committee() {
 fn encrypt_then_validate_ingress_accepts() {
     let shield = Shield::new(committee_w6()).unwrap();
     let y = G1Affine::generator(); // any valid G1 point works for encrypt/validate
-    let aad = ShieldAad { chain_id: 1, epoch: 1, submitter_nonce: 0 };
+    let aad = ShieldAad {
+        chain_id: 1,
+        epoch: 1,
+        submitter_nonce: 0,
+    };
     let ct = Shield::encrypt(&y, aad, b"hello-shield").unwrap();
     assert!(
         shield.validate_ingress(&ct).is_ok(),
@@ -161,7 +193,11 @@ fn encrypt_then_validate_ingress_accepts() {
 fn validate_ingress_rejects_tampered_ciphertext() {
     let shield = Shield::new(committee_w6()).unwrap();
     let y = G1Affine::generator();
-    let aad = ShieldAad { chain_id: 1, epoch: 1, submitter_nonce: 0 };
+    let aad = ShieldAad {
+        chain_id: 1,
+        epoch: 1,
+        submitter_nonce: 0,
+    };
     let mut ct = Shield::encrypt(&y, aad, b"tamper-me").unwrap();
     // Tamper with U (replace with a different G1 point) → validity pairing must fail.
     ct.u = G1Affine::generator();
@@ -187,14 +223,22 @@ fn full_round_trip_dkg_encrypt_decrypt() {
     let y = *shield.epoch_key().unwrap();
 
     // 2. Encrypt under Y.
-    let aad = ShieldAad { chain_id: 1, epoch: 1, submitter_nonce: 0 };
+    let aad = ShieldAad {
+        chain_id: 1,
+        epoch: 1,
+        submitter_nonce: 0,
+    };
     let plaintext = b"facade-round-trip";
     let ct = Shield::encrypt(&y, aad, plaintext).unwrap();
 
     // 3. Recover shares + decrypt via facade.
     let shares = combine_shares_from_aggregate(&committee, &dkg.aggregate, &dks);
     let decrypted = shield.decrypt(&ct, &shares).unwrap();
-    assert_eq!(decrypted.as_slice(), plaintext.as_slice(), "decrypt must recover plaintext");
+    assert_eq!(
+        decrypted.as_slice(),
+        plaintext.as_slice(),
+        "decrypt must recover plaintext"
+    );
 }
 
 #[test]
@@ -207,7 +251,11 @@ fn decrypt_rejects_insufficient_shares() {
     let dkg = shield.run_dkg(&posted, &eks, &tau).unwrap();
     shield.set_epoch_key(dkg.y);
 
-    let aad = ShieldAad { chain_id: 1, epoch: 1, submitter_nonce: 0 };
+    let aad = ShieldAad {
+        chain_id: 1,
+        epoch: 1,
+        submitter_nonce: 0,
+    };
     let ct = Shield::encrypt(shield.epoch_key().unwrap(), aad, b"x").unwrap();
 
     // Only one validator's shares (weight 2) — below p+1 = 5.
@@ -232,7 +280,10 @@ fn run_dkg_via_facade_matches_free_fn() {
 
     let facade_out = shield.run_dkg(&posted, &eks, &tau).unwrap();
     let free_out = free_run_dkg(&posted, &committee, &eks, &tau).unwrap();
-    assert_eq!(facade_out.y, free_out.y, "facade run_dkg must match free fn");
+    assert_eq!(
+        facade_out.y, free_out.y,
+        "facade run_dkg must match free fn"
+    );
     assert_eq!(facade_out.selected_dealers, free_out.selected_dealers);
 }
 
@@ -258,7 +309,11 @@ fn reshare_via_facade_keeps_y_invariant() {
         .collect();
 
     // 2. Encrypt under Y.
-    let aad = ShieldAad { chain_id: 1, epoch: 1, submitter_nonce: 0 };
+    let aad = ShieldAad {
+        chain_id: 1,
+        epoch: 1,
+        submitter_nonce: 0,
+    };
     let plaintext = b"reshare-keeps-y";
     let ct = Shield::encrypt(&y, aad, plaintext).unwrap();
 
@@ -267,12 +322,19 @@ fn reshare_via_facade_keeps_y_invariant() {
         .iter()
         .enumerate()
         .map(|(i, (a, _))| {
-            let tr = deal_reshare(reshare_tau.clone(), &committee, &eks, &mut seeded_rng(300 + i as u64))
-                .unwrap();
+            let tr = deal_reshare(
+                reshare_tau.clone(),
+                &committee,
+                &eks,
+                &mut seeded_rng(300 + i as u64),
+            )
+            .unwrap();
             (*a, (tr, true))
         })
         .collect();
-    let reshare_out = shield.reshare(&committee, &reshare_posted, &eks, &reshare_tau).unwrap();
+    let reshare_out = shield
+        .reshare(&committee, &reshare_posted, &eks, &reshare_tau)
+        .unwrap();
     assert!(
         reshare_out.aggregate.coeff_comms[0].is_zero(),
         "resharing aggregate F_0 must be 𝒪 (Y invariant)"
@@ -285,7 +347,10 @@ fn reshare_via_facade_keeps_y_invariant() {
         .map(|(idx, (_, share_ids))| {
             let z_zero = recover_share(&dks[idx], &reshare_out.aggregate, share_ids).unwrap();
             let z_new = combine_shares(&z_old[idx], &z_zero).unwrap();
-            CombineShare { validator_index: idx as u16, z_shares: z_new.into_iter().collect() }
+            CombineShare {
+                validator_index: idx as u16,
+                z_shares: z_new.into_iter().collect(),
+            }
         })
         .collect();
     let decrypted = shield.decrypt(&ct, &shares).unwrap();
@@ -307,7 +372,10 @@ fn reshare_rejects_insufficient_weight() {
     let tr = deal_reshare(reshare_tau.clone(), &committee, &eks, &mut seeded_rng(1)).unwrap();
     let mut posted = BTreeMap::new();
     posted.insert(dealer, (tr, true));
-    match shield.reshare(&committee, &posted, &eks, &reshare_tau).unwrap_err() {
+    match shield
+        .reshare(&committee, &posted, &eks, &reshare_tau)
+        .unwrap_err()
+    {
         ShieldError::DkgQuorumNotReached { have, need } => {
             assert!(have < need, "have={have} < need={need}");
         }
@@ -359,14 +427,27 @@ fn withholding_set_flags_no_show() {
         .take(2)
         .enumerate()
         .map(|(i, &a)| {
-            let tr = deal(tau.clone(), &committee, &eks, &mut seeded_rng(100 + i as u64)).unwrap();
+            let tr = deal(
+                tau.clone(),
+                &committee,
+                &eks,
+                &mut seeded_rng(100 + i as u64),
+            )
+            .unwrap();
             (a, (tr, true))
         })
         .collect();
     let dkg = shield.run_dkg(&posted, &eks, &tau).unwrap();
     let withholders = withholding_set(&committee, &posted, &dkg);
-    assert!(withholders.contains(&no_show), "no-show validator must be flagged");
-    assert_eq!(withholders.len(), 1, "only the no-show is a non-contributor");
+    assert!(
+        withholders.contains(&no_show),
+        "no-show validator must be flagged"
+    );
+    assert_eq!(
+        withholders.len(),
+        1,
+        "only the no-show is a non-contributor"
+    );
 }
 
 #[test]
@@ -383,8 +464,18 @@ fn withholding_set_flags_faulty_dealer() {
     posted.get_mut(&faulty).unwrap().1 = false; // sig_ok=false
     let dkg = shield.run_dkg(&posted, &eks, &tau).unwrap();
 
-    assert!(dkg.faulty_dealers.contains(&faulty), "sig_ok=false dealer must be in faulty_dealers");
+    assert!(
+        dkg.faulty_dealers.contains(&faulty),
+        "sig_ok=false dealer must be in faulty_dealers"
+    );
     let withholders = withholding_set(&committee, &posted, &dkg);
-    assert!(withholders.contains(&faulty), "faulty (invalid-post) dealer must be flagged");
-    assert_eq!(withholders.len(), 1, "only the faulty dealer is a non-contributor");
+    assert!(
+        withholders.contains(&faulty),
+        "faulty (invalid-post) dealer must be flagged"
+    );
+    assert_eq!(
+        withholders.len(),
+        1,
+        "only the faulty dealer is a non-contributor"
+    );
 }

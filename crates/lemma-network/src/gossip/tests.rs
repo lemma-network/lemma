@@ -1,16 +1,16 @@
 use libp2p::{gossipsub, identity, PeerId};
 
 use lemma_core::{
-    address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader,
-    transaction::{Transaction, TxType},
+    address::Address,
+    amount::Amount,
+    block::Block,
+    hash::Hash,
+    header::BlockHeader,
     signature::Signature,
+    transaction::{Transaction, TxType},
 };
 
-use crate::{
-    config,
-    error::NetworkError,
-    messages::GossipMessage,
-};
+use crate::{config, error::NetworkError, messages::GossipMessage};
 
 use super::*;
 
@@ -25,11 +25,8 @@ fn test_gossipsub() -> gossipsub::Behaviour {
     let config = gossipsub::ConfigBuilder::default()
         .build()
         .expect("default gossipsub config is always valid");
-    gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(key),
-        config,
-    )
-    .expect("gossipsub Behaviour must build from valid config and keypair")
+    gossipsub::Behaviour::new(gossipsub::MessageAuthenticity::Signed(key), config)
+        .expect("gossipsub Behaviour must build from valid config and keypair")
 }
 
 /// Deterministic test PeerId from a fixed zero seed.
@@ -45,25 +42,43 @@ fn test_peer() -> PeerId {
 /// Minimal valid `Block` for gossip tests.
 fn test_block() -> Block {
     let header = BlockHeader::new(
-        0, 1_700_000_000,
-        Hash::zero(), Hash::zero(), Hash::zero(), Hash::zero(),
-        Address::zero(), 0, 0,
-        Hash::zero(), Hash::zero(), Hash::zero(),
-        1_000_000, 0,
+        0,
+        1_700_000_000,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        1_000_000,
+        0,
         Amount::from_drop(1_000_000_000),
         vec![],
-    ).expect("test block header is always valid");
+    )
+    .expect("test block header is always valid");
     Block::new(header, vec![], vec![]).expect("test block is always valid")
 }
 
 /// Minimal valid `Transaction` for gossip tests.
 fn test_tx() -> Transaction {
     Transaction::new(
-        Hash::zero(), Address::zero(), Some(Address::burn()),
-        0, 1, Amount::from_drop(0), 21_000,
+        Hash::zero(),
+        Address::zero(),
+        Some(Address::burn()),
+        0,
+        1,
+        Amount::from_drop(0),
+        21_000,
         Amount::from_drop(1_000_000_000),
-        TxType::Transfer, vec![], Signature::Unsigned,
-    ).expect("test transaction is always valid")
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("test transaction is always valid")
 }
 
 // ── GossipTopics — construction ───────────────────────────────────────────────
@@ -193,7 +208,11 @@ fn subscribe_all_is_idempotent() {
     subscribe_all(&mut gs, &topics).expect("first subscribe_all must succeed");
     // Second call — already subscribed → Ok(false) for each, must not error.
     let result = subscribe_all(&mut gs, &topics);
-    assert!(result.is_ok(), "subscribe_all must be idempotent: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "subscribe_all must be idempotent: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -324,10 +343,7 @@ fn decode_incoming_error_contains_sending_peer_id() {
         panic!("expected InvalidMessage error");
     };
 
-    assert_eq!(
-        err_peer, peer,
-        "error must carry the peer_id of the sender"
-    );
+    assert_eq!(err_peer, peer, "error must carry the peer_id of the sender");
 }
 
 #[test]

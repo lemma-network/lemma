@@ -37,12 +37,12 @@
 //! pattern-matches on these variants to dispatch messages.
 
 use libp2p::{
-    gossipsub, identify,
+    gossipsub, identify, identity,
     kad::{self, store::MemoryStore},
     mdns, ping,
     request_response::{self, cbor, ProtocolSupport},
     swarm::NetworkBehaviour,
-    identity, StreamProtocol,
+    StreamProtocol,
 };
 
 use crate::{

@@ -92,32 +92,31 @@ pub mod stake;
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
+pub use cert::{verify_quorum_cert, CertError};
+pub use commit::Commit;
 pub use dag::block::{CommitVote, DagBlock, DagBlockBody, DagBlockRef, Slot, TxBatchRef};
 pub use dag::graph::{Dag, InsertOutcome};
 pub use dag::threshold_clock::ThresholdClock;
+pub use epoch::{
+    advance_epoch, EpochError, EpochOutput, EPOCH_DURATION_SECONDS,
+    GENESIS_MIN_VALIDATOR_STAKE_DROP, UNBONDING_PERIOD_SECONDS,
+};
+pub use epoch::{
+    force_epoch_close, verify_epoch_change, verify_full, EpochChangeProof, ProofError,
+    RecoveryError, RecoveryOutput,
+};
 pub use error::ConsensusError;
-pub use commit::Commit;
-pub use pulse::committer::{LeaderStatus, try_decide};
+pub use fee::{calculate_base_fee, distribute_fee, FeeDistribution, MIN_BASE_FEE_DROP};
+pub use pulse::committer::{try_decide, LeaderStatus};
 pub use pulse::leader::LeaderSchedule;
 pub use pulse::linearizer::Linearizer;
 pub use reputation::{LeaderSwapTable, ReputationScores};
-pub use stake::{StakeAggregator, Threshold};
-pub use fee::{calculate_base_fee, distribute_fee, FeeDistribution, MIN_BASE_FEE_DROP};
-pub use epoch::{advance_epoch, EpochError, EpochOutput,
-                EPOCH_DURATION_SECONDS, UNBONDING_PERIOD_SECONDS,
-                GENESIS_MIN_VALIDATOR_STAKE_DROP};
 pub use rewards::{
-    compute_epoch_inflation, distribute_rewards,
-    RewardOutcome, RewardError,
-    EPOCHS_PER_YEAR, INFLATION_SCHEDULE_BPS,
-};
-pub use cert::{verify_quorum_cert, CertError};
-pub use epoch::{
-    verify_full, verify_epoch_change, EpochChangeProof, ProofError,
-    force_epoch_close, RecoveryError, RecoveryOutput,
+    compute_epoch_inflation, distribute_rewards, RewardError, RewardOutcome, EPOCHS_PER_YEAR,
+    INFLATION_SCHEDULE_BPS,
 };
 pub use slashing::{
-    slash, SlashError,
-    DOUBLE_SIGN_SLASH_BPS, DOWNTIME_SLASH_BPS, SHARE_WITHHOLDING_SLASH_BPS,
-    MAX_FRACTION_BPS, EVIDENCE_MAX_AGE_SECONDS,
+    slash, SlashError, DOUBLE_SIGN_SLASH_BPS, DOWNTIME_SLASH_BPS, EVIDENCE_MAX_AGE_SECONDS,
+    MAX_FRACTION_BPS, SHARE_WITHHOLDING_SLASH_BPS,
 };
+pub use stake::{StakeAggregator, Threshold};

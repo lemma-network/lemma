@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use lemma_core::Address;
-use lemma_storage::{ChainStore, WorldState, db::LemmaDb};
+use lemma_storage::{db::LemmaDb, ChainStore, WorldState};
 
 use crate::error::LemmaCliError;
 
@@ -39,30 +39,30 @@ use crate::error::LemmaCliError;
 /// - [`LemmaCliError::Storage`] — database I/O error.
 /// - [`LemmaCliError::ChainNotInitialised`] — genesis block has never been
 ///   written (the node has not been run yet).
-pub fn query_balance_from_db(
-    data_dir: &Path,
-    address: &Address,
-) -> Result<String, LemmaCliError> {
-    let db    = LemmaDb::open(data_dir)?;
+pub fn query_balance_from_db(data_dir: &Path, address: &Address) -> Result<String, LemmaCliError> {
+    let db = LemmaDb::open(data_dir)?;
     let chain = ChainStore::new(&db);
 
     // Verify the chain is initialised (genesis written). get_balance returns
     // Amount::zero() for unknown accounts — fail fast for uninitialised DBs.
     let tip_block = match chain.tip()? {
-        None => return Err(LemmaCliError::ChainNotInitialised {
-            path: data_dir.to_path_buf(),
-        }),
-        Some((h, _)) => chain.get_block_by_height(h)?
-            .ok_or_else(|| LemmaCliError::ChainNotInitialised {
+        None => {
+            return Err(LemmaCliError::ChainNotInitialised {
                 path: data_dir.to_path_buf(),
-            })?,
+            })
+        }
+        Some((h, _)) => {
+            chain
+                .get_block_by_height(h)?
+                .ok_or_else(|| LemmaCliError::ChainNotInitialised {
+                    path: data_dir.to_path_buf(),
+                })?
+        }
     };
 
     // Resume WorldState from the tip block's state_root so we read the
     // persisted account trie (WorldState::new starts with an empty trie).
     let state_root = tip_block.header.state_root;
-    let balance    = WorldState::with_state_root(db, state_root).get_balance(address)?;
+    let balance = WorldState::with_state_root(db, state_root).get_balance(address)?;
     Ok(balance.to_string())
 }
-
-

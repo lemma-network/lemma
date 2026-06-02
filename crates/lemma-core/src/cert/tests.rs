@@ -2,12 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{
-    address::Address,
-    cert::QuorumCert,
-    hash::Hash,
-    signature::Signature,
-};
+use crate::{address::Address, cert::QuorumCert, hash::Hash, signature::Signature};
 
 fn addr(n: u8) -> Address {
     Address::from_public_key(&[n; 32])
@@ -53,11 +48,13 @@ fn empty_cert_has_zero_signers() {
 
 #[test]
 fn cert_equality_by_fields() {
-    let make = || QuorumCert::new(10, hash(1), {
-        let mut m = BTreeMap::new();
-        m.insert(addr(1), dummy_sig());
-        m
-    });
+    let make = || {
+        QuorumCert::new(10, hash(1), {
+            let mut m = BTreeMap::new();
+            m.insert(addr(1), dummy_sig());
+            m
+        })
+    };
     assert_eq!(make(), make(), "identical certs must be equal");
 }
 

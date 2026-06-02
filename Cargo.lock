@@ -2032,6 +2032,8 @@ name = "lemma-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ark-bls12-381",
+ "ark-ec",
  "bincode",
  "clap",
  "lemma-consensus",
@@ -2041,6 +2043,7 @@ dependencies = [
  "lemma-network",
  "lemma-storage",
  "libp2p",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "tempfile",

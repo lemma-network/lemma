@@ -8,15 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tokio::sync::{Mutex, watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 
-use lemma_core::{
-    address::Address,
-    amount::Amount,
-    block::Block,
-    hash::Hash,
-    header::BlockHeader,
-};
+use lemma_core::{address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader};
 use lemma_mempool::pool::Mempool;
 use lemma_storage::{ChainStore, LemmaDb};
 
@@ -26,7 +20,7 @@ use super::*;
 
 fn open_temp_db() -> (LemmaDb, TempDir) {
     let dir = TempDir::new().expect("TempDir::new must succeed");
-    let db  = LemmaDb::open(dir.path()).expect("LemmaDb::open must succeed");
+    let db = LemmaDb::open(dir.path()).expect("LemmaDb::open must succeed");
     (db, dir)
 }
 
@@ -37,35 +31,37 @@ fn open_temp_db() -> (LemmaDb, TempDir) {
 fn make_genesis_block() -> (Block, Hash) {
     let validators_hash = Hash::from_bytes([0xAA; 32]);
     let header = BlockHeader::new(
-        0,                                  // height
-        1_700_000_000,                      // timestamp
-        Hash::zero(),                       // parent_hash
-        Hash::zero(),                       // transactions_root
-        Hash::zero(),                       // state_root
-        Hash::zero(),                       // receipts_root
-        Address::zero(),                    // proposer
-        0,                                  // epoch
-        0,                                  // dag_round
-        Hash::zero(),                       // dag_anchor
-        validators_hash,                    // validators_hash
-        validators_hash,                    // next_validators_hash
-        30_000_000,                         // gas_limit
-        0,                                  // gas_used
-        Amount::from_drop(1_000_000_000),   // base_fee = 1 Drip
+        0,                                // height
+        1_700_000_000,                    // timestamp
+        Hash::zero(),                     // parent_hash
+        Hash::zero(),                     // transactions_root
+        Hash::zero(),                     // state_root
+        Hash::zero(),                     // receipts_root
+        Address::zero(),                  // proposer
+        0,                                // epoch
+        0,                                // dag_round
+        Hash::zero(),                     // dag_anchor
+        validators_hash,                  // validators_hash
+        validators_hash,                  // next_validators_hash
+        30_000_000,                       // gas_limit
+        0,                                // gas_used
+        Amount::from_drop(1_000_000_000), // base_fee = 1 Drip
         vec![],
     )
     .expect("genesis header must be valid");
 
     let block = Block::new(header, vec![], vec![]).expect("genesis block must be valid");
     let bytes = bincode::serialize(&block).expect("serialize must succeed");
-    let hash  = lemma_crypto::hash_bytes(&bytes);
+    let hash = lemma_crypto::hash_bytes(&bytes);
     (block, hash)
 }
 
 /// Write a genesis block into `db` and return its hash.
 fn seed_genesis(db: &LemmaDb) -> Hash {
     let (block, hash) = make_genesis_block();
-    ChainStore::new(db).put_block(&block, hash).expect("seed genesis must succeed");
+    ChainStore::new(db)
+        .put_block(&block, hash)
+        .expect("seed genesis must succeed");
     hash
 }
 
@@ -77,10 +73,14 @@ fn build_next_block_produces_block_at_parent_height_plus_one() {
     seed_genesis(&db);
     let chain = ChainStore::new(&db);
 
-    let (block, _) = build_next_block(&chain, Address::zero(), 1_700_001_000)
-        .expect("build must succeed");
+    let (block, _) =
+        build_next_block(&chain, Address::zero(), 1_700_001_000).expect("build must succeed");
 
-    assert_eq!(block.height(), 1, "first produced block must be at height 1");
+    assert_eq!(
+        block.height(),
+        1,
+        "first produced block must be at height 1"
+    );
 }
 
 #[test]
@@ -89,8 +89,8 @@ fn build_next_block_chains_parent_hash_to_genesis_hash() {
     let genesis_hash = seed_genesis(&db);
     let chain = ChainStore::new(&db);
 
-    let (block, _) = build_next_block(&chain, Address::zero(), 1_700_001_000)
-        .expect("build must succeed");
+    let (block, _) =
+        build_next_block(&chain, Address::zero(), 1_700_001_000).expect("build must succeed");
 
     assert_eq!(
         block.header.parent_hash, genesis_hash,
@@ -104,10 +104,13 @@ fn build_next_block_produces_empty_block_no_txs_no_receipts_zero_gas() {
     seed_genesis(&db);
     let chain = ChainStore::new(&db);
 
-    let (block, _) = build_next_block(&chain, Address::zero(), 1_700_001_000)
-        .expect("build must succeed");
+    let (block, _) =
+        build_next_block(&chain, Address::zero(), 1_700_001_000).expect("build must succeed");
 
-    assert!(block.is_empty(), "Phase 1 block must contain no transactions");
+    assert!(
+        block.is_empty(),
+        "Phase 1 block must contain no transactions"
+    );
     assert_eq!(block.header.gas_used, 0);
 }
 
@@ -116,12 +119,15 @@ fn build_next_block_inherits_state_root_from_parent() {
     // No VM execution → state_root must be unchanged from genesis.
     let (db, _dir) = open_temp_db();
     seed_genesis(&db);
-    let genesis = ChainStore::new(&db).get_block_by_height(0).unwrap().unwrap();
+    let genesis = ChainStore::new(&db)
+        .get_block_by_height(0)
+        .unwrap()
+        .unwrap();
     let parent_state_root = genesis.header.state_root;
 
     let chain = ChainStore::new(&db);
-    let (block, _) = build_next_block(&chain, Address::zero(), 1_700_001_000)
-        .expect("build must succeed");
+    let (block, _) =
+        build_next_block(&chain, Address::zero(), 1_700_001_000).expect("build must succeed");
 
     assert_eq!(
         block.header.state_root, parent_state_root,
@@ -137,8 +143,8 @@ fn build_next_block_computes_base_fee_from_parent() {
     seed_genesis(&db);
     let chain = ChainStore::new(&db);
 
-    let (block, _) = build_next_block(&chain, Address::zero(), 1_700_001_000)
-        .expect("build must succeed");
+    let (block, _) =
+        build_next_block(&chain, Address::zero(), 1_700_001_000).expect("build must succeed");
 
     // base_fee must be >= MIN_BASE_FEE_DROP (anti-spam floor).
     let min = lemma_consensus::MIN_BASE_FEE_DROP;
@@ -153,7 +159,10 @@ fn build_next_block_computes_base_fee_from_parent() {
 fn build_next_block_clamps_timestamp_to_parent_plus_one() {
     let (db, _dir) = open_temp_db();
     seed_genesis(&db);
-    let genesis = ChainStore::new(&db).get_block_by_height(0).unwrap().unwrap();
+    let genesis = ChainStore::new(&db)
+        .get_block_by_height(0)
+        .unwrap()
+        .unwrap();
     let chain = ChainStore::new(&db);
 
     // Pass a timestamp BEFORE genesis (e.g. 0) — must be clamped.
@@ -220,8 +229,14 @@ fn commit_block_makes_block_retrievable_by_height_and_hash() {
     let (block, hash) = build_next_block(&chain, Address::zero(), 1_700_001_000).unwrap();
     commit_block(&chain, &block, hash).expect("commit must succeed");
 
-    assert!(chain.get_block_by_height(1).unwrap().is_some(), "get by height must find block");
-    assert!(chain.get_block_by_hash(&hash).unwrap().is_some(),  "get by hash must find block");
+    assert!(
+        chain.get_block_by_height(1).unwrap().is_some(),
+        "get by height must find block"
+    );
+    assert!(
+        chain.get_block_by_hash(&hash).unwrap().is_some(),
+        "get by hash must find block"
+    );
 }
 
 // ── Sequential chain continuity ───────────────────────────────────────────────
@@ -238,8 +253,10 @@ fn three_sequential_build_commit_cycles_produce_continuous_chain() {
         let ts = 1_700_000_000 + i;
         let (block, hash) = build_next_block(&chain, Address::zero(), ts).unwrap();
         assert_eq!(block.height(), i);
-        assert_eq!(block.header.parent_hash, prev_hash,
-            "height {i}: parent_hash must link to previous block");
+        assert_eq!(
+            block.header.parent_hash, prev_hash,
+            "height {i}: parent_hash must link to previous block"
+        );
         commit_block(&chain, &block, hash).unwrap();
         prev_hash = hash;
     }
@@ -255,14 +272,16 @@ async fn run_produces_blocks_until_shutdown() {
     seed_genesis(&db);
     let db = Arc::new(db);
 
-    let mempool  = Arc::new(RwLock::new(Mempool::new(64)));
-    let cfg      = ProducerConfig { block_interval_ms: 1 }; // 1 ms → fast test
+    let mempool = Arc::new(RwLock::new(Mempool::new(64)));
+    let cfg = ProducerConfig {
+        block_interval_ms: 1,
+    }; // 1 ms → fast test
     let (tx, rx) = watch::channel(false);
 
-    let db_task    = db.clone();
-    let mp_task    = mempool.clone();
+    let db_task = db.clone();
+    let mp_task = mempool.clone();
     let write_lock = Arc::new(Mutex::new(()));
-    let handle     = tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         run(db_task, mp_task, cfg, Address::zero(), None, write_lock, rx).await
     });
 
@@ -270,7 +289,9 @@ async fn run_produces_blocks_until_shutdown() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let h = ChainStore::new(&db).latest_height().unwrap().unwrap_or(0);
-        if h >= 3 { break; }
+        if h >= 3 {
+            break;
+        }
         assert!(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for height 3 (currently at {h})"
@@ -280,10 +301,16 @@ async fn run_produces_blocks_until_shutdown() {
 
     // Signal shutdown.
     tx.send(true).expect("shutdown send must succeed");
-    handle.await.expect("task must not panic").expect("run must return Ok");
+    handle
+        .await
+        .expect("task must not panic")
+        .expect("run must return Ok");
 
     let final_height = ChainStore::new(&db).latest_height().unwrap().unwrap();
-    assert!(final_height >= 3, "chain must have at least 3 blocks after run");
+    assert!(
+        final_height >= 3,
+        "chain must have at least 3 blocks after run"
+    );
 }
 
 #[tokio::test]
@@ -294,21 +321,26 @@ async fn run_skips_tick_on_build_error_and_continues() {
     // No seed_genesis call — chain is uninitialised.
     let db = Arc::new(db);
 
-    let mempool  = Arc::new(RwLock::new(Mempool::new(64)));
-    let cfg      = ProducerConfig { block_interval_ms: 1 };
+    let mempool = Arc::new(RwLock::new(Mempool::new(64)));
+    let cfg = ProducerConfig {
+        block_interval_ms: 1,
+    };
     let (tx, rx) = watch::channel(false);
 
-    let db_task    = db.clone();
-    let mp_task    = mempool.clone();
+    let db_task = db.clone();
+    let mp_task = mempool.clone();
     let write_lock = Arc::new(Mutex::new(()));
-    let handle     = tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         run(db_task, mp_task, cfg, Address::zero(), None, write_lock, rx).await
     });
 
     // Let it tick a few times (all will warn+skip), then shut down.
     tokio::time::sleep(Duration::from_millis(10)).await;
     tx.send(true).expect("shutdown send must succeed");
-    handle.await.expect("task must not panic").expect("run must return Ok");
+    handle
+        .await
+        .expect("task must not panic")
+        .expect("run must return Ok");
 
     // No blocks produced — tip is None (chain still uninitialised).
     assert!(
@@ -326,16 +358,27 @@ async fn run_emits_committed_blocks_on_block_tx_channel() {
     seed_genesis(&db);
     let db = Arc::new(db);
 
-    let mempool       = Arc::new(RwLock::new(Mempool::new(64)));
-    let cfg           = ProducerConfig { block_interval_ms: 1 };
-    let (tx, rx)      = watch::channel(false);
+    let mempool = Arc::new(RwLock::new(Mempool::new(64)));
+    let cfg = ProducerConfig {
+        block_interval_ms: 1,
+    };
+    let (tx, rx) = watch::channel(false);
     let (block_tx, mut block_rx) = tokio::sync::mpsc::channel(16);
 
-    let db_task    = db.clone();
-    let mp_task    = mempool.clone();
+    let db_task = db.clone();
+    let mp_task = mempool.clone();
     let write_lock = Arc::new(Mutex::new(()));
-    let handle     = tokio::spawn(async move {
-        run(db_task, mp_task, cfg, Address::zero(), Some(block_tx), write_lock, rx).await
+    let handle = tokio::spawn(async move {
+        run(
+            db_task,
+            mp_task,
+            cfg,
+            Address::zero(),
+            Some(block_tx),
+            write_lock,
+            rx,
+        )
+        .await
     });
 
     // Wait until at least 2 blocks are received on the channel.
@@ -348,13 +391,19 @@ async fn run_emits_committed_blocks_on_block_tx_channel() {
         );
         match tokio::time::timeout(Duration::from_millis(10), block_rx.recv()).await {
             Ok(Some(_)) => received += 1,
-            Ok(None)    => break, // sender dropped
-            Err(_)      => {}    // timeout — retry
+            Ok(None) => break, // sender dropped
+            Err(_) => {}       // timeout — retry
         }
     }
 
-    assert!(received >= 2, "must receive at least 2 blocks on block_tx channel");
+    assert!(
+        received >= 2,
+        "must receive at least 2 blocks on block_tx channel"
+    );
 
     tx.send(true).expect("shutdown must succeed");
-    handle.await.expect("task must not panic").expect("run must return Ok");
+    handle
+        .await
+        .expect("task must not panic")
+        .expect("run must return Ok");
 }

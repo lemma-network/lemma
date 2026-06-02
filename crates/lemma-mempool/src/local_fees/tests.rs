@@ -293,7 +293,11 @@ fn tick_applies_ema_decay_formula_correctly() {
         m.record(&contract);
     }
     m.tick();
-    assert_eq!(m.contract_load(&contract), 1, "after first tick: ema should be 1");
+    assert_eq!(
+        m.contract_load(&contract),
+        1,
+        "after first tick: ema should be 1"
+    );
     m.tick();
     assert_eq!(
         m.contract_load(&contract),
@@ -330,7 +334,11 @@ fn tick_without_activity_decays_load_to_zero() {
     for _ in 0..100 {
         m.tick();
     }
-    assert_eq!(m.contract_load(&contract), 0, "EMA must decay to 0 after idle blocks");
+    assert_eq!(
+        m.contract_load(&contract),
+        0,
+        "EMA must decay to 0 after idle blocks"
+    );
 }
 
 #[test]
@@ -384,7 +392,11 @@ fn prune_idle_keeps_contracts_with_nonzero_ema() {
     let contract = addr(1);
     let mut m = market_at_ema(contract, HIGH_DEMAND_THRESHOLD);
     m.prune_idle();
-    assert_eq!(m.tracked_contracts(), 1, "active contract must not be pruned");
+    assert_eq!(
+        m.tracked_contracts(),
+        1,
+        "active contract must not be pruned"
+    );
 }
 
 #[test]
@@ -394,7 +406,11 @@ fn prune_idle_keeps_contracts_with_pending_current_count() {
     let mut m = LocalFeeMarket::new();
     m.record(&addr(1));
     m.prune_idle();
-    assert_eq!(m.tracked_contracts(), 1, "contract with pending count must not be pruned");
+    assert_eq!(
+        m.tracked_contracts(),
+        1,
+        "contract with pending count must not be pruned"
+    );
 }
 
 // ── tracked_contracts ─────────────────────────────────────────────────────────
@@ -415,7 +431,11 @@ fn tracked_contracts_does_not_double_count_repeated_records() {
     for _ in 0..100 {
         m.record(&contract);
     }
-    assert_eq!(m.tracked_contracts(), 1, "many records to same contract = 1 entry");
+    assert_eq!(
+        m.tracked_contracts(),
+        1,
+        "many records to same contract = 1 entry"
+    );
 }
 
 // ── Overflow / edge cases ─────────────────────────────────────────────────────
@@ -438,5 +458,8 @@ fn ema_tick_does_not_panic_on_extreme_current_block_count() {
         m.record(&contract);
     }
     m.tick(); // must not panic
-    assert!(m.contract_load(&contract) > 0, "EMA must reflect the high count");
+    assert!(
+        m.contract_load(&contract) > 0,
+        "EMA must reflect the high count"
+    );
 }

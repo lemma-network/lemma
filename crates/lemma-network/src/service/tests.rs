@@ -6,8 +6,8 @@ use lemma_core::{address::Address, amount::Amount, block::Block, hash::Hash, hea
 use crate::{
     config::NetworkConfig,
     service::{
-        NetworkCommand, NetworkEvent, NetworkHandle, NetworkService,
-        COMMAND_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY,
+        NetworkCommand, NetworkEvent, NetworkHandle, NetworkService, COMMAND_CHANNEL_CAPACITY,
+        EVENT_CHANNEL_CAPACITY,
     },
 };
 
@@ -16,12 +16,24 @@ use crate::{
 /// Minimal valid `Block` for service tests (DRY — AGENTS.md §2.6).
 fn test_block() -> Block {
     let header = BlockHeader::new(
-        0, 1_700_000_000,
-        Hash::zero(), Hash::zero(), Hash::zero(), Hash::zero(),
-        Address::zero(), 0, 0,
-        Hash::zero(), Hash::zero(), Hash::zero(),
-        1_000_000, 0, Amount::from_drop(1_000_000_000), vec![],
-    ).expect("test block header is always valid");
+        0,
+        1_700_000_000,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        1_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
+    )
+    .expect("test block header is always valid");
     Block::new(header, vec![], vec![]).expect("test block is always valid")
 }
 
@@ -31,12 +43,16 @@ fn test_block() -> Block {
 fn command_channel_capacity_is_nonzero() {
     // `const { assert!() }` evaluates at compile time — a change to 0 is a compile
     // error, not just a test failure. Correct tool for usize constant invariants.
-    const { assert!(COMMAND_CHANNEL_CAPACITY > 0); }
+    const {
+        assert!(COMMAND_CHANNEL_CAPACITY > 0);
+    }
 }
 
 #[test]
 fn event_channel_capacity_is_nonzero() {
-    const { assert!(EVENT_CHANNEL_CAPACITY > 0); }
+    const {
+        assert!(EVENT_CHANNEL_CAPACITY > 0);
+    }
 }
 
 // ── NetworkHandle — Clone ─────────────────────────────────────────────────────
@@ -128,7 +144,10 @@ async fn handle_broadcast_block_sends_command() {
 
     // Must not error — the service is alive (not yet dropped).
     let result = handle.broadcast_block(test_block()).await;
-    assert!(result.is_ok(), "broadcast_block must succeed while service is alive");
+    assert!(
+        result.is_ok(),
+        "broadcast_block must succeed while service is alive"
+    );
 }
 
 #[tokio::test]
@@ -162,10 +181,7 @@ async fn service_run_shuts_down_when_all_handles_dropped() {
     drop(handle);
 
     // The service should shut down within a reasonable time.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        service_task,
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), service_task).await;
 
     assert!(
         result.is_ok(),
@@ -185,10 +201,7 @@ async fn service_emits_listening_on_event() {
     let _service_task = tokio::spawn(service.run());
 
     // Wait for a ListeningOn event (should arrive quickly on loopback).
-    let event = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        event_rx.recv(),
-    ).await;
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv()).await;
 
     // Drop handle to shut down the service.
     drop(handle);

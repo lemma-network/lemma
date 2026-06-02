@@ -12,8 +12,8 @@ use crate::{db::LemmaDb, Account};
 
 fn open_db() -> (LemmaDb, tempfile::TempDir) {
     let dir = tempdir().expect("tempdir: OS should always provide a temp directory");
-    let db = LemmaDb::open(dir.path())
-        .expect("LemmaDb::open: should succeed on a fresh temp directory");
+    let db =
+        LemmaDb::open(dir.path()).expect("LemmaDb::open: should succeed on a fresh temp directory");
     (db, dir)
 }
 
@@ -41,7 +41,10 @@ fn account_with_balance(drops: u128) -> Account {
 #[test]
 fn new_world_state_has_no_state_root() {
     let (ws, _dir) = world_state();
-    assert!(ws.state_root().is_none(), "fresh WorldState must have no root");
+    assert!(
+        ws.state_root().is_none(),
+        "fresh WorldState must have no root"
+    );
 }
 
 #[test]
@@ -66,7 +69,9 @@ fn commit_on_empty_state_returns_error() {
 #[test]
 fn get_account_on_absent_address_returns_none() {
     let (ws, _dir) = world_state();
-    let result = ws.get_account(&addr(0x01)).expect("get_account must not error");
+    let result = ws
+        .get_account(&addr(0x01))
+        .expect("get_account must not error");
     assert!(result.is_none(), "absent address must return None");
 }
 
@@ -75,8 +80,11 @@ fn put_then_get_account_returns_same_account() {
     let (mut ws, _dir) = world_state();
     let address = addr(0x01);
     let account = account_with_balance(1_000_000);
-    ws.put_account(&address, &account).expect("put_account must succeed");
-    let got = ws.get_account(&address).expect("get_account must not error");
+    ws.put_account(&address, &account)
+        .expect("put_account must succeed");
+    let got = ws
+        .get_account(&address)
+        .expect("get_account must not error");
     assert_eq!(got, Some(account));
 }
 
@@ -86,7 +94,10 @@ fn put_account_updates_state_root() {
     assert!(ws.state_root().is_none());
     ws.put_account(&addr(0x01), &account_with_balance(100))
         .expect("put_account must succeed");
-    assert!(ws.state_root().is_some(), "state_root must be set after put_account");
+    assert!(
+        ws.state_root().is_some(),
+        "state_root must be set after put_account"
+    );
 }
 
 #[test]
@@ -96,7 +107,8 @@ fn put_account_twice_overwrites_value() {
     ws.put_account(&address, &account_with_balance(100))
         .expect("first put must succeed");
     let updated = account_with_balance(999);
-    ws.put_account(&address, &updated).expect("second put must succeed");
+    ws.put_account(&address, &updated)
+        .expect("second put must succeed");
     let got = ws.get_account(&address).expect("get must succeed");
     assert_eq!(got, Some(updated));
 }
@@ -122,7 +134,9 @@ fn multiple_accounts_all_retrievable() {
 fn get_account_on_empty_state_returns_none() {
     // Even with no state root, get_account must return None gracefully.
     let (ws, _dir) = world_state();
-    let result = ws.get_account(&addr(0xFF)).expect("get_account must not error on empty state");
+    let result = ws
+        .get_account(&addr(0xFF))
+        .expect("get_account must not error on empty state");
     assert!(result.is_none());
 }
 
@@ -131,7 +145,9 @@ fn get_account_on_empty_state_returns_none() {
 #[test]
 fn get_balance_on_absent_address_returns_zero() {
     let (ws, _dir) = world_state();
-    let balance = ws.get_balance(&addr(0x01)).expect("get_balance must not error");
+    let balance = ws
+        .get_balance(&addr(0x01))
+        .expect("get_balance must not error");
     assert_eq!(balance, Amount::zero());
 }
 
@@ -158,7 +174,8 @@ fn get_nonce_returns_account_nonce() {
     let address = addr(0x01);
     let mut account = account_with_balance(0);
     account.nonce = 7;
-    ws.put_account(&address, &account).expect("put must succeed");
+    ws.put_account(&address, &account)
+        .expect("put must succeed");
     assert_eq!(ws.get_nonce(&address).expect("get_nonce must succeed"), 7);
 }
 
@@ -166,7 +183,8 @@ fn get_nonce_returns_account_nonce() {
 fn increment_nonce_on_absent_creates_account_with_nonce_one() {
     let (mut ws, _dir) = world_state();
     let address = addr(0x01);
-    ws.increment_nonce(&address).expect("increment_nonce must succeed");
+    ws.increment_nonce(&address)
+        .expect("increment_nonce must succeed");
     let account = ws
         .get_account(&address)
         .expect("get_account must succeed")
@@ -180,8 +198,10 @@ fn increment_nonce_increments_existing_account() {
     let address = addr(0x01);
     let mut account = account_with_balance(500);
     account.nonce = 4;
-    ws.put_account(&address, &account).expect("put must succeed");
-    ws.increment_nonce(&address).expect("increment must succeed");
+    ws.put_account(&address, &account)
+        .expect("put must succeed");
+    ws.increment_nonce(&address)
+        .expect("increment must succeed");
     let got = ws.get_account(&address).expect("get must succeed").unwrap();
     assert_eq!(got.nonce, 5);
     // Balance must be preserved.
@@ -255,7 +275,9 @@ fn delete_storage_removes_slot() {
         .expect("put must succeed");
     ws.delete_storage(&addr(0x01), &slot(0x01))
         .expect("delete must succeed");
-    let got = ws.get_storage(&addr(0x01), &slot(0x01)).expect("get must succeed");
+    let got = ws
+        .get_storage(&addr(0x01), &slot(0x01))
+        .expect("get must succeed");
     assert!(got.is_none(), "slot must be absent after delete");
 }
 
@@ -307,7 +329,10 @@ fn state_root_is_deterministic_for_same_accounts() {
         .expect("ws2 put addr2 must succeed");
     let root2 = ws2.state_root().expect("ws2 must have a root");
 
-    assert_eq!(root1, root2, "identical accounts must produce the same state root");
+    assert_eq!(
+        root1, root2,
+        "identical accounts must produce the same state root"
+    );
 }
 
 // ── Proof ─────────────────────────────────────────────────────────────────────
@@ -330,7 +355,10 @@ fn generate_account_proof_inclusion_verifies() {
     let proof = ws
         .generate_account_proof(&addr(0x01))
         .expect("proof generation must succeed");
-    assert!(proof.value.is_some(), "existing account must produce inclusion proof");
+    assert!(
+        proof.value.is_some(),
+        "existing account must produce inclusion proof"
+    );
     proof.verify(root).expect("inclusion proof must verify");
 }
 
@@ -344,7 +372,10 @@ fn generate_account_proof_non_inclusion_verifies() {
     let proof = ws
         .generate_account_proof(&addr(0x02))
         .expect("proof generation must succeed");
-    assert!(proof.value.is_none(), "absent account must produce non-inclusion proof");
+    assert!(
+        proof.value.is_none(),
+        "absent account must produce non-inclusion proof"
+    );
     proof.verify(root).expect("non-inclusion proof must verify");
 }
 
@@ -365,7 +396,8 @@ fn contract_account_roundtrip() {
     let (mut ws, _dir) = world_state();
     let address = addr(0xCC);
     let contract = Account::new_contract(Hash::from_bytes([0xDE; 32]));
-    ws.put_account(&address, &contract).expect("put contract must succeed");
+    ws.put_account(&address, &contract)
+        .expect("put contract must succeed");
     let got = ws.get_account(&address).expect("get must succeed").unwrap();
     assert!(got.is_contract(), "retrieved account must be a contract");
     assert_eq!(got.code_hash, contract.code_hash);
@@ -381,7 +413,8 @@ fn increment_nonce_at_u64_max_returns_error() {
     let address = addr(0x01);
     let mut account = account_with_balance(0);
     account.nonce = u64::MAX;
-    ws.put_account(&address, &account).expect("put must succeed");
+    ws.put_account(&address, &account)
+        .expect("put must succeed");
     let result = ws.increment_nonce(&address);
     assert!(
         result.is_err(),
@@ -403,16 +436,22 @@ fn with_state_root_get_account_returns_persisted_account() {
     let root = {
         let db = LemmaDb::open(dir.path()).expect("first open must succeed");
         let mut ws = WorldState::new(db);
-        ws.put_account(&address, &account).expect("put must succeed");
+        ws.put_account(&address, &account)
+            .expect("put must succeed");
         ws.commit().expect("commit must succeed")
         // ws (and its LemmaDb) drops here — RocksDB lock released
     };
     // Reopen the same path and resume from the captured root.
-    let db2 = LemmaDb::open(dir.path())
-        .expect("reopen after first close must succeed");
+    let db2 = LemmaDb::open(dir.path()).expect("reopen after first close must succeed");
     let ws2 = WorldState::with_state_root(db2, root);
-    let got = ws2.get_account(&address).expect("get must succeed on resumed state");
-    assert_eq!(got, Some(account), "resumed WorldState must return the persisted account");
+    let got = ws2
+        .get_account(&address)
+        .expect("get must succeed on resumed state");
+    assert_eq!(
+        got,
+        Some(account),
+        "resumed WorldState must return the persisted account"
+    );
 }
 
 // ── TEST-3: put_storage with empty value ─────────────────────────────────────
@@ -423,10 +462,15 @@ fn put_storage_empty_value_is_distinct_from_absent() {
     let (mut ws, _dir) = world_state();
     ws.put_storage(&addr(0x01), &slot(0x01), b"")
         .expect("put with empty value must succeed");
-    let got = ws.get_storage(&addr(0x01), &slot(0x01))
+    let got = ws
+        .get_storage(&addr(0x01), &slot(0x01))
         .expect("get must succeed");
     // Empty slice is present, not None — distinct from a missing slot.
-    assert_eq!(got, Some(vec![]), "empty value must be stored, not treated as absent");
+    assert_eq!(
+        got,
+        Some(vec![]),
+        "empty value must be stored, not treated as absent"
+    );
 }
 
 // ── TEST-4: delete then put storage (re-insert after delete) ─────────────────
@@ -440,9 +484,14 @@ fn delete_then_put_storage_restores_slot() {
         .expect("delete must succeed");
     ws.put_storage(&addr(0x01), &slot(0x01), b"restored")
         .expect("re-insert after delete must succeed");
-    let got = ws.get_storage(&addr(0x01), &slot(0x01))
+    let got = ws
+        .get_storage(&addr(0x01), &slot(0x01))
         .expect("get after re-insert must succeed");
-    assert_eq!(got, Some(b"restored".to_vec()), "re-inserted value must be readable");
+    assert_eq!(
+        got,
+        Some(b"restored".to_vec()),
+        "re-inserted value must be readable"
+    );
 }
 
 // ── Edge cases (continued) ───────────────────────────────────────────────────
@@ -452,14 +501,18 @@ fn storage_key_collision_different_addresses_same_slot() {
     // Prove the composite key design isolates (addr1, slotX) from (addr2, slotX).
     let (mut ws, _dir) = world_state();
     let s = slot(0x42);
-    ws.put_storage(&addr(0x11), &s, b"val_11").expect("put addr 0x11 must succeed");
-    ws.put_storage(&addr(0x22), &s, b"val_22").expect("put addr 0x22 must succeed");
+    ws.put_storage(&addr(0x11), &s, b"val_11")
+        .expect("put addr 0x11 must succeed");
+    ws.put_storage(&addr(0x22), &s, b"val_22")
+        .expect("put addr 0x22 must succeed");
     assert_eq!(
-        ws.get_storage(&addr(0x11), &s).expect("get addr 0x11 must succeed"),
+        ws.get_storage(&addr(0x11), &s)
+            .expect("get addr 0x11 must succeed"),
         Some(b"val_11".to_vec()),
     );
     assert_eq!(
-        ws.get_storage(&addr(0x22), &s).expect("get addr 0x22 must succeed"),
+        ws.get_storage(&addr(0x22), &s)
+            .expect("get addr 0x22 must succeed"),
         Some(b"val_22".to_vec()),
     );
 }

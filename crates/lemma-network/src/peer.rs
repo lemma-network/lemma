@@ -41,10 +41,7 @@
 //! `Instant` (wall-clock time). Neither `HashMap` iteration order nor timestamps
 //! influence block ordering or state transitions.
 
-use std::{
-    collections::HashMap,
-    time::Instant,
-};
+use std::{collections::HashMap, time::Instant};
 
 use libp2p::{Multiaddr, PeerId};
 
@@ -288,7 +285,9 @@ impl PeerTable {
     /// nothing. Existing score, addresses, and state are preserved. This ensures
     /// that re-discovery via mDNS or identify does not reset a peer's score.
     pub fn add_peer(&mut self, peer_id: PeerId) {
-        self.peers.entry(peer_id).or_insert_with(|| PeerInfo::new(peer_id));
+        self.peers
+            .entry(peer_id)
+            .or_insert_with(|| PeerInfo::new(peer_id));
     }
 
     /// Remove a peer from the table and return its info, or `None` if unknown.

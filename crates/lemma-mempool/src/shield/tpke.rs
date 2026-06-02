@@ -40,9 +40,7 @@ use crate::shield::{
     ciphertext::{Ciphertext, ShieldAad},
     committee::ShieldCommittee,
     domain::ShieldDomain,
-    params::{
-        DST_H2G2, HKDF_INFO_AEAD_KEY, HKDF_INFO_NONCE, HKDF_SALT, MAX_SHIELD_PAYLOAD_BYTES,
-    },
+    params::{DST_H2G2, HKDF_INFO_AEAD_KEY, HKDF_INFO_NONCE, HKDF_SALT, MAX_SHIELD_PAYLOAD_BYTES},
     ShieldError,
 };
 
@@ -154,11 +152,17 @@ pub fn encrypt(y: &G1Affine, aad: ShieldAad, msg: &[u8]) -> Result<Ciphertext, S
     let (key_bytes, nonce_bytes) = derive_key_nonce(&s.0)?;
     let aad_bytes = aad.to_bytes();
 
-    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
-        .map_err(|_| ShieldError::AeadFailure)?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&key_bytes).map_err(|_| ShieldError::AeadFailure)?;
     let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
     let payload = cipher
-        .encrypt(nonce, Payload { msg, aad: &aad_bytes })
+        .encrypt(
+            nonce,
+            Payload {
+                msg,
+                aad: &aad_bytes,
+            },
+        )
         .map_err(|_| ShieldError::AeadFailure)?;
 
     Ok(Ciphertext { u, w, aad, payload })
@@ -366,7 +370,10 @@ pub fn combine(
     let contributing_weight: u64 = shares.iter().map(|s| s.z_shares.len() as u64).sum();
     let need = committee.params().decrypt_threshold(); // = p+1; single source of truth (§4.2)
     if contributing_weight < need {
-        return Err(ShieldError::InsufficientShares { have: contributing_weight, need });
+        return Err(ShieldError::InsufficientShares {
+            have: contributing_weight,
+            need,
+        });
     }
 
     // ── 2. Collect + sort contributing share-ID set Ω = ⋃_i Ω_i ─────────────
@@ -410,12 +417,18 @@ pub fn combine(
     let (key_bytes, nonce_bytes) = derive_key_nonce(&s.0)?;
     let aad_bytes = ct.aad.to_bytes();
 
-    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
-        .map_err(|_| ShieldError::AeadFailure)?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&key_bytes).map_err(|_| ShieldError::AeadFailure)?;
     let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
 
     cipher
-        .decrypt(nonce, Payload { msg: &ct.payload, aad: &aad_bytes })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &ct.payload,
+                aad: &aad_bytes,
+            },
+        )
         .map_err(|_| ShieldError::AeadFailure)
 }
 

@@ -59,9 +59,9 @@ pub use error::{
 
 pub use block::Block;
 pub use cert::QuorumCert;
+pub use epoch::Epoch;
 pub use genesis::GenesisConfig;
 pub use header::BlockHeader;
 pub use transaction::{Log, Transaction, TransactionReceipt, TxType};
 pub use validator::{ConsensusKey, Stake, UnbondingEntry, Validator, ValidatorStatus, VotingPower};
 pub use validator_set::{Member, ValidatorSet};
-pub use epoch::Epoch;

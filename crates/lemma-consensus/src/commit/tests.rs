@@ -2,10 +2,7 @@
 
 use lemma_core::{address::Address, hash::Hash};
 
-use crate::{
-    commit::Commit,
-    dag::block::DagBlockRef,
-};
+use crate::{commit::Commit, dag::block::DagBlockRef};
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -102,8 +99,11 @@ fn commit_chain_links_via_previous_digest() {
         leader: lref(6, 2),
         blocks: vec![lref(4, 1), lref(5, 2)],
     };
-    assert_eq!(commit_b.previous_digest, commit_a.digest(),
-        "commit B must reference commit A's digest");
+    assert_eq!(
+        commit_b.previous_digest,
+        commit_a.digest(),
+        "commit B must reference commit A's digest"
+    );
 }
 
 #[test]
@@ -153,6 +153,9 @@ fn commit_serde_preserves_digest() {
     let d_before = c.digest();
     let json = serde_json::to_string(&c).unwrap();
     let c2: Commit = serde_json::from_str(&json).unwrap();
-    assert_eq!(d_before, c2.digest(),
-        "serde roundtrip must preserve digest");
+    assert_eq!(
+        d_before,
+        c2.digest(),
+        "serde roundtrip must preserve digest"
+    );
 }

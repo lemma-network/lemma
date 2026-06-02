@@ -65,12 +65,13 @@ impl Dag {
                 // The block is not inserted, but slashing evidence must be emitted.
                 if let Some(existing_ref) = existing {
                     if existing_ref.digest != block.digest {
-                        self.pending_equivocations.push(InsertOutcome::Equivocation {
-                            author: block.author,
-                            round: block.round,
-                            first: existing_ref.digest,
-                            second: block.digest,
-                        });
+                        self.pending_equivocations
+                            .push(InsertOutcome::Equivocation {
+                                author: block.author,
+                                round: block.round,
+                                first: existing_ref.digest,
+                                second: block.digest,
+                            });
                     }
                 }
             }
@@ -129,6 +130,7 @@ impl Dag {
         }
         // Prune waiting_for keys below the GC frontier (ancestors that can never
         // arrive) and empty sets.
-        self.waiting_for.retain(|k, waiters| k.round > gc && !waiters.is_empty());
+        self.waiting_for
+            .retain(|k, waiters| k.round > gc && !waiters.is_empty());
     }
 }

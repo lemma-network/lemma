@@ -1,5 +1,5 @@
-use libp2p::PeerId;
 use lemma_core::Hash;
+use libp2p::PeerId;
 
 use super::*;
 
@@ -13,8 +13,8 @@ use super::*;
 fn test_peer() -> PeerId {
     use libp2p::identity::{ed25519, Keypair};
     let mut seed = [0u8; 32];
-    let secret = ed25519::SecretKey::try_from_bytes(&mut seed)
-        .expect("fixed 32-byte seed is always valid");
+    let secret =
+        ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed 32-byte seed is always valid");
     let kp = Keypair::from(ed25519::Keypair::from(secret));
     kp.public().to_peer_id()
 }
@@ -30,7 +30,10 @@ fn test_hash() -> Hash {
 
 #[test]
 fn invalid_block_display_contains_height() {
-    let err = NetworkError::InvalidBlock { peer: test_peer(), height: 42 };
+    let err = NetworkError::InvalidBlock {
+        peer: test_peer(),
+        height: 42,
+    };
     let msg = err.to_string();
     assert!(msg.contains("42"), "expected height in message, got: {msg}");
 }
@@ -51,7 +54,10 @@ fn invalid_block_display_contains_peer() {
 fn invalid_quorum_cert_display_contains_height() {
     let err = NetworkError::InvalidQuorumCert { height: 100 };
     let msg = err.to_string();
-    assert!(msg.contains("100"), "expected height in message, got: {msg}");
+    assert!(
+        msg.contains("100"),
+        "expected height in message, got: {msg}"
+    );
 }
 
 #[test]
@@ -68,7 +74,10 @@ fn invalid_state_chunk_display_contains_root_hex() {
 
 #[test]
 fn response_too_large_display_contains_got_and_max() {
-    let err = NetworkError::ResponseTooLarge { got: 2048, max: 1024 };
+    let err = NetworkError::ResponseTooLarge {
+        got: 2048,
+        max: 1024,
+    };
     let msg = err.to_string();
     assert!(msg.contains("2048"), "expected got in message, got: {msg}");
     assert!(msg.contains("1024"), "expected max in message, got: {msg}");
@@ -76,7 +85,10 @@ fn response_too_large_display_contains_got_and_max() {
 
 #[test]
 fn range_too_wide_display_contains_got_and_max() {
-    let err = NetworkError::RangeTooWide { got: 1000, max: 500 };
+    let err = NetworkError::RangeTooWide {
+        got: 1000,
+        max: 500,
+    };
     let msg = err.to_string();
     assert!(msg.contains("1000"), "expected got in message, got: {msg}");
     assert!(msg.contains("500"), "expected max in message, got: {msg}");
@@ -86,7 +98,10 @@ fn range_too_wide_display_contains_got_and_max() {
 fn expired_display_contains_height() {
     let err = NetworkError::Expired { height: 999 };
     let msg = err.to_string();
-    assert!(msg.contains("999"), "expected height in message, got: {msg}");
+    assert!(
+        msg.contains("999"),
+        "expected height in message, got: {msg}"
+    );
 }
 
 #[test]
@@ -120,7 +135,9 @@ fn transport_display_contains_inner_message() {
 
 #[test]
 fn subscribe_display_contains_topic() {
-    let err = NetworkError::Subscribe { topic: "lemma/blocks/1".to_string() };
+    let err = NetworkError::Subscribe {
+        topic: "lemma/blocks/1".to_string(),
+    };
     let msg = err.to_string();
     assert!(
         msg.contains("lemma/blocks/1"),
@@ -135,7 +152,10 @@ fn publish_display_contains_topic_and_reason() {
         reason: "no peers in mesh".to_string(),
     };
     let msg = err.to_string();
-    assert!(msg.contains("lemma/tx/1"), "expected topic in message, got: {msg}");
+    assert!(
+        msg.contains("lemma/tx/1"),
+        "expected topic in message, got: {msg}"
+    );
     assert!(
         msg.contains("no peers in mesh"),
         "expected reason in message, got: {msg}"
@@ -168,18 +188,53 @@ fn all_variants_debug_output_contains_variant_name() {
     // Verifies Debug output is identifiable per-variant — useful for log readability.
     let peer = test_peer();
     let cases: &[(&str, &dyn std::fmt::Debug)] = &[
-        ("InvalidBlock",      &NetworkError::InvalidBlock { peer, height: 0 }),
-        ("InvalidQuorumCert", &NetworkError::InvalidQuorumCert { height: 0 }),
-        ("InvalidStateChunk", &NetworkError::InvalidStateChunk { root: test_hash() }),
-        ("ResponseTooLarge",  &NetworkError::ResponseTooLarge { got: 1, max: 0 }),
-        ("RangeTooWide",      &NetworkError::RangeTooWide { got: 1, max: 0 }),
-        ("Expired",           &NetworkError::Expired { height: 0 }),
-        ("Equivocation",      &NetworkError::Equivocation { height: 0 }),
-        ("Timeout",           &NetworkError::Timeout { peer: test_peer() }),
-        ("Transport",         &NetworkError::transport(std::io::Error::other("t"))),
-        ("Subscribe",         &NetworkError::Subscribe { topic: "t".to_string() }),
-        ("Publish",           &NetworkError::Publish { topic: "t".to_string(), reason: "r".to_string() }),
-        ("InvalidMessage",    &NetworkError::InvalidMessage { peer: test_peer(), reason: "r".to_string() }),
+        (
+            "InvalidBlock",
+            &NetworkError::InvalidBlock { peer, height: 0 },
+        ),
+        (
+            "InvalidQuorumCert",
+            &NetworkError::InvalidQuorumCert { height: 0 },
+        ),
+        (
+            "InvalidStateChunk",
+            &NetworkError::InvalidStateChunk { root: test_hash() },
+        ),
+        (
+            "ResponseTooLarge",
+            &NetworkError::ResponseTooLarge { got: 1, max: 0 },
+        ),
+        (
+            "RangeTooWide",
+            &NetworkError::RangeTooWide { got: 1, max: 0 },
+        ),
+        ("Expired", &NetworkError::Expired { height: 0 }),
+        ("Equivocation", &NetworkError::Equivocation { height: 0 }),
+        ("Timeout", &NetworkError::Timeout { peer: test_peer() }),
+        (
+            "Transport",
+            &NetworkError::transport(std::io::Error::other("t")),
+        ),
+        (
+            "Subscribe",
+            &NetworkError::Subscribe {
+                topic: "t".to_string(),
+            },
+        ),
+        (
+            "Publish",
+            &NetworkError::Publish {
+                topic: "t".to_string(),
+                reason: "r".to_string(),
+            },
+        ),
+        (
+            "InvalidMessage",
+            &NetworkError::InvalidMessage {
+                peer: test_peer(),
+                reason: "r".to_string(),
+            },
+        ),
     ];
     for (name, err) in cases {
         let debug_str = format!("{err:?}");
@@ -195,7 +250,10 @@ fn all_variants_debug_output_contains_variant_name() {
 #[test]
 fn equivocation_is_attack_signal() {
     let err = NetworkError::Equivocation { height: 1 };
-    assert!(err.is_attack_signal(), "Equivocation must be classified as attack signal");
+    assert!(
+        err.is_attack_signal(),
+        "Equivocation must be classified as attack signal"
+    );
 }
 
 #[test]
@@ -210,9 +268,17 @@ fn non_equivocation_errors_are_not_attack_signals() {
         &|| NetworkError::Expired { height: 0 },
         &|| NetworkError::Timeout { peer: test_peer() },
         &|| NetworkError::transport(std::io::Error::other("t")),
-        &|| NetworkError::Subscribe { topic: "t".to_string() },
-        &|| NetworkError::Publish { topic: "t".to_string(), reason: "r".to_string() },
-        &|| NetworkError::InvalidMessage { peer: test_peer(), reason: "r".to_string() },
+        &|| NetworkError::Subscribe {
+            topic: "t".to_string(),
+        },
+        &|| NetworkError::Publish {
+            topic: "t".to_string(),
+            reason: "r".to_string(),
+        },
+        &|| NetworkError::InvalidMessage {
+            peer: test_peer(),
+            reason: "r".to_string(),
+        },
     ];
     for make_err in non_attack {
         let err = make_err();
@@ -228,7 +294,10 @@ fn non_equivocation_errors_are_not_attack_signals() {
 
 #[test]
 fn invalid_block_is_peer_misbehaviour() {
-    let err = NetworkError::InvalidBlock { peer: test_peer(), height: 0 };
+    let err = NetworkError::InvalidBlock {
+        peer: test_peer(),
+        height: 0,
+    };
     assert!(err.is_peer_misbehaviour());
 }
 
@@ -252,7 +321,10 @@ fn equivocation_is_peer_misbehaviour() {
 
 #[test]
 fn invalid_message_is_peer_misbehaviour() {
-    let err = NetworkError::InvalidMessage { peer: test_peer(), reason: "r".to_string() };
+    let err = NetworkError::InvalidMessage {
+        peer: test_peer(),
+        reason: "r".to_string(),
+    };
     assert!(err.is_peer_misbehaviour());
 }
 
@@ -272,14 +344,19 @@ fn transport_is_not_peer_misbehaviour() {
 #[test]
 fn subscribe_is_not_peer_misbehaviour() {
     // Subscribe failure is a local configuration error, not peer misbehaviour.
-    let err = NetworkError::Subscribe { topic: "t".to_string() };
+    let err = NetworkError::Subscribe {
+        topic: "t".to_string(),
+    };
     assert!(!err.is_peer_misbehaviour());
 }
 
 #[test]
 fn publish_is_not_peer_misbehaviour() {
     // Publish failure may indicate no mesh peers — not deliberate misbehaviour.
-    let err = NetworkError::Publish { topic: "t".to_string(), reason: "r".to_string() };
+    let err = NetworkError::Publish {
+        topic: "t".to_string(),
+        reason: "r".to_string(),
+    };
     assert!(!err.is_peer_misbehaviour());
 }
 
@@ -306,7 +383,10 @@ fn range_too_wide_is_bounds_violation() {
 
 #[test]
 fn invalid_block_is_not_bounds_violation() {
-    let err = NetworkError::InvalidBlock { peer: test_peer(), height: 0 };
+    let err = NetworkError::InvalidBlock {
+        peer: test_peer(),
+        height: 0,
+    };
     assert!(!err.is_bounds_violation());
 }
 
@@ -346,7 +426,10 @@ fn transport_constructor_preserves_source_chain() {
     let io_err = std::io::Error::other("root cause");
     let net_err = NetworkError::transport(io_err);
     // Source chain must be preserved for structured logging / anyhow contexts.
-    assert!(net_err.source().is_some(), "Transport must preserve error source chain");
+    assert!(
+        net_err.source().is_some(),
+        "Transport must preserve error source chain"
+    );
 }
 
 // ── Error propagation with ? operator ────────────────────────────────────────
@@ -364,7 +447,13 @@ fn range_too_wide_propagates_via_question_mark() {
     assert!(validate_range(1000, 500).is_err());
 
     let err = validate_range(1000, 500).unwrap_err();
-    assert!(matches!(err, NetworkError::RangeTooWide { got: 1000, max: 500 }));
+    assert!(matches!(
+        err,
+        NetworkError::RangeTooWide {
+            got: 1000,
+            max: 500
+        }
+    ));
 }
 
 #[test]

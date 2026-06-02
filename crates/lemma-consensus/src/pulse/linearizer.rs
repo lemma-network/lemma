@@ -130,8 +130,10 @@ impl Linearizer {
                 // breaking the gapless-prefix invariant — and not a misleading
                 // ByzantineInvariantBreach — this is an internal invariant, not a
                 // detected equivocation; CodeReviewer W3 refinement).
-                debug_assert!(false,
-                    "decided leader block {leader_ref:?} not in DAG — invariant violated");
+                debug_assert!(
+                    false,
+                    "decided leader block {leader_ref:?} not in DAG — invariant violated"
+                );
                 return Err(ConsensusError::DecidedLeaderMissing {
                     round: leader_ref.round,
                     author: leader_ref.author,
@@ -142,12 +144,7 @@ impl Linearizer {
             let blocks = linearize_sub_dag(&leader_block.reference(), dag, &mut self.committed);
 
             // 2. Deterministic commit timestamp (spec §5.1).
-            let timestamp_ms = commit_timestamp(
-                &leader_block,
-                self.last_timestamp_ms,
-                dag,
-                vset,
-            )?;
+            let timestamp_ms = commit_timestamp(&leader_block, self.last_timestamp_ms, dag, vset)?;
 
             // 3. Build Commit record.
             let commit = Commit {
@@ -341,12 +338,10 @@ fn stake_weighted_median(
     // an aggregate sum with no single offending author — an internal invariant
     // violation if it occurs (the validator set's total_power is already bounded).
     let sentinel = lemma_core::address::Address::from_public_key(&[0u8; 32]);
-    let total = samples
-        .iter()
-        .try_fold(0u128, |acc, (stake, _)| {
-            acc.checked_add(*stake)
-                .ok_or(ConsensusError::StakeOverflow { author: sentinel })
-        })?;
+    let total = samples.iter().try_fold(0u128, |acc, (stake, _)| {
+        acc.checked_add(*stake)
+            .ok_or(ConsensusError::StakeOverflow { author: sentinel })
+    })?;
 
     // Sort by timestamp ASC — tie-break by timestamp value (total order on u64).
     let mut sorted = samples.to_vec();

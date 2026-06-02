@@ -11,8 +11,7 @@
 use lemma_core::transaction::TxType;
 
 use crate::circuit_breaker::{
-    is_admitted, NetworkTier,
-    BUSY_THRESHOLD_PCT, CRITICAL_THRESHOLD_PCT, EMERGENCY_THRESHOLD_PCT,
+    is_admitted, NetworkTier, BUSY_THRESHOLD_PCT, CRITICAL_THRESHOLD_PCT, EMERGENCY_THRESHOLD_PCT,
 };
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
@@ -45,35 +44,53 @@ fn from_load_zero_pending_is_normal() {
 
 #[test]
 fn from_load_69pct_is_normal() {
-    assert_eq!(NetworkTier::from_load(pending_at(69), CAPACITY), NetworkTier::Normal);
+    assert_eq!(
+        NetworkTier::from_load(pending_at(69), CAPACITY),
+        NetworkTier::Normal
+    );
 }
 
 #[test]
 fn from_load_at_busy_threshold_is_busy() {
     // 70% → Busy (load_pct == BUSY_THRESHOLD_PCT)
-    assert_eq!(NetworkTier::from_load(pending_at(70), CAPACITY), NetworkTier::Busy);
+    assert_eq!(
+        NetworkTier::from_load(pending_at(70), CAPACITY),
+        NetworkTier::Busy
+    );
 }
 
 #[test]
 fn from_load_89pct_is_busy() {
-    assert_eq!(NetworkTier::from_load(pending_at(89), CAPACITY), NetworkTier::Busy);
+    assert_eq!(
+        NetworkTier::from_load(pending_at(89), CAPACITY),
+        NetworkTier::Busy
+    );
 }
 
 #[test]
 fn from_load_at_critical_threshold_is_critical() {
     // 90% → Critical (load_pct == CRITICAL_THRESHOLD_PCT)
-    assert_eq!(NetworkTier::from_load(pending_at(90), CAPACITY), NetworkTier::Critical);
+    assert_eq!(
+        NetworkTier::from_load(pending_at(90), CAPACITY),
+        NetworkTier::Critical
+    );
 }
 
 #[test]
 fn from_load_99pct_is_critical() {
-    assert_eq!(NetworkTier::from_load(pending_at(99), CAPACITY), NetworkTier::Critical);
+    assert_eq!(
+        NetworkTier::from_load(pending_at(99), CAPACITY),
+        NetworkTier::Critical
+    );
 }
 
 #[test]
 fn from_load_at_emergency_threshold_is_emergency() {
     // 100% → Emergency (load_pct == EMERGENCY_THRESHOLD_PCT)
-    assert_eq!(NetworkTier::from_load(CAPACITY, CAPACITY), NetworkTier::Emergency);
+    assert_eq!(
+        NetworkTier::from_load(CAPACITY, CAPACITY),
+        NetworkTier::Emergency
+    );
 }
 
 #[test]
@@ -104,7 +121,10 @@ fn from_load_nonzero_pending_zero_capacity_is_emergency() {
 fn busy_threshold_constant_matches_from_load_behavior() {
     let just_below = pending_at(BUSY_THRESHOLD_PCT - 1);
     let at = pending_at(BUSY_THRESHOLD_PCT);
-    assert_eq!(NetworkTier::from_load(just_below, CAPACITY), NetworkTier::Normal);
+    assert_eq!(
+        NetworkTier::from_load(just_below, CAPACITY),
+        NetworkTier::Normal
+    );
     assert_eq!(NetworkTier::from_load(at, CAPACITY), NetworkTier::Busy);
 }
 
@@ -112,7 +132,10 @@ fn busy_threshold_constant_matches_from_load_behavior() {
 fn critical_threshold_constant_matches_from_load_behavior() {
     let just_below = pending_at(CRITICAL_THRESHOLD_PCT - 1);
     let at = pending_at(CRITICAL_THRESHOLD_PCT);
-    assert_eq!(NetworkTier::from_load(just_below, CAPACITY), NetworkTier::Busy);
+    assert_eq!(
+        NetworkTier::from_load(just_below, CAPACITY),
+        NetworkTier::Busy
+    );
     assert_eq!(NetworkTier::from_load(at, CAPACITY), NetworkTier::Critical);
 }
 
@@ -120,7 +143,10 @@ fn critical_threshold_constant_matches_from_load_behavior() {
 fn emergency_threshold_constant_matches_from_load_behavior() {
     let just_below = pending_at(EMERGENCY_THRESHOLD_PCT - 1);
     let at = pending_at(EMERGENCY_THRESHOLD_PCT);
-    assert_eq!(NetworkTier::from_load(just_below, CAPACITY), NetworkTier::Critical);
+    assert_eq!(
+        NetworkTier::from_load(just_below, CAPACITY),
+        NetworkTier::Critical
+    );
     assert_eq!(NetworkTier::from_load(at, CAPACITY), NetworkTier::Emergency);
 }
 
@@ -293,7 +319,11 @@ fn is_admitted_transfer_at_50pct_load_is_true() {
 #[test]
 fn is_admitted_contract_deploy_at_95pct_load_is_false() {
     // 95% → Critical tier → ContractDeploy rejected.
-    assert!(!is_admitted(TxType::ContractDeploy, pending_at(95), CAPACITY));
+    assert!(!is_admitted(
+        TxType::ContractDeploy,
+        pending_at(95),
+        CAPACITY
+    ));
 }
 
 #[test]
@@ -305,7 +335,11 @@ fn is_admitted_stake_at_emergency_load_is_true() {
 #[test]
 fn is_admitted_governance_vote_at_critical_load_is_true() {
     // WHITEPAPER: governance admitted at Critical.
-    assert!(is_admitted(TxType::GovernanceVote, pending_at(95), CAPACITY));
+    assert!(is_admitted(
+        TxType::GovernanceVote,
+        pending_at(95),
+        CAPACITY
+    ));
 }
 
 #[test]

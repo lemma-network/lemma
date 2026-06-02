@@ -119,7 +119,11 @@ impl SnapshotMetadata {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        Self { height, state_root, timestamp }
+        Self {
+            height,
+            state_root,
+            timestamp,
+        }
     }
 }
 
@@ -176,9 +180,15 @@ impl SnapshotManager {
     ) -> Result<Self, StorageError> {
         let snapshot_dir = snapshot_dir.as_ref().to_path_buf();
         fs::create_dir_all(&snapshot_dir).map_err(|e| StorageError::SnapshotFailed {
-            reason: format!("cannot create snapshot directory '{}': {e}", snapshot_dir.display()),
+            reason: format!(
+                "cannot create snapshot directory '{}': {e}",
+                snapshot_dir.display()
+            ),
         })?;
-        Ok(Self { snapshot_dir, max_snapshots })
+        Ok(Self {
+            snapshot_dir,
+            max_snapshots,
+        })
     }
 
     // ── Create ────────────────────────────────────────────────────────────────
@@ -276,14 +286,13 @@ impl SnapshotManager {
     /// Returns [`StorageError::SnapshotFailed`] if `snapshot_dir` cannot be
     /// read (e.g. the directory was deleted externally).
     pub fn list_snapshots(&self) -> Result<Vec<SnapshotMetadata>, StorageError> {
-        let entries = fs::read_dir(&self.snapshot_dir).map_err(|e| {
-            StorageError::SnapshotFailed {
+        let entries =
+            fs::read_dir(&self.snapshot_dir).map_err(|e| StorageError::SnapshotFailed {
                 reason: format!(
                     "cannot read snapshot directory '{}': {e}",
                     self.snapshot_dir.display()
                 ),
-            }
-        })?;
+            })?;
 
         let mut snapshots: Vec<SnapshotMetadata> = entries
             .filter_map(|entry| {
@@ -336,17 +345,18 @@ impl SnapshotManager {
     ///
     /// Returns [`StorageError::RestoreFailed`] if the metadata file is missing
     /// or corrupt.
-    pub fn snapshot_metadata(
-        &self,
-        height: u64,
-    ) -> Result<Option<SnapshotMetadata>, StorageError> {
+    pub fn snapshot_metadata(&self, height: u64) -> Result<Option<SnapshotMetadata>, StorageError> {
         let path = self.snapshot_path(height);
         if !path.exists() {
             return Ok(None);
         }
-        let meta = self.read_metadata(&path).map_err(|_| StorageError::RestoreFailed {
-            reason: format!("metadata.json for snapshot at height {height} is missing or corrupt"),
-        })?;
+        let meta = self
+            .read_metadata(&path)
+            .map_err(|_| StorageError::RestoreFailed {
+                reason: format!(
+                    "metadata.json for snapshot at height {height} is missing or corrupt"
+                ),
+            })?;
         Ok(Some(meta))
     }
 
@@ -401,7 +411,10 @@ impl SnapshotManager {
         // Collect all snapshot directories sorted newest-first by height.
         let all_dirs = self.all_snapshot_dirs()?;
 
-        let to_remove = all_dirs.into_iter().skip(self.max_snapshots).collect::<Vec<_>>();
+        let to_remove = all_dirs
+            .into_iter()
+            .skip(self.max_snapshots)
+            .collect::<Vec<_>>();
         let count = to_remove.len();
 
         for dir in to_remove {
@@ -420,7 +433,8 @@ impl SnapshotManager {
         // Zero-pad to 12 digits so lexicographic sort matches numeric sort
         // (up to height 999_999_999_999). Rust's `str::parse::<u64>()` handles
         // zero-padded decimal strings correctly — no octal ambiguity unlike C/Python.
-        self.snapshot_dir.join(format!("{SNAPSHOT_DIR_PREFIX}{height:012}"))
+        self.snapshot_dir
+            .join(format!("{SNAPSHOT_DIR_PREFIX}{height:012}"))
     }
 
     /// Staging path used during atomic snapshot creation (see `create_snapshot`).
@@ -442,13 +456,15 @@ impl SnapshotManager {
         metadata: &SnapshotMetadata,
     ) -> Result<(), StorageError> {
         let meta_path = snapshot_path.join(METADATA_FILENAME);
-        let json = serde_json::to_string_pretty(metadata).map_err(|e| {
-            StorageError::SnapshotFailed {
+        let json =
+            serde_json::to_string_pretty(metadata).map_err(|e| StorageError::SnapshotFailed {
                 reason: format!("cannot serialise snapshot metadata: {e}"),
-            }
-        })?;
+            })?;
         fs::write(&meta_path, json).map_err(|e| StorageError::SnapshotFailed {
-            reason: format!("cannot write metadata.json to '{}': {e}", meta_path.display()),
+            reason: format!(
+                "cannot write metadata.json to '{}': {e}",
+                meta_path.display()
+            ),
         })
     }
 
@@ -487,14 +503,13 @@ impl SnapshotManager {
     /// from directory name). Directories whose names cannot be parsed as
     /// `<prefix><u64>` are skipped (including `.tmp` staging directories).
     fn all_snapshot_dirs(&self) -> Result<Vec<PathBuf>, StorageError> {
-        let entries = fs::read_dir(&self.snapshot_dir).map_err(|e| {
-            StorageError::SnapshotFailed {
+        let entries =
+            fs::read_dir(&self.snapshot_dir).map_err(|e| StorageError::SnapshotFailed {
                 reason: format!(
                     "cannot read snapshot directory '{}': {e}",
                     self.snapshot_dir.display()
                 ),
-            }
-        })?;
+            })?;
 
         let mut dirs: Vec<(u64, PathBuf)> = entries
             .filter_map(|entry| {

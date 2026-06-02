@@ -337,12 +337,27 @@ fn tx_type_governance_vote_roundtrips_through_json() {
 
 #[test]
 fn tx_type_serializes_to_snake_case() {
-    assert_eq!(serde_json::to_string(&TxType::Transfer).unwrap(), "\"transfer\"");
-    assert_eq!(serde_json::to_string(&TxType::ContractCall).unwrap(), "\"contract_call\"");
-    assert_eq!(serde_json::to_string(&TxType::ContractDeploy).unwrap(), "\"contract_deploy\"");
+    assert_eq!(
+        serde_json::to_string(&TxType::Transfer).unwrap(),
+        "\"transfer\""
+    );
+    assert_eq!(
+        serde_json::to_string(&TxType::ContractCall).unwrap(),
+        "\"contract_call\""
+    );
+    assert_eq!(
+        serde_json::to_string(&TxType::ContractDeploy).unwrap(),
+        "\"contract_deploy\""
+    );
     assert_eq!(serde_json::to_string(&TxType::Stake).unwrap(), "\"stake\"");
-    assert_eq!(serde_json::to_string(&TxType::Unstake).unwrap(), "\"unstake\"");
-    assert_eq!(serde_json::to_string(&TxType::GovernanceVote).unwrap(), "\"governance_vote\"");
+    assert_eq!(
+        serde_json::to_string(&TxType::Unstake).unwrap(),
+        "\"unstake\""
+    );
+    assert_eq!(
+        serde_json::to_string(&TxType::GovernanceVote).unwrap(),
+        "\"governance_vote\""
+    );
 }
 
 // ── TxType — Clone / Copy / PartialEq / Hash ─────────────────────────────────

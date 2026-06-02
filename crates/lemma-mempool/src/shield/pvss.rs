@@ -37,11 +37,7 @@ use ark_std::UniformRand;
 use secret_sharing_and_dkg::common::ShareId;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::shield::{
-    committee::ShieldCommittee,
-    params::DST_PVSS_U1,
-    ShieldError,
-};
+use crate::shield::{committee::ShieldCommittee, params::DST_PVSS_U1, ShieldError};
 
 // ── Third independent generator û₁ ───────────────────────────────────────────
 
@@ -160,7 +156,12 @@ pub fn deal(
     let a0 = coeffs[0];
     let tag: G2Affine = (G2Projective::from(u1) * a0).into_affine();
 
-    Ok(PvssTranscript { tau, coeff_comms, tag, enc_shares })
+    Ok(PvssTranscript {
+        tau,
+        coeff_comms,
+        tag,
+        enc_shares,
+    })
 }
 
 // ── verify ────────────────────────────────────────────────────────────────────
@@ -209,13 +210,14 @@ pub fn verify(
 
     // ── Phase 2: Degenerate-point guard ───────────────────────────────────────
     // F_0 and û₂ guarded before the pairing in phase 3.
-    let f0 = transcript.coeff_comms.first().ok_or(ShieldError::InvalidTranscript)?;
+    let f0 = transcript
+        .coeff_comms
+        .first()
+        .ok_or(ShieldError::InvalidTranscript)?;
     if f0.is_zero() || !f0.is_in_correct_subgroup_assuming_on_curve() {
         return Err(ShieldError::InvalidTranscript);
     }
-    if transcript.tag.is_zero()
-        || !transcript.tag.is_in_correct_subgroup_assuming_on_curve()
-    {
+    if transcript.tag.is_zero() || !transcript.tag.is_in_correct_subgroup_assuming_on_curve() {
         return Err(ShieldError::InvalidTranscript);
     }
     // enc_shares guarded individually during FFT-expand in phase 4 (avoids double scan).
@@ -273,7 +275,9 @@ pub(crate) fn verify_share_pairing(
                 .coeff_comms
                 .iter()
                 .rev()
-                .fold(G1Projective::zero(), |acc, &fj| acc * x + G1Projective::from(fj))
+                .fold(G1Projective::zero(), |acc, &fj| {
+                    acc * x + G1Projective::from(fj)
+                })
                 .into_affine();
             (omega, a_k)
         })
@@ -289,21 +293,26 @@ pub(crate) fn verify_share_pairing(
 
     for (validator_idx, (_, share_ids)) in committee.iter().enumerate() {
         let validator_idx = validator_idx as u16;
-        let ek_i = eks.get(&validator_idx).ok_or(ShieldError::InvalidTranscript)?;
+        let ek_i = eks
+            .get(&validator_idx)
+            .ok_or(ShieldError::InvalidTranscript)?;
         if ek_i.is_zero() || !ek_i.is_in_correct_subgroup_assuming_on_curve() {
             return Err(ShieldError::InvalidTranscript);
         }
         for &omega in share_ids {
             let alpha = alpha_iter.next().ok_or(ShieldError::InvalidTranscript)?;
-            let y_hat =
-                transcript.enc_shares.get(&omega).ok_or(ShieldError::InvalidTranscript)?;
+            let y_hat = transcript
+                .enc_shares
+                .get(&omega)
+                .ok_or(ShieldError::InvalidTranscript)?;
             if y_hat.is_zero() || !y_hat.is_in_correct_subgroup_assuming_on_curve() {
                 return Err(ShieldError::InvalidTranscript);
             }
             let a_k = a_map.get(&omega).ok_or(ShieldError::InvalidTranscript)?;
             neg_yhat_acc += G2Projective::from(*y_hat) * alpha;
-            *per_val_a.entry(validator_idx).or_insert(G1Projective::zero()) +=
-                G1Projective::from(*a_k) * alpha;
+            *per_val_a
+                .entry(validator_idx)
+                .or_insert(G1Projective::zero()) += G1Projective::from(*a_k) * alpha;
         }
     }
 
@@ -318,7 +327,11 @@ pub(crate) fn verify_share_pairing(
     g2_inputs.push(neg_yhat_acc.into_affine());
 
     let result = Bls12_381::multi_pairing(g1_inputs, g2_inputs);
-    if result.is_zero() { Ok(()) } else { Err(ShieldError::InvalidTranscript) }
+    if result.is_zero() {
+        Ok(())
+    } else {
+        Err(ShieldError::InvalidTranscript)
+    }
 }
 
 // ── aggregate (S6) ────────────────────────────────────────────────────────────
@@ -360,11 +373,17 @@ pub fn aggregate(transcripts: &[PvssTranscript]) -> Result<PvssTranscript, Shiel
     let expected_keys: BTreeSet<ShareId> = first.enc_shares.keys().copied().collect();
 
     // Initialise projective accumulators from the first transcript.
-    let mut agg_comms: Vec<G1Projective> =
-        first.coeff_comms.iter().map(|p| G1Projective::from(*p)).collect();
+    let mut agg_comms: Vec<G1Projective> = first
+        .coeff_comms
+        .iter()
+        .map(|p| G1Projective::from(*p))
+        .collect();
     let mut agg_tag = G2Projective::from(first.tag);
-    let mut agg_shares: BTreeMap<ShareId, G2Projective> =
-        first.enc_shares.iter().map(|(&id, p)| (id, G2Projective::from(*p))).collect();
+    let mut agg_shares: BTreeMap<ShareId, G2Projective> = first
+        .enc_shares
+        .iter()
+        .map(|(&id, p)| (id, G2Projective::from(*p)))
+        .collect();
 
     // Accumulate remaining transcripts element-wise.
     for tr in &transcripts[1..] {
@@ -398,7 +417,10 @@ pub fn aggregate(transcripts: &[PvssTranscript]) -> Result<PvssTranscript, Shiel
         tau: first.tau.clone(),
         coeff_comms: agg_comms.iter().map(|p| p.into_affine()).collect(),
         tag: agg_tag.into_affine(),
-        enc_shares: agg_shares.into_iter().map(|(id, p)| (id, p.into_affine())).collect(),
+        enc_shares: agg_shares
+            .into_iter()
+            .map(|(id, p)| (id, p.into_affine()))
+            .collect(),
     })
 }
 
@@ -462,7 +484,10 @@ pub fn recover_share(
 /// Integer `x` is cast to `Fr::from(x)` (1-indexed share IDs, §4.0).
 pub(crate) fn eval_poly(coeffs: &[Fr], x: u16) -> Fr {
     let x_fr = Fr::from(u64::from(x));
-    coeffs.iter().rev().fold(Fr::zero(), |acc, &a| acc * x_fr + a)
+    coeffs
+        .iter()
+        .rev()
+        .fold(Fr::zero(), |acc, &a| acc * x_fr + a)
 }
 
 /// Derive Fiat–Shamir challenges `α_{i,ω} ∈ 𝔽_r` for the batched §4.3 share check.
@@ -490,8 +515,9 @@ fn pvss_fiat_shamir_challenges(
 
     for (validator_idx, (_, share_ids)) in committee.iter().enumerate() {
         let validator_idx = validator_idx as u16;
-        let ek_i =
-            eks.get(&validator_idx).ok_or(ShieldError::InvalidTranscript)?;
+        let ek_i = eks
+            .get(&validator_idx)
+            .ok_or(ShieldError::InvalidTranscript)?;
         for &omega in share_ids {
             let y_hat = transcript
                 .enc_shares

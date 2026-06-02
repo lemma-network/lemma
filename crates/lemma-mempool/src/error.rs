@@ -33,7 +33,6 @@ use lemma_core::{address::Address, hash::Hash};
 #[non_exhaustive]
 pub enum MempoolError {
     // ── Signature / auth ─────────────────────────────────────────────────────
-
     /// Transaction signature failed hybrid Ed25519 + ML-DSA verification.
     ///
     /// The transaction was either unsigned, classically-only signed, or the
@@ -42,7 +41,6 @@ pub enum MempoolError {
     InvalidSignature { tx_hash: Hash },
 
     // ── Nonce ────────────────────────────────────────────────────────────────
-
     /// Transaction nonce is lower than the account's current nonce.
     ///
     /// A replayed or stale transaction that has already been executed.
@@ -67,12 +65,13 @@ pub enum MempoolError {
     },
 
     // ── Balance / gas ─────────────────────────────────────────────────────────
-
     /// Account does not have enough liquid balance to cover `gas_limit ×
     /// gas_price + value`.
     ///
     /// `required` and `available` are both in Drop (1 LEM = 10¹⁸ Drop).
-    #[error("insufficient balance for {sender}: required {required} Drop, available {available} Drop")]
+    #[error(
+        "insufficient balance for {sender}: required {required} Drop, available {available} Drop"
+    )]
     InsufficientBalance {
         sender: Address,
         /// Total cost of the transaction in Drop: `gas_limit × gas_price + value`.
@@ -101,12 +100,13 @@ pub enum MempoolError {
     },
 
     // ── Chain ID ─────────────────────────────────────────────────────────────
-
     /// Transaction `chain_id` does not match this node's chain.
     ///
     /// Replay-protection guard: a transaction signed for testnet is rejected
     /// on mainnet and vice-versa.
-    #[error("chain_id mismatch for tx {tx_hash}: tx has {tx_chain_id}, expected {expected_chain_id}")]
+    #[error(
+        "chain_id mismatch for tx {tx_hash}: tx has {tx_chain_id}, expected {expected_chain_id}"
+    )]
     ChainIdMismatch {
         tx_hash: Hash,
         tx_chain_id: u64,
@@ -114,11 +114,8 @@ pub enum MempoolError {
     },
 
     // ── Size ─────────────────────────────────────────────────────────────────
-
     /// Serialized transaction exceeds the maximum allowed size.
-    #[error(
-        "transaction {tx_hash} too large: {size} bytes, max {max_size} bytes"
-    )]
+    #[error("transaction {tx_hash} too large: {size} bytes, max {max_size} bytes")]
     TransactionTooLarge {
         tx_hash: Hash,
         size: usize,
@@ -126,7 +123,6 @@ pub enum MempoolError {
     },
 
     // ── Pool capacity / replacement ───────────────────────────────────────────
-
     /// The pool has reached its capacity limit and the incoming transaction
     /// does not have a high enough priority to evict the lowest-priority entry.
     #[error("mempool is full ({capacity} txs); tx {tx_hash} priority too low to evict")]
@@ -149,7 +145,6 @@ pub enum MempoolError {
     },
 
     // ── Rate limiting ─────────────────────────────────────────────────────────
-
     /// Sender has exceeded the per-account submission rate limit.
     ///
     /// The token bucket for this sender is empty. The caller should back off
@@ -163,7 +158,6 @@ pub enum MempoolError {
     },
 
     // ── Circuit breaker ───────────────────────────────────────────────────────
-
     /// The circuit breaker rejected the transaction type for the current load
     /// tier.
     ///
@@ -178,13 +172,11 @@ pub enum MempoolError {
     },
 
     // ── Not found ─────────────────────────────────────────────────────────────
-
     /// The requested transaction does not exist in the pending pool.
     #[error("transaction {tx_hash} not found in mempool")]
     TransactionNotFound { tx_hash: Hash },
 
     // ── State access ─────────────────────────────────────────────────────────
-
     /// Failed to retrieve account state from the world state during validation.
     ///
     /// This is an internal/storage error, not a caller error.
@@ -196,7 +188,6 @@ pub enum MempoolError {
     },
 
     // ── Crypto ───────────────────────────────────────────────────────────────
-
     /// Signature verification returned a crypto-layer error (e.g. malformed
     /// key material, unexpected signature format).
     ///
@@ -245,9 +236,7 @@ impl MempoolError {
     pub fn is_retriable(&self) -> bool {
         matches!(
             self,
-            Self::PoolFull { .. }
-                | Self::RateLimited { .. }
-                | Self::CircuitBreakerRejected { .. }
+            Self::PoolFull { .. } | Self::RateLimited { .. } | Self::CircuitBreakerRejected { .. }
         )
     }
 

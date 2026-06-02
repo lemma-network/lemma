@@ -249,7 +249,10 @@ pub fn distribute_rewards(
 
     // No active validators (or total power rounds to 0 in Drip): burn entire pool.
     if total_power_drip == 0 {
-        return Ok(RewardOutcome { distributed: Amount::zero(), burned_remainder: pool });
+        return Ok(RewardOutcome {
+            distributed: Amount::zero(),
+            burned_remainder: pool,
+        });
     }
 
     let pool_drip = pool.as_drop() / DROPS_PER_DRIP;
@@ -265,19 +268,26 @@ pub fn distribute_rewards(
         //   pool_drip × power_drip
         //   ≈ 5.5×10¹³ × 10¹⁸ = 5.5×10³¹ at 1B-LEM supply, one-validator scenario.
         //   u128::MAX ≈ 3.4×10³⁸ → margin of ≈ 10⁷ (safe up to ~1000× genesis supply).
-        let product = pool_drip.checked_mul(power_drip).ok_or(
-            RewardError::DistributionOverflow {
-                address: *addr,
-                source: AmountError::Overflow { lhs: pool_drip, rhs: power_drip },
-            },
-        )?;
+        let product =
+            pool_drip
+                .checked_mul(power_drip)
+                .ok_or(RewardError::DistributionOverflow {
+                    address: *addr,
+                    source: AmountError::Overflow {
+                        lhs: pool_drip,
+                        rhs: power_drip,
+                    },
+                })?;
         let share_drip = product / total_power_drip;
         // Reconstruct Drop amount from Drip count: checked_mul enforces AGENTS §7.4.
         // share_drip ≤ pool_drip (proven below), so this cannot overflow in practice,
         // but an explicit check is mandatory — `from_drop` is a raw cast.
         let share = Amount::from_drop(share_drip)
             .checked_mul(DROPS_PER_DRIP)
-            .map_err(|e| RewardError::DistributionOverflow { address: *addr, source: e })?;
+            .map_err(|e| RewardError::DistributionOverflow {
+                address: *addr,
+                source: e,
+            })?;
 
         // Credit to self_stake.active (auto-compound — effective next epoch).
         //
@@ -285,16 +295,21 @@ pub fn distribute_rewards(
         // structurally present but the split is identity (full share to self).
         // Phase 3 F1 accumulator will apply commission_bps to delegator rewards.
         if let Some(v) = validators.get_mut(addr) {
-            v.self_stake.active = v
-                .self_stake
-                .active
-                .checked_add(share)
-                .map_err(|e| RewardError::DistributionOverflow { address: *addr, source: e })?;
+            v.self_stake.active = v.self_stake.active.checked_add(share).map_err(|e| {
+                RewardError::DistributionOverflow {
+                    address: *addr,
+                    source: e,
+                }
+            })?;
         }
 
-        distributed = distributed
-            .checked_add(share)
-            .map_err(|e| RewardError::DistributionOverflow { address: *addr, source: e })?;
+        distributed =
+            distributed
+                .checked_add(share)
+                .map_err(|e| RewardError::DistributionOverflow {
+                    address: *addr,
+                    source: e,
+                })?;
     }
 
     // Remainder = pool − Σshares (truncation dust, < #validators × DROPS_PER_DRIP).
@@ -308,7 +323,10 @@ pub fn distribute_rewards(
         .checked_sub(distributed)
         .map_err(|e| RewardError::RemainderUnderflow { source: e })?;
 
-    Ok(RewardOutcome { distributed, burned_remainder })
+    Ok(RewardOutcome {
+        distributed,
+        burned_remainder,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

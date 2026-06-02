@@ -185,8 +185,7 @@ fn consensus_key_serde_roundtrip() {
 fn voting_power_serde_roundtrip() {
     let original = VotingPower(Amount::from_drop(42_000));
     let json = serde_json::to_string(&original).expect("VotingPower should serialize");
-    let decoded: VotingPower =
-        serde_json::from_str(&json).expect("VotingPower should deserialize");
+    let decoded: VotingPower = serde_json::from_str(&json).expect("VotingPower should deserialize");
     assert_eq!(decoded, original);
 }
 
@@ -194,7 +193,6 @@ fn voting_power_serde_roundtrip() {
 fn validator_serde_roundtrip() {
     let original = test_validator();
     let json = serde_json::to_string(&original).expect("Validator should serialize");
-    let decoded: Validator =
-        serde_json::from_str(&json).expect("Validator should deserialize");
+    let decoded: Validator = serde_json::from_str(&json).expect("Validator should deserialize");
     assert_eq!(decoded, original);
 }

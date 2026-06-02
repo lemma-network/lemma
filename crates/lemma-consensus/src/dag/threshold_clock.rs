@@ -54,11 +54,7 @@
 
 use lemma_core::{amount::Amount, validator_set::ValidatorSet};
 
-use crate::{
-    dag::block::DagBlock,
-    error::ConsensusError,
-    stake::StakeAggregator,
-};
+use crate::{dag::block::DagBlock, error::ConsensusError, stake::StakeAggregator};
 
 // ── ThresholdClock ─────────────────────────────────────────────────────────────
 

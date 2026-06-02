@@ -31,8 +31,8 @@ use crate::{
     },
     error::ConsensusError,
     pulse::committer::{
-        find_supported_block, is_blame, is_vote,
-        LeaderStatus, try_decide, try_direct_decide, try_indirect_decide,
+        find_supported_block, is_blame, is_vote, try_decide, try_direct_decide,
+        try_indirect_decide, LeaderStatus,
     },
     WAVE_LENGTH,
 };
@@ -53,14 +53,27 @@ fn vset4() -> ValidatorSet {
     let power = VotingPower(Amount::from_drop(10));
     let mut members = BTreeMap::new();
     for i in 1u8..=4 {
-        members.insert(addr(i), Member { consensus_pubkey: dummy_key(), power });
+        members.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    ValidatorSet { epoch: 1, members, total_power: Amount::from_drop(40) }
+    ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: Amount::from_drop(40),
+    }
 }
 
 /// Simple round-robin leader schedule: author (round % 4) + 1 leads.
 fn round_robin(round: u64) -> Slot {
-    Slot { round, author: addr((round % 4) as u8 + 1) }
+    Slot {
+        round,
+        author: addr((round % 4) as u8 + 1),
+    }
 }
 
 /// Build a DagBlock at (round, author_n) listing `ancestors`.
@@ -124,7 +137,10 @@ fn find_supported_block_unique_returns_ref() {
     let vset = vset4();
     let mut dag = Dag::new(1);
     let leader_ref = insert_ok(&mut dag, block(0, 1, vec![]), &vset);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     let voter = block(1, 2, vec![leader_ref]);
     let result = find_supported_block(leader_slot, &voter);
@@ -140,15 +156,24 @@ fn find_supported_block_equivocation_returns_none() {
     // Build a second block at same slot — uses different timestamp to get diff digest.
     let ref_b = DagBlock::new(
         DagBlockBody {
-            epoch: 1, round: 0, author: addr(1), timestamp_ms: 1,
-            ancestors: vec![], payload: vec![], commit_votes: vec![],
+            epoch: 1,
+            round: 0,
+            author: addr(1),
+            timestamp_ms: 1,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
         },
         Signature::Unsigned,
-    ).reference();
+    )
+    .reference();
     assert_ne!(ref_a.digest, ref_b.digest);
 
     let voter = block(1, 2, vec![ref_a, ref_b]);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     assert_eq!(find_supported_block(leader_slot, &voter), None);
 }
 
@@ -159,7 +184,10 @@ fn find_supported_block_missing_returns_none() {
     let mut dag = Dag::new(1);
     let other_ref = insert_ok(&mut dag, block(0, 2, vec![]), &vset);
     let voter = block(1, 3, vec![other_ref]);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     assert_eq!(find_supported_block(leader_slot, &voter), None);
 }
 
@@ -168,7 +196,10 @@ fn is_vote_returns_true_when_voter_supports_leader() {
     let vset = vset4();
     let mut dag = Dag::new(1);
     let leader_ref = insert_ok(&mut dag, block(0, 1, vec![]), &vset);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     let voter = block(1, 2, vec![leader_ref]);
     assert!(is_vote(&voter, leader_slot, leader_ref));
 }
@@ -178,8 +209,11 @@ fn is_vote_returns_false_when_voter_does_not_support_leader() {
     let vset = vset4();
     let mut dag = Dag::new(1);
     let leader_ref = insert_ok(&mut dag, block(0, 1, vec![]), &vset);
-    let other_ref  = insert_ok(&mut dag, block(0, 2, vec![]), &vset);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let other_ref = insert_ok(&mut dag, block(0, 2, vec![]), &vset);
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     // Voter references a different author's block, not the leader.
     let voter = block(1, 3, vec![other_ref]);
     assert!(!is_vote(&voter, leader_slot, leader_ref));
@@ -193,7 +227,10 @@ fn is_blame_true_when_no_ancestor_at_leader_slot() {
     let mut dag = Dag::new(1);
     let other_ref = insert_ok(&mut dag, block(0, 2, vec![]), &vset);
     let voter = block(1, 3, vec![other_ref]);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     assert!(is_blame(&voter, leader_slot));
 }
 
@@ -203,7 +240,10 @@ fn is_blame_false_when_ancestor_at_exact_slot() {
     let mut dag = Dag::new(1);
     let leader_ref = insert_ok(&mut dag, block(0, 1, vec![]), &vset);
     let voter = block(1, 2, vec![leader_ref]);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     assert!(!is_blame(&voter, leader_slot));
 }
 
@@ -216,7 +256,10 @@ fn is_blame_checks_full_slot_not_only_author() {
     // Block at round 0, author 1 — a different slot than (round=3, author=1).
     let different_round_ref = insert_ok(&mut dag, block(0, 1, vec![]), &vset);
     let voter = block(4, 2, vec![different_round_ref]);
-    let leader_slot = Slot { round: 3, author: addr(1) };
+    let leader_slot = Slot {
+        round: 3,
+        author: addr(1),
+    };
     // voter.ancestors has author=1 but at round=0, not round=3 → blame!
     assert!(is_blame(&voter, leader_slot));
 }
@@ -228,7 +271,10 @@ fn direct_commit_on_quorum_of_certificates() {
     // Full wave: all 4 validators present + voting → 3 certs = quorum → Commit.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     let (leader_ref, _, _) = build_full_wave(&mut dag, &vset, 1, 0, vec![]);
 
     let status = try_direct_decide(leader_slot, &dag, &vset).unwrap();
@@ -240,7 +286,10 @@ fn direct_undecided_when_decision_round_below_quorum() {
     // Only 2 validators produce decision blocks → total stake < quorum → Undecided.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     // Round 0: leader + 3 others.
     let l_refs: Vec<DagBlockRef> = (1u8..=4)
@@ -263,7 +312,10 @@ fn direct_skip_on_quorum_of_blame() {
     // 3 out of 4 voters do NOT reference leader → 2f+1 blame → Skip.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     // Round 0: leader + 3 other blocks.
     let l_refs: Vec<DagBlockRef> = (1u8..=4)
@@ -288,7 +340,10 @@ fn direct_skip_when_no_leader_block_and_quorum_blame() {
     // Leader produced no block; 3 voters blame → Skip.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     // Round 0: only non-leader blocks (no author 1 block at round 0).
     let nr: Vec<DagBlockRef> = (2u8..=4)
@@ -310,7 +365,10 @@ fn skip_check_precedes_commit_check() {
     // Skip should win.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     let l_refs: Vec<DagBlockRef> = (1u8..=4)
         .map(|a| insert_ok(&mut dag, block(0, a, vec![]), &vset))
@@ -320,7 +378,11 @@ fn skip_check_precedes_commit_check() {
     // 3 blamers + 1 supporter at voting round.
     let mut v_refs = vec![];
     for a in 2u8..=4 {
-        v_refs.push(insert_ok(&mut dag, block(1, a, non_leader_refs.clone()), &vset));
+        v_refs.push(insert_ok(
+            &mut dag,
+            block(1, a, non_leader_refs.clone()),
+            &vset,
+        ));
     }
     let supporter_ref = insert_ok(&mut dag, block(1, 1, l_refs.clone()), &vset);
     v_refs.push(supporter_ref);
@@ -345,11 +407,24 @@ fn direct_undecided_when_decision_stake_exactly_at_quorum_boundary() {
     let total = Amount::from_drop(30);
     let mut members = BTreeMap::new();
     for i in 1u8..=3 {
-        members.insert(addr(i), Member { consensus_pubkey: dummy_key(), power });
+        members.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: dummy_key(),
+                power,
+            },
+        );
     }
-    let vset3 = ValidatorSet { epoch: 1, members, total_power: total };
+    let vset3 = ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: total,
+    };
     let mut dag = Dag::new(1);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     let l0: Vec<DagBlockRef> = (1u8..=3)
         .map(|a| insert_ok(&mut dag, block(0, a, vec![]), &vset3))
@@ -362,8 +437,11 @@ fn direct_undecided_when_decision_stake_exactly_at_quorum_boundary() {
     insert_ok(&mut dag, block(2, 2, v1.clone()), &vset3);
 
     let status = try_direct_decide(leader_slot, &dag, &vset3).unwrap();
-    assert_eq!(status, LeaderStatus::Undecided(leader_slot),
-        "exactly 2/3 decision stake must be Undecided (strict > required)");
+    assert_eq!(
+        status,
+        LeaderStatus::Undecided(leader_slot),
+        "exactly 2/3 decision stake must be Undecided (strict > required)"
+    );
 }
 
 // ── try_indirect_decide tests ─────────────────────────────────────────────────
@@ -376,7 +454,10 @@ fn indirect_commit_via_nearest_committed_anchor() {
     // (all 4 voters are in their round-1 ancestors). So anchor → cert → Commit.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let leader0_slot = Slot { round: 0, author: addr(1) };
+    let leader0_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     // Wave 0: all 4 rounds 0-2.
     let (leader0_ref, _, d0_refs) = build_full_wave(&mut dag, &vset, 1, 0, vec![]);
@@ -394,8 +475,11 @@ fn indirect_commit_via_nearest_committed_anchor() {
 
     let decided_above = vec![LeaderStatus::Commit(anchor_ref)];
     let status = try_indirect_decide(leader0_slot, &decided_above, &dag, &vset).unwrap();
-    assert_eq!(status, LeaderStatus::Commit(leader0_ref),
-        "indirect commit: anchor's round-2 ancestors cert wave-0 leader");
+    assert_eq!(
+        status,
+        LeaderStatus::Commit(leader0_ref),
+        "indirect commit: anchor's round-2 ancestors cert wave-0 leader"
+    );
 }
 
 #[test]
@@ -405,7 +489,10 @@ fn indirect_skip_when_no_cert_link_from_anchor() {
     // try_indirect_decide: leader_ref = dag.block_at_slot(leader0_slot) = None → Skip.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let leader0_slot = Slot { round: 0, author: addr(1) };
+    let leader0_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     // Round 0: authors 2,3,4 only — leader (author 1) has NO block.
     let r0: Vec<DagBlockRef> = (2u8..=4)
@@ -440,7 +527,10 @@ fn nearest_anchor_is_decisive_not_farther() {
     // and this assertion would fail — exactly the regression it guards against.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let leader0_slot = Slot { round: 0, author: addr(1) };
+    let leader0_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
 
     // Wave 0 fully built. d0_refs are the round-2 decision blocks (all 4 voters → certs).
     let (leader0_ref, _, d0_refs) = build_full_wave(&mut dag, &vset, 1, 0, vec![]);
@@ -550,10 +640,19 @@ fn indirect_undecided_when_no_committed_anchor() {
     // All higher entries are Skip → no committed anchor found → Undecided.
     let vset = vset4();
     let dag = Dag::new(1);
-    let leader_slot = Slot { round: 0, author: addr(1) };
+    let leader_slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     let decided_above = vec![
-        LeaderStatus::Skip(Slot { round: 3, author: addr(1) }),
-        LeaderStatus::Skip(Slot { round: 6, author: addr(1) }),
+        LeaderStatus::Skip(Slot {
+            round: 3,
+            author: addr(1),
+        }),
+        LeaderStatus::Skip(Slot {
+            round: 6,
+            author: addr(1),
+        }),
     ];
     let status = try_indirect_decide(leader_slot, &decided_above, &dag, &vset).unwrap();
     assert_eq!(status, LeaderStatus::Undecided(leader_slot));
@@ -572,7 +671,10 @@ fn try_decide_gapless_prefix_stops_at_undecided() {
     // wave 1 (rounds 3-5) fully, and wave 2 (rounds 6-8) with only 1 decision block.
     let vset = vset4();
     let mut dag = Dag::new(1);
-    let last = Slot { round: 0, author: addr(0) };
+    let last = Slot {
+        round: 0,
+        author: addr(0),
+    };
 
     // Foundation: wave 0 (rounds 0-2) fully built — provides ancestors for round 3.
     let (_, _, d0_refs) = build_full_wave(&mut dag, &vset, 1, 0, vec![]);
@@ -602,9 +704,14 @@ fn try_decide_gapless_prefix_stops_at_undecided() {
     let result = try_decide(last, &dag, &vset, round_robin).unwrap();
     // Wave 3 (round 3) should commit; wave 6 should be undecided and stop there.
     assert!(!result.is_empty(), "should have at least 1 decided leader");
-    assert!(result.iter().all(|s| s.is_decided()), "all emitted must be decided");
+    assert!(
+        result.iter().all(|s| s.is_decided()),
+        "all emitted must be decided"
+    );
     // No Undecided should appear in output (gapless guarantee).
-    assert!(!result.iter().any(|s| matches!(s, LeaderStatus::Undecided(_))));
+    assert!(!result
+        .iter()
+        .any(|s| matches!(s, LeaderStatus::Undecided(_))));
 }
 
 #[test]
@@ -629,17 +736,26 @@ fn try_decide_wave_aligned_only() {
         .map(|a| insert_ok(&mut dag, block(2, a, r1.clone()), &vset))
         .collect();
 
-    let last = Slot { round: 0, author: addr(0) };
+    let last = Slot {
+        round: 0,
+        author: addr(0),
+    };
     // highest = 2; upper = 0. Scan [1..=0] → empty. No wave-aligned rounds.
     let result = try_decide(last, &dag, &vset, round_robin).unwrap();
-    assert!(result.is_empty(), "non-wave-aligned rounds must not produce decisions");
+    assert!(
+        result.is_empty(),
+        "non-wave-aligned rounds must not produce decisions"
+    );
 }
 
 #[test]
 fn try_decide_returns_empty_when_no_decidable_rounds() {
     let vset = vset4();
     let dag = Dag::new(1);
-    let last = Slot { round: 0, author: addr(0) };
+    let last = Slot {
+        round: 0,
+        author: addr(0),
+    };
     let result = try_decide(last, &dag, &vset, round_robin).unwrap();
     assert!(result.is_empty());
 }
@@ -666,12 +782,23 @@ fn byzantine_invariant_breach_error_is_flagged() {
 
 #[test]
 fn leader_status_is_decided() {
-    let slot = Slot { round: 0, author: addr(1) };
+    let slot = Slot {
+        round: 0,
+        author: addr(1),
+    };
     let r = DagBlock::new(
-        DagBlockBody { epoch:1, round:0, author:addr(1), timestamp_ms:0,
-            ancestors:vec![], payload:vec![], commit_votes:vec![] },
+        DagBlockBody {
+            epoch: 1,
+            round: 0,
+            author: addr(1),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
-    ).reference();
+    )
+    .reference();
     assert!(LeaderStatus::Commit(r).is_decided());
     assert!(LeaderStatus::Skip(slot).is_decided());
     assert!(!LeaderStatus::Undecided(slot).is_decided());
@@ -679,12 +806,23 @@ fn leader_status_is_decided() {
 
 #[test]
 fn leader_status_round() {
-    let slot = Slot { round: 6, author: addr(2) };
+    let slot = Slot {
+        round: 6,
+        author: addr(2),
+    };
     let r = DagBlock::new(
-        DagBlockBody { epoch:1, round:6, author:addr(2), timestamp_ms:0,
-            ancestors:vec![], payload:vec![], commit_votes:vec![] },
+        DagBlockBody {
+            epoch: 1,
+            round: 6,
+            author: addr(2),
+            timestamp_ms: 0,
+            ancestors: vec![],
+            payload: vec![],
+            commit_votes: vec![],
+        },
         Signature::Unsigned,
-    ).reference();
+    )
+    .reference();
     assert_eq!(LeaderStatus::Commit(r).round(), 6);
     assert_eq!(LeaderStatus::Skip(slot).round(), 6);
     assert_eq!(LeaderStatus::Undecided(slot).round(), 6);

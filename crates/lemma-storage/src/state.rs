@@ -86,7 +86,10 @@ impl WorldState {
     /// The state trie starts empty (`state_root = None`). Use this for genesis
     /// block construction or unit tests.
     pub fn new(db: LemmaDb) -> Self {
-        Self { db, state_root: None }
+        Self {
+            db,
+            state_root: None,
+        }
     }
 
     /// Resume world state from a persisted `state_root`.
@@ -96,7 +99,10 @@ impl WorldState {
     /// family — if not, the first account read will return
     /// [`StorageError::TrieNodeNotFound`].
     pub fn with_state_root(db: LemmaDb, state_root: Hash) -> Self {
-        Self { db, state_root: Some(state_root) }
+        Self {
+            db,
+            state_root: Some(state_root),
+        }
     }
 
     /// Consume this `WorldState` and return the underlying [`LemmaDb`].
@@ -208,7 +214,9 @@ impl WorldState {
     ///
     /// [`get_account`]: WorldState::get_account
     pub fn get_balance(&self, address: &Address) -> Result<Amount, StorageError> {
-        Ok(self.get_account(address)?.map_or(Amount::zero(), |a| a.balance))
+        Ok(self
+            .get_account(address)?
+            .map_or(Amount::zero(), |a| a.balance))
     }
 
     /// Return the transaction nonce of `address`, or `0` if the account does
@@ -235,14 +243,15 @@ impl WorldState {
         let mut account = self.get_account(address)?.unwrap_or_default();
         // SEC-1: use checked_add, not saturating_add. Silent saturation at
         // u64::MAX creates a replay attack surface on the nonce check.
-        account.nonce = account.nonce.checked_add(1).ok_or_else(|| {
-            StorageError::Corrupted {
+        account.nonce = account
+            .nonce
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Corrupted {
                 reason: format!(
                     "nonce overflow at {} (nonce == u64::MAX)",
                     hex::encode(address.as_bytes()),
                 ),
-            }
-        })?;
+            })?;
         self.put_account(address, &account)
     }
 
@@ -297,11 +306,7 @@ impl WorldState {
     /// # Errors
     ///
     /// - [`StorageError::Database`] — RocksDB delete failed.
-    pub fn delete_storage(
-        &mut self,
-        address: &Address,
-        slot: &Hash,
-    ) -> Result<(), StorageError> {
+    pub fn delete_storage(&mut self, address: &Address, slot: &Hash) -> Result<(), StorageError> {
         let key = storage_key(address, slot);
         self.db.delete(CF_STORAGE, &key)
     }
@@ -318,10 +323,7 @@ impl WorldState {
     ///
     /// - [`StorageError::InvalidProof`] — state is empty (no state root yet).
     /// - [`StorageError::TrieNodeNotFound`] — trie corruption.
-    pub fn generate_account_proof(
-        &self,
-        address: &Address,
-    ) -> Result<MerkleProof, StorageError> {
+    pub fn generate_account_proof(&self, address: &Address) -> Result<MerkleProof, StorageError> {
         let root = self.state_root.ok_or(StorageError::InvalidProof {
             key: hex::encode(address.as_bytes()),
         })?;

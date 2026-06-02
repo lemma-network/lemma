@@ -56,29 +56,29 @@ use crate::{
 /// preventing replay attacks across networks.
 #[derive(Serialize)]
 struct TxSigningBody<'a> {
-    sender:    &'a Address,
-    to:        &'a Option<Address>,
-    nonce:     u64,
-    chain_id:  u64,
-    value:     &'a Amount,
+    sender: &'a Address,
+    to: &'a Option<Address>,
+    nonce: u64,
+    chain_id: u64,
+    value: &'a Amount,
     gas_limit: u64,
     gas_price: &'a Amount,
-    tx_type:   TxType,
-    data:      &'a [u8],
+    tx_type: TxType,
+    data: &'a [u8],
 }
 
 impl<'a> TxSigningBody<'a> {
     fn from_tx(tx: &'a Transaction) -> Self {
         Self {
-            sender:    &tx.sender,
-            to:        &tx.to,
-            nonce:     tx.nonce,
-            chain_id:  tx.chain_id,
-            value:     &tx.value,
+            sender: &tx.sender,
+            to: &tx.to,
+            nonce: tx.nonce,
+            chain_id: tx.chain_id,
+            value: &tx.value,
             gas_limit: tx.gas_limit,
             gas_price: &tx.gas_price,
-            tx_type:   tx.tx_type,
-            data:      &tx.data,
+            tx_type: tx.tx_type,
+            data: &tx.data,
         }
     }
 }
@@ -165,7 +165,7 @@ pub fn sign_transaction(tx: &mut Transaction, keypair: &KeyPair) -> Result<(), C
     // is preferable to re-serializing the body in verify.
     let sig = keypair.sign(tx_hash.as_bytes());
 
-    tx.hash      = tx_hash;
+    tx.hash = tx_hash;
     tx.signature = sig.to_lemma_signature();
     Ok(())
 }
@@ -210,10 +210,7 @@ pub fn sign_transaction(tx: &mut Transaction, keypair: &KeyPair) -> Result<(), C
 /// sign_transaction(&mut tx, &kp).unwrap();
 /// assert!(verify_transaction(&tx, &kp.public_key()).is_ok());
 /// ```
-pub fn verify_transaction(
-    tx:     &Transaction,
-    pubkey: &PublicKey,
-) -> Result<(), CryptoError> {
+pub fn verify_transaction(tx: &Transaction, pubkey: &PublicKey) -> Result<(), CryptoError> {
     // ── Hybrid-only guard ────────────────────────────────────────────────────
     let hybrid_sig = match &tx.signature {
         Signature::Unsigned => return Err(CryptoError::UnsignedTransaction),
@@ -228,7 +225,7 @@ pub fn verify_transaction(
 
         Signature::Hybrid { classical, quantum } => HybridSignature {
             classical: classical.clone(),
-            quantum:   quantum.clone(),
+            quantum: quantum.clone(),
         },
 
         // Signature is #[non_exhaustive] — catch future variants.

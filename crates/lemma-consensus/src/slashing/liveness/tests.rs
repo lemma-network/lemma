@@ -71,7 +71,10 @@ fn max_missed_blocks_is_half_the_window() {
 
 #[test]
 fn downtime_jail_duration_is_one_epoch() {
-    assert_eq!(DOWNTIME_JAIL_DURATION_SECONDS, 86_400, "jail = 24h (one epoch)");
+    assert_eq!(
+        DOWNTIME_JAIL_DURATION_SECONDS, 86_400,
+        "jail = 24h (one epoch)"
+    );
 }
 
 #[test]
@@ -119,7 +122,7 @@ fn recording_signed_then_missed_in_same_slot_decrements_count() {
 #[test]
 fn recording_missed_then_signed_in_same_slot_increments_count() {
     let mut w = small_window();
-    w.record_block(0, true);  // slot 0 = signed
+    w.record_block(0, true); // slot 0 = signed
     w.record_block(10, false); // slot 0 overwritten with missed; missed_count = 1
     assert_eq!(w.missed_count(), 1);
 }
@@ -162,7 +165,10 @@ fn breach_carries_correct_height() {
         w2.record_block(h, false);
     }
     let breach = w2.record_block(5, false).unwrap();
-    assert_eq!(breach.breach_height, 5, "breach height = block that pushed over threshold");
+    assert_eq!(
+        breach.breach_height, 5,
+        "breach height = block that pushed over threshold"
+    );
 }
 
 // ── No double-fire ────────────────────────────────────────────────────────────
@@ -256,7 +262,11 @@ fn apply_downtime_slashes_one_percent() {
     let burned = apply_downtime(&mut v, breach, power, block_time, &mut w).unwrap();
 
     assert_eq!(burned, lem(200_000), "1% of 20M = 200K LEM burned");
-    assert_eq!(v.self_stake.active, lem(19_800_000), "active reduced by 200K");
+    assert_eq!(
+        v.self_stake.active,
+        lem(19_800_000),
+        "active reduced by 200K"
+    );
 }
 
 #[test]
@@ -289,7 +299,11 @@ fn apply_downtime_resets_window() {
     let breach = DowntimeBreach { breach_height: 5 };
     apply_downtime(&mut v, breach, lem(10_000_000), 0, &mut w).unwrap();
 
-    assert_eq!(w.missed_count(), 0, "window must be reset after apply_downtime");
+    assert_eq!(
+        w.missed_count(),
+        0,
+        "window must be reset after apply_downtime"
+    );
 }
 
 #[test]
@@ -298,7 +312,10 @@ fn apply_downtime_does_not_tombstone() {
     let mut w = small_window();
     let breach = DowntimeBreach { breach_height: 1 };
     apply_downtime(&mut v, breach, lem(10_000_000), 0, &mut w).unwrap();
-    assert!(!v.tombstoned, "downtime → finite jail only, never tombstone");
+    assert!(
+        !v.tombstoned,
+        "downtime → finite jail only, never tombstone"
+    );
 }
 
 #[test]
@@ -321,9 +338,19 @@ fn apply_downtime_leaves_state_unchanged_on_slash_error() {
     let result = apply_downtime(&mut v, breach, enormous_power, 999, &mut w);
 
     assert!(result.is_err(), "must return Err on slash failure");
-    assert_eq!(v.self_stake.active, initial_active, "active unchanged on error");
-    assert_eq!(v.jailed_until, initial_jailed, "jail unchanged on error (atomicity)");
-    assert_eq!(w.missed_count(), initial_missed, "window unchanged on error (atomicity)");
+    assert_eq!(
+        v.self_stake.active, initial_active,
+        "active unchanged on error"
+    );
+    assert_eq!(
+        v.jailed_until, initial_jailed,
+        "jail unchanged on error (atomicity)"
+    );
+    assert_eq!(
+        w.missed_count(),
+        initial_missed,
+        "window unchanged on error (atomicity)"
+    );
 }
 
 // ── Determinism ───────────────────────────────────────────────────────────────
@@ -332,7 +359,9 @@ fn apply_downtime_leaves_state_unchanged_on_slash_error() {
 fn window_record_deterministic_same_sequence_same_state() {
     let run = || {
         let mut w = SignedBlocksWindow::new(10, 5);
-        let sequence = [true, false, true, false, false, true, false, false, false, false];
+        let sequence = [
+            true, false, true, false, false, true, false, false, false, false,
+        ];
         for (h, &signed) in sequence.iter().enumerate() {
             w.record_block(h as u64, signed);
         }
@@ -348,7 +377,11 @@ fn apply_downtime_deterministic() {
         let mut w = small_window();
         let breach = DowntimeBreach { breach_height: 5 };
         let burned = apply_downtime(&mut v, breach, lem(20_000_000), 100_000, &mut w).unwrap();
-        (burned.as_drop(), v.self_stake.active.as_drop(), v.jailed_until)
+        (
+            burned.as_drop(),
+            v.self_stake.active.as_drop(),
+            v.jailed_until,
+        )
     };
     assert_eq!(run(), run(), "apply_downtime must be deterministic");
 }

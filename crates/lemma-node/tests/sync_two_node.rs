@@ -24,42 +24,43 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
-use lemma_core::{
-    address::Address,
-    amount::Amount,
-    block::Block,
-    hash::Hash,
-    header::BlockHeader,
-};
-use lemma_node::{
-    StructuralVerifier, SyncTracker,
-    apply_synced_block, ApplyOutcome,
-};
-use libp2p::PeerId;
+use lemma_core::{address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader};
+use lemma_node::{apply_synced_block, ApplyOutcome, StructuralVerifier, SyncTracker};
 use lemma_storage::{chain::ChainStore, db::LemmaDb};
+use libp2p::PeerId;
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
 fn open_temp_db() -> (LemmaDb, TempDir) {
     let dir = TempDir::new().expect("TempDir");
-    let db  = LemmaDb::open(dir.path()).expect("LemmaDb::open");
+    let db = LemmaDb::open(dir.path()).expect("LemmaDb::open");
     (db, dir)
 }
 
 fn make_block(height: u64, parent_hash: Hash) -> (Block, Hash) {
     let vh = Hash::from_bytes([0xCC; 32]);
-    let h  = BlockHeader::new(
+    let h = BlockHeader::new(
         height,
         1_700_000_000 + height,
         parent_hash,
-        Hash::zero(), Hash::zero(), Hash::zero(),
-        Address::zero(), 0, 0, Hash::zero(), vh, vh,
-        30_000_000, 0, Amount::from_drop(1_000_000_000), vec![],
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        vh,
+        vh,
+        30_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
     )
     .expect("header");
     let block = Block::new(h, vec![], vec![]).expect("block");
     let bytes = bincode::serialize(&block).expect("serialize");
-    let hash  = lemma_crypto::hash_bytes(&bytes);
+    let hash = lemma_crypto::hash_bytes(&bytes);
     (block, hash)
 }
 
@@ -67,7 +68,9 @@ fn seed_chain(db: &LemmaDb, n: u64) {
     let mut prev = Hash::zero();
     for h in 0..n {
         let (block, hash) = make_block(h, prev);
-        ChainStore::new(db).put_block(&block, hash).expect("put_block");
+        ChainStore::new(db)
+            .put_block(&block, hash)
+            .expect("put_block");
         prev = hash;
     }
 }
@@ -86,9 +89,9 @@ async fn two_node_range_sync_applies_all_blocks() {
     // Node B: only genesis (height 0).
     let (db_b, _dir_b) = open_temp_db();
     seed_chain(&db_b, 1);
-    let db_b      = Arc::new(db_b);
+    let db_b = Arc::new(db_b);
     let write_lock = Arc::new(Mutex::new(()));
-    let verifier   = StructuralVerifier;
+    let verifier = StructuralVerifier;
 
     // Simulate node B detecting it's behind and applying blocks from A.
     for h in 1..CHAIN_LENGTH {
@@ -127,21 +130,34 @@ async fn sync_rejects_tampered_parent_hash() {
 
     let (db_b, _dir_b) = open_temp_db();
     seed_chain(&db_b, 1); // genesis only
-    let db_b      = Arc::new(db_b);
+    let db_b = Arc::new(db_b);
     let write_lock = Arc::new(Mutex::new(()));
-    let verifier   = StructuralVerifier;
+    let verifier = StructuralVerifier;
 
     // Tamper: take block 1 from A but forge parent_hash.
     let good_block = ChainStore::new(&db_a)
-        .get_block_by_height(1).expect("get").expect("exists");
+        .get_block_by_height(1)
+        .expect("get")
+        .expect("exists");
     let tampered_header = BlockHeader::new(
-        1, good_block.header.timestamp,
+        1,
+        good_block.header.timestamp,
         Hash::from_bytes([0xFF; 32]), // wrong parent
-        Hash::zero(), Hash::zero(), Hash::zero(),
-        Address::zero(), 0, 0, Hash::zero(),
-        Hash::from_bytes([0xCC; 32]), Hash::from_bytes([0xCC; 32]),
-        30_000_000, 0, Amount::from_drop(1_000_000_000), vec![],
-    ).expect("header");
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        Hash::from_bytes([0xCC; 32]),
+        Hash::from_bytes([0xCC; 32]),
+        30_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
+    )
+    .expect("header");
     let tampered_block = Block::new(tampered_header, vec![], vec![]).expect("block");
 
     let err = apply_synced_block(&tampered_block, &db_b, &write_lock, &verifier)

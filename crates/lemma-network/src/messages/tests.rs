@@ -1,6 +1,9 @@
-use lemma_core::{address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader, transaction::Transaction};
+use lemma_core::{
+    address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader,
+    transaction::Transaction,
+};
 
-use super::{*, MAX_GOSSIP_DECODE_BYTES};
+use super::{MAX_GOSSIP_DECODE_BYTES, *};
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -18,13 +21,13 @@ fn test_block(height: u64) -> Block {
         Hash::zero(),
         Hash::zero(),
         Address::zero(),
-        0,              // epoch
-        0,              // dag_round
-        Hash::zero(),   // dag_anchor
-        Hash::zero(),   // validators_hash
-        Hash::zero(),   // next_validators_hash
-        1_000_000,      // gas_limit
-        0,              // gas_used
+        0,            // epoch
+        0,            // dag_round
+        Hash::zero(), // dag_anchor
+        Hash::zero(), // validators_hash
+        Hash::zero(), // next_validators_hash
+        1_000_000,    // gas_limit
+        0,            // gas_used
         Amount::from_drop(1_000_000_000),
         vec![],
     )
@@ -49,7 +52,7 @@ fn test_tx() -> Transaction {
         21_000,                           // gas_limit (must be > 0)
         Amount::from_drop(1_000_000_000), // gas_price
         TxType::Transfer,
-        vec![],            // data (Transfer allows empty)
+        vec![], // data (Transfer allows empty)
         Signature::Unsigned,
     )
     .expect("test transaction is always valid")
@@ -61,13 +64,22 @@ fn test_tx() -> Transaction {
 fn message_error_inverted_range_display_contains_heights() {
     let err = MessageError::InvertedRange { from: 100, to: 50 };
     let msg = err.to_string();
-    assert!(msg.contains("100"), "expected from_height in display, got: {msg}");
-    assert!(msg.contains("50"), "expected to_height in display, got: {msg}");
+    assert!(
+        msg.contains("100"),
+        "expected from_height in display, got: {msg}"
+    );
+    assert!(
+        msg.contains("50"),
+        "expected to_height in display, got: {msg}"
+    );
 }
 
 #[test]
 fn message_error_range_too_wide_display_contains_got_and_max() {
-    let err = MessageError::RangeTooWide { got: 1000, max: 256 };
+    let err = MessageError::RangeTooWide {
+        got: 1000,
+        max: 256,
+    };
     let msg = err.to_string();
     assert!(msg.contains("1000"), "expected got in display, got: {msg}");
     assert!(msg.contains("256"), "expected max in display, got: {msg}");
@@ -75,13 +87,17 @@ fn message_error_range_too_wide_display_contains_got_and_max() {
 
 #[test]
 fn message_error_encoding_display_contains_reason() {
-    let err = MessageError::Encoding { reason: "unexpected io".to_string() };
+    let err = MessageError::Encoding {
+        reason: "unexpected io".to_string(),
+    };
     assert!(err.to_string().contains("unexpected io"));
 }
 
 #[test]
 fn message_error_decoding_display_contains_reason() {
-    let err = MessageError::Decoding { reason: "bad magic".to_string() };
+    let err = MessageError::Decoding {
+        reason: "bad magic".to_string(),
+    };
     assert!(err.to_string().contains("bad magic"));
 }
 
@@ -165,7 +181,10 @@ fn range_request_validate_rejects_far_beyond_max() {
     let req = RangeRequest::new(0, 10_000);
     assert_eq!(
         req.validate(256),
-        Err(MessageError::RangeTooWide { got: 10_000, max: 256 })
+        Err(MessageError::RangeTooWide {
+            got: 10_000,
+            max: 256
+        })
     );
 }
 
@@ -184,9 +203,9 @@ fn range_request_validate_rejects_max_u64_range() {
 fn range_request_validate_uses_caller_max_not_hardcoded() {
     // Verify the limit comes from the parameter, not a hardcoded constant.
     let req = RangeRequest::new(0, 16);
-    assert!(req.validate(16).is_ok());     // exactly at smaller limit
-    assert!(req.validate(256).is_ok());    // same request, larger limit
-    assert!(req.validate(15).is_err());    // same request, smaller limit
+    assert!(req.validate(16).is_ok()); // exactly at smaller limit
+    assert!(req.validate(256).is_ok()); // same request, larger limit
+    assert!(req.validate(15).is_err()); // same request, smaller limit
 }
 
 // ── RangeRequest — serde roundtrip ───────────────────────────────────────────
@@ -297,8 +316,12 @@ fn gossip_new_transaction_routes_to_tx_topic() {
 #[test]
 fn gossip_message_topic_is_versioned() {
     // Each topic must carry a version suffix for forward-compat.
-    assert!(GossipMessage::NewBlock(test_block(0)).topic().ends_with("/1"));
-    assert!(GossipMessage::NewTransaction(test_tx()).topic().ends_with("/1"));
+    assert!(GossipMessage::NewBlock(test_block(0))
+        .topic()
+        .ends_with("/1"));
+    assert!(GossipMessage::NewTransaction(test_tx())
+        .topic()
+        .ends_with("/1"));
 }
 
 // ── GossipMessage — encode / decode roundtrip ─────────────────────────────────
@@ -412,7 +435,10 @@ fn range_request_validate_rejects_inverted_at_max_height() {
     let req = RangeRequest::new(u64::MAX, u64::MAX - 1);
     assert_eq!(
         req.validate(256),
-        Err(MessageError::InvertedRange { from: u64::MAX, to: u64::MAX - 1 })
+        Err(MessageError::InvertedRange {
+            from: u64::MAX,
+            to: u64::MAX - 1
+        })
     );
 }
 
@@ -421,21 +447,27 @@ fn range_request_validate_rejects_inverted_at_max_height() {
 #[test]
 fn range_response_validate_size_accepts_exactly_at_limit() {
     let resp = RangeResponse::new(vec![]);
-    let size = usize::try_from(bincode::serialized_size(&resp).expect("size"))
-        .expect("size fits usize");
+    let size =
+        usize::try_from(bincode::serialized_size(&resp).expect("size")).expect("size fits usize");
     // At exactly the limit → accept.
-    assert!(resp.validate_size(size).is_ok(), "at exactly the limit must be accepted");
+    assert!(
+        resp.validate_size(size).is_ok(),
+        "at exactly the limit must be accepted"
+    );
 }
 
 #[test]
 fn range_response_validate_size_rejects_one_byte_under_actual_size() {
     let resp = RangeResponse::new(vec![]);
-    let size = usize::try_from(bincode::serialized_size(&resp).expect("size"))
-        .expect("size fits usize");
+    let size =
+        usize::try_from(bincode::serialized_size(&resp).expect("size")).expect("size fits usize");
     // Assert the precondition rather than silently skipping the check.
     // An empty RangeResponse always has at least a Vec length prefix (8 bytes
     // in bincode v1), so size == 0 would indicate a broken bincode assumption.
-    assert!(size > 0, "empty RangeResponse must have non-zero serialized size");
+    assert!(
+        size > 0,
+        "empty RangeResponse must have non-zero serialized size"
+    );
     assert!(
         resp.validate_size(size - 1).is_err(),
         "one byte below actual size must be rejected"
@@ -448,7 +480,16 @@ fn range_response_validate_size_rejects_one_byte_under_actual_size() {
 fn all_gossip_topic_constants_are_versioned() {
     // The topic strings themselves carry the version — not just the messages.
     // This test pins the constants directly so a rename would be caught here.
-    assert!(config::TOPIC_BLOCKS.ends_with("/1"), "TOPIC_BLOCKS must be versioned");
-    assert!(config::TOPIC_TX.ends_with("/1"), "TOPIC_TX must be versioned");
-    assert!(config::TOPIC_DAG.ends_with("/1"), "TOPIC_DAG must be versioned");
+    assert!(
+        config::TOPIC_BLOCKS.ends_with("/1"),
+        "TOPIC_BLOCKS must be versioned"
+    );
+    assert!(
+        config::TOPIC_TX.ends_with("/1"),
+        "TOPIC_TX must be versioned"
+    );
+    assert!(
+        config::TOPIC_DAG.ends_with("/1"),
+        "TOPIC_DAG must be versioned"
+    );
 }

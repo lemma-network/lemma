@@ -160,7 +160,10 @@ impl RangeRequest {
     /// dispatching. Deserialization from peer input via serde bypasses
     /// constructors, so validation must be a separate step.
     pub fn new(from_height: u64, to_height: u64) -> Self {
-        RangeRequest { from_height, to_height }
+        RangeRequest {
+            from_height,
+            to_height,
+        }
     }
 
     /// Validate the range against the configured maximum width.
@@ -181,15 +184,18 @@ impl RangeRequest {
     /// environments can use smaller values.
     pub fn validate(&self, max_range: u64) -> Result<(), MessageError> {
         // checked_sub catches the inverted-range case without arithmetic overflow.
-        let width = self
-            .to_height
-            .checked_sub(self.from_height)
-            .ok_or(MessageError::InvertedRange {
-                from: self.from_height,
-                to: self.to_height,
-            })?;
+        let width =
+            self.to_height
+                .checked_sub(self.from_height)
+                .ok_or(MessageError::InvertedRange {
+                    from: self.from_height,
+                    to: self.to_height,
+                })?;
         if width > max_range {
-            return Err(MessageError::RangeTooWide { got: width, max: max_range });
+            return Err(MessageError::RangeTooWide {
+                got: width,
+                max: max_range,
+            });
         }
         Ok(())
     }
@@ -285,7 +291,10 @@ impl RangeResponse {
             .map(|s| usize::try_from(s).unwrap_or(usize::MAX))
             .unwrap_or(usize::MAX);
         if size > max_bytes {
-            return Err(NetworkError::ResponseTooLarge { got: size, max: max_bytes });
+            return Err(NetworkError::ResponseTooLarge {
+                got: size,
+                max: max_bytes,
+            });
         }
         Ok(())
     }

@@ -96,10 +96,7 @@ fn database_error_displays_reason() {
 #[test]
 fn database_error_displays_empty_reason() {
     // Edge case: RocksDB returns an empty message.
-    assert_eq!(
-        database_err("").to_string(),
-        "RocksDB error: ",
-    );
+    assert_eq!(database_err("").to_string(), "RocksDB error: ",);
 }
 
 // ── Database — Clone + PartialEq ──────────────────────────────────────────────
@@ -181,7 +178,10 @@ fn batch_failed_same_reason_are_equal() {
 
 #[test]
 fn batch_failed_different_reason_are_not_equal() {
-    assert_ne!(batch_failed("write stalled"), batch_failed("compaction error"));
+    assert_ne!(
+        batch_failed("write stalled"),
+        batch_failed("compaction error")
+    );
 }
 
 // ── Corrupted — Display ───────────────────────────────────────────────────────
@@ -231,10 +231,7 @@ fn key_not_found_displays_key() {
 #[test]
 fn key_not_found_displays_empty_key() {
     // Edge case: empty key slice lookup.
-    assert_eq!(
-        key_not_found("").to_string(),
-        "key not found: ",
-    );
+    assert_eq!(key_not_found("").to_string(), "key not found: ",);
 }
 
 // ── KeyNotFound — Clone + PartialEq ──────────────────────────────────────────
@@ -303,7 +300,8 @@ fn invalid_key_length_different_expected_are_not_equal() {
 #[test]
 fn trie_node_not_found_displays_hash() {
     assert_eq!(
-        trie_node_not_found("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc7b4b7b8b8e7a89").to_string(),
+        trie_node_not_found("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc7b4b7b8b8e7a89")
+            .to_string(),
         "trie node not found: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc7b4b7b8b8e7a89",
     );
 }
@@ -455,7 +453,10 @@ fn snapshot_failed_same_reason_are_equal() {
 
 #[test]
 fn snapshot_failed_different_reason_are_not_equal() {
-    assert_ne!(snapshot_failed("disk full"), snapshot_failed("permission denied"));
+    assert_ne!(
+        snapshot_failed("disk full"),
+        snapshot_failed("permission denied")
+    );
 }
 
 // ── RestoreFailed — Display ───────────────────────────────────────────────────
@@ -478,7 +479,10 @@ fn restore_failed_clones_equal_to_original() {
 
 #[test]
 fn restore_failed_same_reason_are_equal() {
-    assert_eq!(restore_failed("file not found"), restore_failed("file not found"));
+    assert_eq!(
+        restore_failed("file not found"),
+        restore_failed("file not found")
+    );
 }
 
 #[test]
@@ -605,10 +609,7 @@ fn trie_node_not_found_and_invalid_proof_with_same_string_are_not_equal() {
 #[test]
 fn trie_root_mismatch_and_invalid_proof_are_not_equal() {
     // TrieRootMismatch has two fields; InvalidProof has one — can never be equal.
-    assert_ne!(
-        trie_root_mismatch("aabb", "ccdd"),
-        invalid_proof("aabb"),
-    );
+    assert_ne!(trie_root_mismatch("aabb", "ccdd"), invalid_proof("aabb"),);
 }
 
 // ── Cross-variant PartialEq — snapshot group ─────────────────────────────────

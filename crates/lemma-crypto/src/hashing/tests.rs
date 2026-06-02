@@ -80,7 +80,11 @@ fn hash_bytes_known_vector() {
     // (zero-length input, default key, no context)
     let expected = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
     let h = hash_bytes(EMPTY);
-    assert_eq!(hex::encode(h.as_bytes()), expected, "blake3 empty-string vector mismatch");
+    assert_eq!(
+        hex::encode(h.as_bytes()),
+        expected,
+        "blake3 empty-string vector mismatch"
+    );
 }
 
 // ─── hash<T> ─────────────────────────────────────────────────────────────────
@@ -123,9 +127,11 @@ fn hash_generic_different_types_same_fields_produce_different_hashes() {
     // their struct (e.g. a `kind: u8` field).
     // Document this expected behaviour so no one is surprised:
     let point_h = hash(&Point { x: 1, y: 2 }).unwrap();
-    let pair_h  = hash(&Pair  { a: 1, b: 2 }).unwrap();
-    assert_eq!(point_h, pair_h,
-        "bincode does not encode type names; same field layout = same hash (by design)");
+    let pair_h = hash(&Pair { a: 1, b: 2 }).unwrap();
+    assert_eq!(
+        point_h, pair_h,
+        "bincode does not encode type names; same field layout = same hash (by design)"
+    );
 }
 
 #[test]
@@ -140,10 +146,12 @@ fn hash_generic_vec_of_bytes_differs_from_hash_bytes_raw() {
     // hash(&vec![1u8, 2, 3]) serializes the Vec length prefix via bincode
     // BEFORE the bytes, so it differs from hash_bytes(&[1, 2, 3]) which hashes
     // the raw slice directly. This is intentional and must be stable.
-    let raw   = hash_bytes(&[1u8, 2, 3]);
+    let raw = hash_bytes(&[1u8, 2, 3]);
     let typed = hash(&vec![1u8, 2, 3]).unwrap();
-    assert_ne!(raw, typed,
-        "hash<Vec<u8>> includes bincode length prefix; hash_bytes is raw — must differ");
+    assert_ne!(
+        raw, typed,
+        "hash<Vec<u8>> includes bincode length prefix; hash_bytes is raw — must differ"
+    );
 }
 
 #[test]
@@ -196,7 +204,10 @@ fn sha256_fox_known_vector() {
     // was derived from the same crate run.
     let expected = "d7a8fbb307d7809469ca9abcb0082e4f\
                     8d5651e46d3cdb762d02d0bf37c9e592";
-    assert_eq!(hex::encode(sha256(b"The quick brown fox jumps over the lazy dog").as_bytes()), expected);
+    assert_eq!(
+        hex::encode(sha256(b"The quick brown fox jumps over the lazy dog").as_bytes()),
+        expected
+    );
 }
 
 #[test]
@@ -229,8 +240,11 @@ fn keccak256_empty_input_known_vector() {
     // Distinct from SHA3-256("") (different padding byte 0x01 vs 0x06).
     let expected = "c5d2460186f7233c927e7db2dcc703c0\
                     e500b653ca82273b7bfad8045d85a470";
-    assert_eq!(hex::encode(keccak256(EMPTY).as_bytes()), expected,
-        "keccak256 empty-string vector must match Ethereum canonical value");
+    assert_eq!(
+        hex::encode(keccak256(EMPTY).as_bytes()),
+        expected,
+        "keccak256 empty-string vector must match Ethereum canonical value"
+    );
 }
 
 #[test]
@@ -260,14 +274,17 @@ fn all_four_functions_produce_different_outputs_for_same_input() {
     // stream (bincode-serialized slice vs raw slice) so it also differs from
     // hash_bytes for the same semantic content.
     let raw = hash_bytes(HELLO);
-    let s2  = sha256(HELLO);
-    let k   = keccak256(HELLO);
+    let s2 = sha256(HELLO);
+    let k = keccak256(HELLO);
     let gen = hash(&HELLO.to_vec()).unwrap(); // bincode-prefixed
 
-    assert_ne!(raw, s2,  "blake3 ≠ sha256 for same input");
-    assert_ne!(raw, k,   "blake3 ≠ keccak256 for same input");
-    assert_ne!(s2,  k,   "sha256 ≠ keccak256 for same input");
-    assert_ne!(raw, gen, "hash_bytes (raw) ≠ hash<Vec<u8>> (bincode-prefixed)");
+    assert_ne!(raw, s2, "blake3 ≠ sha256 for same input");
+    assert_ne!(raw, k, "blake3 ≠ keccak256 for same input");
+    assert_ne!(s2, k, "sha256 ≠ keccak256 for same input");
+    assert_ne!(
+        raw, gen,
+        "hash_bytes (raw) ≠ hash<Vec<u8>> (bincode-prefixed)"
+    );
 }
 
 #[test]
@@ -277,5 +294,3 @@ fn hash_bytes_output_is_a_valid_hash_type() {
     let roundtripped = Hash::from_bytes(*h.as_bytes());
     assert_eq!(h, roundtripped);
 }
-
-

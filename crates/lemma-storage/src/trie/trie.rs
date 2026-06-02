@@ -89,7 +89,10 @@ impl<'db> MerklePatriciaTrie<'db> {
     /// [`get`]: MerklePatriciaTrie::get
     /// [`insert`]: MerklePatriciaTrie::insert
     pub fn with_root(db: &'db LemmaDb, root: Hash) -> Self {
-        Self { db, root: Some(root) }
+        Self {
+            db,
+            root: Some(root),
+        }
     }
 
     /// The current root hash, or `None` if the trie is empty.
@@ -151,11 +154,17 @@ impl<'db> MerklePatriciaTrie<'db> {
     /// - [`StorageError::SerializationFailed`] — bincode decode failed.
     pub fn generate_proof(&self, key: &[u8]) -> Result<MerkleProof, StorageError> {
         let key_hex = hex::encode(key);
-        let root = self.root.ok_or(StorageError::InvalidProof { key: key_hex })?;
+        let root = self
+            .root
+            .ok_or(StorageError::InvalidProof { key: key_hex })?;
         let path = NibblePath::from_bytes(key);
         let mut proof_nodes = Vec::new();
         let value = self.collect_proof(root, path, &mut proof_nodes)?;
-        Ok(MerkleProof { key: key.to_vec(), value, nodes: proof_nodes })
+        Ok(MerkleProof {
+            key: key.to_vec(),
+            value,
+            nodes: proof_nodes,
+        })
     }
 
     // ── Node I/O ──────────────────────────────────────────────────────────────
@@ -165,7 +174,9 @@ impl<'db> MerklePatriciaTrie<'db> {
         let bytes = self
             .db
             .get(CF_TRIE_NODES, hash.as_bytes())?
-            .ok_or_else(|| StorageError::TrieNodeNotFound { hash: hash.to_string() })?;
+            .ok_or_else(|| StorageError::TrieNodeNotFound {
+                hash: hash.to_string(),
+            })?;
         bincode::deserialize(&bytes).map_err(StorageError::from)
     }
 
@@ -173,7 +184,8 @@ impl<'db> MerklePatriciaTrie<'db> {
     fn store_node(&self, batch: &mut WriteBatch, node: &TrieNode) -> Result<Hash, StorageError> {
         let hash = node.hash()?;
         let encoded = bincode::serialize(node)?;
-        self.db.batch_put(batch, CF_TRIE_NODES, hash.as_bytes(), &encoded)?;
+        self.db
+            .batch_put(batch, CF_TRIE_NODES, hash.as_bytes(), &encoded)?;
         Ok(hash)
     }
 
@@ -189,9 +201,7 @@ impl<'db> MerklePatriciaTrie<'db> {
             Some(h) => h,
         };
         match self.load_node(hash)? {
-            TrieNode::Leaf { path: lp, value } => {
-                Ok(if lp == path { Some(value) } else { None })
-            }
+            TrieNode::Leaf { path: lp, value } => Ok(if lp == path { Some(value) } else { None }),
             TrieNode::Extension { prefix, child } => {
                 if path.starts_with(&prefix) {
                     self.get_recursive(Some(child), path.skip(prefix.len()))
@@ -199,14 +209,18 @@ impl<'db> MerklePatriciaTrie<'db> {
                     Ok(None)
                 }
             }
-            TrieNode::Branch { children, value: bv } => {
+            TrieNode::Branch {
+                children,
+                value: bv,
+            } => {
                 if path.is_empty() {
                     Ok(bv)
                 } else {
                     // path is non-empty: guarded by is_empty() check above.
                     let nibble = path
                         .get(0)
-                        .expect("path non-empty: guarded by is_empty() check") as usize;
+                        .expect("path non-empty: guarded by is_empty() check")
+                        as usize;
                     self.get_recursive(children[nibble], path.skip(1))
                 }
             }
@@ -228,9 +242,19 @@ impl<'db> MerklePatriciaTrie<'db> {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         let node = self.load_node(node_hash)?;
         match node {
-            TrieNode::Leaf { path: leaf_path, value: leaf_val } => {
-                out.push(ProofNode::Leaf { path: leaf_path.clone(), value: leaf_val.clone() });
-                Ok(if leaf_path == path { Some(leaf_val) } else { None })
+            TrieNode::Leaf {
+                path: leaf_path,
+                value: leaf_val,
+            } => {
+                out.push(ProofNode::Leaf {
+                    path: leaf_path.clone(),
+                    value: leaf_val.clone(),
+                });
+                Ok(if leaf_path == path {
+                    Some(leaf_val)
+                } else {
+                    None
+                })
             }
             TrieNode::Extension { prefix, child } => {
                 let prefix_len = prefix.len();
@@ -243,8 +267,14 @@ impl<'db> MerklePatriciaTrie<'db> {
                     Ok(None)
                 }
             }
-            TrieNode::Branch { children, value: branch_val } => {
-                out.push(ProofNode::Branch { children, value: branch_val.clone() });
+            TrieNode::Branch {
+                children,
+                value: branch_val,
+            } => {
+                out.push(ProofNode::Branch {
+                    children,
+                    value: branch_val.clone(),
+                });
                 if path.is_empty() {
                     // Path exhausted at this branch — value stored here.
                     Ok(branch_val)
@@ -255,9 +285,7 @@ impl<'db> MerklePatriciaTrie<'db> {
                         .expect("path non-empty: guarded by is_empty() check")
                         as usize;
                     match children[nibble] {
-                        Some(child_hash) => {
-                            self.collect_proof(child_hash, path.skip(1), out)
-                        }
+                        Some(child_hash) => self.collect_proof(child_hash, path.skip(1), out),
                         None => {
                             // Empty child slot — key is absent.
                             Ok(None)
@@ -281,15 +309,17 @@ impl<'db> MerklePatriciaTrie<'db> {
             // Empty slot: create a leaf directly.
             None => self.store_node(batch, &TrieNode::leaf(path, value)),
             Some(h) => match self.load_node(h)? {
-                TrieNode::Leaf { path: lp, value: lv } => {
-                    self.insert_at_leaf(batch, lp, lv, path, value)
-                }
+                TrieNode::Leaf {
+                    path: lp,
+                    value: lv,
+                } => self.insert_at_leaf(batch, lp, lv, path, value),
                 TrieNode::Extension { prefix, child } => {
                     self.insert_at_extension(batch, prefix, child, path, value)
                 }
-                TrieNode::Branch { children, value: bv } => {
-                    self.insert_at_branch(batch, children, bv, path, value)
-                }
+                TrieNode::Branch {
+                    children,
+                    value: bv,
+                } => self.insert_at_branch(batch, children, bv, path, value),
             },
         }
     }
@@ -306,7 +336,13 @@ impl<'db> MerklePatriciaTrie<'db> {
     ) -> Result<Hash, StorageError> {
         if path.is_empty() {
             // Key terminates at this branch — update the branch value.
-            return self.store_node(batch, &TrieNode::Branch { children, value: Some(value) });
+            return self.store_node(
+                batch,
+                &TrieNode::Branch {
+                    children,
+                    value: Some(value),
+                },
+            );
         }
         // path is non-empty: guarded by is_empty() check above.
         let nibble = path
@@ -314,7 +350,13 @@ impl<'db> MerklePatriciaTrie<'db> {
             .expect("path non-empty: guarded by is_empty() check") as usize;
         let new_child = self.insert_recursive(batch, children[nibble], path.skip(1), value)?;
         children[nibble] = Some(new_child);
-        self.store_node(batch, &TrieNode::Branch { children, value: branch_value })
+        self.store_node(
+            batch,
+            &TrieNode::Branch {
+                children,
+                value: branch_value,
+            },
+        )
     }
 
     // ── Insert at Extension ───────────────────────────────────────────────────
@@ -365,7 +407,8 @@ impl<'db> MerklePatriciaTrie<'db> {
         // (`insert_at_extension` returns early when `common == prefix.len()`).
         let ext_nibble = prefix
             .get(common)
-            .expect("split_extension: common < prefix.len() guaranteed by caller") as usize;
+            .expect("split_extension: common < prefix.len() guaranteed by caller")
+            as usize;
         // Remaining extension tail (if the prefix was longer than 1 nibble past `common`).
         if common + 1 < prefix.len() {
             let sub = TrieNode::extension(prefix.skip(common + 1), child);
@@ -383,7 +426,8 @@ impl<'db> MerklePatriciaTrie<'db> {
             // path.len() != common is guaranteed by the outer if-else.
             let n = path
                 .get(common)
-                .expect("split_extension: path.len() > common guaranteed by if-else") as usize;
+                .expect("split_extension: path.len() > common guaranteed by if-else")
+                as usize;
             let leaf = TrieNode::leaf(path.skip(common + 1), new_value);
             let lh = self.store_node(batch, &leaf)?;
             branch.set_child(n, lh);
@@ -411,9 +455,8 @@ impl<'db> MerklePatriciaTrie<'db> {
         // Use leaf_path (the existing path) for the Extension — not new_path. Both share
         // the same first `common` nibbles by definition, but the existing path is canonical.
         let shared_prefix = leaf_path.take(common);
-        let bh = self.build_diverging_branch(
-            batch, leaf_path, leaf_value, &new_path, new_value, common,
-        )?;
+        let bh = self
+            .build_diverging_branch(batch, leaf_path, leaf_value, &new_path, new_value, common)?;
         if common > 0 {
             let ext = TrieNode::extension(shared_prefix, bh);
             self.store_node(batch, &ext)
@@ -442,7 +485,8 @@ impl<'db> MerklePatriciaTrie<'db> {
             // leaf_path.len() != common guaranteed by the outer if-else.
             let n = leaf_path
                 .get(common)
-                .expect("build_diverging_branch: leaf_path.len() > common guaranteed") as usize;
+                .expect("build_diverging_branch: leaf_path.len() > common guaranteed")
+                as usize;
             let leaf = TrieNode::leaf(leaf_path.skip(common + 1), leaf_value);
             branch.set_child(n, self.store_node(batch, &leaf)?);
         }
@@ -455,7 +499,8 @@ impl<'db> MerklePatriciaTrie<'db> {
             // new_path.len() != common guaranteed by the outer if-else.
             let n = new_path
                 .get(common)
-                .expect("build_diverging_branch: new_path.len() > common guaranteed") as usize;
+                .expect("build_diverging_branch: new_path.len() > common guaranteed")
+                as usize;
             let leaf = TrieNode::leaf(new_path.skip(common + 1), new_value);
             branch.set_child(n, self.store_node(batch, &leaf)?);
         }

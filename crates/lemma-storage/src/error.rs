@@ -40,7 +40,6 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StorageError {
     // ── Database I/O ─────────────────────────────────────────────────────────
-
     /// A RocksDB operation failed.
     ///
     /// The underlying `rocksdb::Error` is converted to its `Display` string
@@ -73,7 +72,6 @@ pub enum StorageError {
     Corrupted { reason: String },
 
     // ── Key / Value ──────────────────────────────────────────────────────────
-
     /// A raw byte-key lookup returned no result.
     ///
     /// Distinguished from [`AccountNotFound`] by scope: `KeyNotFound` is for
@@ -93,7 +91,6 @@ pub enum StorageError {
     InvalidKeyLength { expected: usize, got: usize },
 
     // ── Trie ─────────────────────────────────────────────────────────────────
-
     /// A trie node referenced by hash was not found in the `trie_nodes`
     /// column family.
     ///
@@ -127,7 +124,6 @@ pub enum StorageError {
     InvalidProof { key: String },
 
     // ── State ─────────────────────────────────────────────────────────────────
-
     /// No account exists at the given address.
     ///
     /// Returned by `WorldState::get_account` when the address has no entry in
@@ -141,7 +137,6 @@ pub enum StorageError {
     AccountNotFound { address: String },
 
     // ── Snapshot ──────────────────────────────────────────────────────────────
-
     /// A state snapshot could not be created.
     ///
     /// Snapshots are taken at epoch boundaries for crash recovery. A failure
@@ -159,7 +154,6 @@ pub enum StorageError {
     RestoreFailed { reason: String },
 
     // ── Serialization ─────────────────────────────────────────────────────────
-
     /// A serialization or deserialization step failed.
     ///
     /// Occurs when encoding a value to bytes before writing to RocksDB, or

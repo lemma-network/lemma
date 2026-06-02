@@ -44,7 +44,7 @@ impl Network {
         match self {
             Network::Mainnet => HRP_MAINNET,
             Network::Testnet => HRP_TESTNET,
-            Network::Devnet  => HRP_DEVNET,
+            Network::Devnet => HRP_DEVNET,
         }
     }
 }
@@ -54,7 +54,7 @@ impl std::fmt::Display for Network {
         match self {
             Network::Mainnet => write!(f, "mainnet"),
             Network::Testnet => write!(f, "testnet"),
-            Network::Devnet  => write!(f, "devnet"),
+            Network::Devnet => write!(f, "devnet"),
         }
     }
 }
@@ -66,10 +66,7 @@ impl std::fmt::Display for Network {
 /// Uses `AddressType::Regular` (prefix `lem1q...`, `tlem1q...`, `dlem1q...`).
 /// Returns a `String` — infallible because the HRP constants always pass
 /// `Address::to_bech32`'s validation guard.
-pub fn format_address(
-    address: &lemma_core::Address,
-    network: Network,
-) -> String {
+pub fn format_address(address: &lemma_core::Address, network: Network) -> String {
     address
         .to_bech32(network.hrp(), AddressType::Regular)
         .expect("HRP constants are always valid — encoding is infallible")
@@ -80,11 +77,7 @@ pub fn format_address(
 /// Format: `<dir>/<bech32m_address>.key`
 ///
 /// Example: `~/.lemma/wallets/dlem1q8k2d...l7wz.key`
-pub fn keystore_path(
-    dir: &Path,
-    address: &lemma_core::Address,
-    network: Network,
-) -> PathBuf {
+pub fn keystore_path(dir: &Path, address: &lemma_core::Address, network: Network) -> PathBuf {
     let addr_str = format_address(address, network);
     dir.join(format!("{addr_str}.key"))
 }
@@ -102,8 +95,10 @@ pub fn address_from_keystore(
     keystore_path: &Path,
     network: Network,
 ) -> Result<String, LemmaCliError> {
-    let bytes = std::fs::read(keystore_path)
-        .map_err(|e| LemmaCliError::KeystoreIo { path: keystore_path.to_path_buf(), source: e })?;
+    let bytes = std::fs::read(keystore_path).map_err(|e| LemmaCliError::KeystoreIo {
+        path: keystore_path.to_path_buf(),
+        source: e,
+    })?;
 
     // Length check is canonical in from_keystore_bytes (AGENTS §2.1 — one way).
     let kp = KeyPair::from_keystore_bytes(&bytes)?;

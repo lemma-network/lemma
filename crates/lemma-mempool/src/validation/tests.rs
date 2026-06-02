@@ -38,7 +38,10 @@ fn empty_world_state() -> (WorldState, TempDir) {
 
 /// A `ValidationContext` with `chain_id = 1` and zero base fee.
 fn default_ctx() -> ValidationContext {
-    ValidationContext { chain_id: 1, base_fee: Amount::zero() }
+    ValidationContext {
+        chain_id: 1,
+        base_fee: Amount::zero(),
+    }
 }
 
 /// Build a minimal signed `Transfer` transaction.
@@ -74,7 +77,9 @@ fn signed_transfer(
 /// Fund `address` with `balance` Drop in `state`.
 fn fund(state: &mut WorldState, address: &Address, balance: Amount) {
     let account = Account::new_eoa(balance);
-    state.put_account(address, &account).expect("put_account must succeed in test");
+    state
+        .put_account(address, &account)
+        .expect("put_account must succeed in test");
 }
 
 // ── Happy path ────────────────────────────────────────────────────────────────
@@ -84,7 +89,11 @@ fn validate_accepts_valid_signed_funded_transaction() {
     let kp = KeyPair::generate().expect("keygen");
     let (mut state, _dir) = empty_world_state();
     // Fund the sender with 1 LEM (10^18 Drop) — more than enough for gas + value.
-    fund(&mut state, kp.address(), Amount::from_lem(1).expect("1 LEM"));
+    fund(
+        &mut state,
+        kp.address(),
+        Amount::from_lem(1).expect("1 LEM"),
+    );
     let tx = signed_transfer(&kp, 0, Amount::from_drop(1_000), Amount::zero(), 1);
     assert!(validate_transaction(&tx, &kp.public_key(), &state, &default_ctx()).is_ok());
 }
@@ -128,7 +137,10 @@ fn validate_rejects_zero_gas_limit() {
     sign_transaction(&mut tx, &kp).expect("signing must succeed with gas_limit=0");
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject zero gas_limit");
-    assert!(matches!(err, MempoolError::ZeroGasLimit { .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::ZeroGasLimit { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 // ── Step 2: chain_id mismatch ─────────────────────────────────────────────────
@@ -142,7 +154,14 @@ fn validate_rejects_wrong_chain_id() {
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject wrong chain_id");
     assert!(
-        matches!(err, MempoolError::ChainIdMismatch { tx_chain_id: 99, expected_chain_id: 1, .. }),
+        matches!(
+            err,
+            MempoolError::ChainIdMismatch {
+                tx_chain_id: 99,
+                expected_chain_id: 1,
+                ..
+            }
+        ),
         "unexpected err: {err}"
     );
 }
@@ -155,8 +174,14 @@ fn validate_rejects_oversized_transaction() {
     let (state, _dir) = empty_world_state();
     // Attach data that will push the serialized size well over MAX_TX_SIZE.
     let mut tx = Transaction::new(
-        Hash::zero(), *kp.address(), Some(Address::zero()),
-        0, 1, Amount::zero(), 1_000_000, Amount::zero(),
+        Hash::zero(),
+        *kp.address(),
+        Some(Address::zero()),
+        0,
+        1,
+        Amount::zero(),
+        1_000_000,
+        Amount::zero(),
         TxType::ContractCall,
         vec![0xAB; MAX_TX_SIZE + 1],
         Signature::Unsigned,
@@ -165,7 +190,10 @@ fn validate_rejects_oversized_transaction() {
     sign_transaction(&mut tx, &kp).expect("signing must succeed");
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject oversized transaction");
-    assert!(matches!(err, MempoolError::TransactionTooLarge { .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::TransactionTooLarge { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 // ── Step 4: pubkey/address mismatch ──────────────────────────────────────────
@@ -179,7 +207,10 @@ fn validate_rejects_pubkey_not_matching_sender() {
     let tx = signed_transfer(&kp_real, 0, Amount::zero(), Amount::zero(), 1);
     let err = validate_transaction(&tx, &kp_attacker.public_key(), &state, &default_ctx())
         .expect_err("must reject pubkey/address mismatch");
-    assert!(matches!(err, MempoolError::InvalidSignature { .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::InvalidSignature { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 // ── Step 5: invalid signature ─────────────────────────────────────────────────
@@ -190,14 +221,25 @@ fn validate_rejects_unsigned_transaction() {
     let (state, _dir) = empty_world_state();
     // Build a tx with Signature::Unsigned — do NOT call sign_transaction.
     let tx = Transaction::new(
-        Hash::zero(), *kp.address(), Some(Address::zero()),
-        0, 1, Amount::zero(), 1_000_000, Amount::zero(),
-        TxType::Transfer, vec![], Signature::Unsigned,
+        Hash::zero(),
+        *kp.address(),
+        Some(Address::zero()),
+        0,
+        1,
+        Amount::zero(),
+        1_000_000,
+        Amount::zero(),
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
     )
     .expect("construction must succeed");
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject unsigned transaction");
-    assert!(matches!(err, MempoolError::InvalidSignature { .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::InvalidSignature { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 #[test]
@@ -206,14 +248,20 @@ fn validate_rejects_tampered_signature() {
     let (state, _dir) = empty_world_state();
     let mut tx = signed_transfer(&kp, 0, Amount::zero(), Amount::zero(), 1);
     // Corrupt the classical signature bytes.
-    if let Signature::Hybrid { ref mut classical, .. } = tx.signature {
+    if let Signature::Hybrid {
+        ref mut classical, ..
+    } = tx.signature
+    {
         if let Some(b) = classical.first_mut() {
             *b = b.wrapping_add(1);
         }
     }
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject tampered signature");
-    assert!(matches!(err, MempoolError::InvalidSignature { .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::InvalidSignature { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 // ── Step 6: nonce too low ─────────────────────────────────────────────────────
@@ -225,13 +273,22 @@ fn validate_rejects_stale_nonce() {
     // Account already has nonce=5 on chain.
     let mut account = Account::new_eoa(Amount::from_lem(1).expect("1 LEM"));
     account.nonce = 5;
-    state.put_account(kp.address(), &account).expect("put_account");
+    state
+        .put_account(kp.address(), &account)
+        .expect("put_account");
     // Tx nonce=3 < account nonce=5 → stale.
     let tx = signed_transfer(&kp, 3, Amount::zero(), Amount::zero(), 1);
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject stale nonce");
     assert!(
-        matches!(err, MempoolError::NonceTooLow { tx_nonce: 3, account_nonce: 5, .. }),
+        matches!(
+            err,
+            MempoolError::NonceTooLow {
+                tx_nonce: 3,
+                account_nonce: 5,
+                ..
+            }
+        ),
         "unexpected err: {err}"
     );
 }
@@ -242,14 +299,24 @@ fn validate_rejects_stale_nonce() {
 fn validate_rejects_nonce_gap_exceeding_max() {
     let kp = KeyPair::generate().expect("keygen");
     let (mut state, _dir) = empty_world_state();
-    fund(&mut state, kp.address(), Amount::from_lem(1).expect("1 LEM"));
+    fund(
+        &mut state,
+        kp.address(),
+        Amount::from_lem(1).expect("1 LEM"),
+    );
     // account nonce=0, tx nonce=MAX_NONCE_GAP+1 → gap too large.
     let far_nonce = MAX_NONCE_GAP + 1;
     let tx = signed_transfer(&kp, far_nonce, Amount::zero(), Amount::zero(), 1);
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject nonce gap > MAX_NONCE_GAP");
     assert!(
-        matches!(err, MempoolError::NonceGapTooLarge { max_gap: MAX_NONCE_GAP, .. }),
+        matches!(
+            err,
+            MempoolError::NonceGapTooLarge {
+                max_gap: MAX_NONCE_GAP,
+                ..
+            }
+        ),
         "unexpected err: {err}"
     );
 }
@@ -259,7 +326,11 @@ fn validate_accepts_nonce_at_exact_max_gap() {
     let kp = KeyPair::generate().expect("keygen");
     let (mut state, _dir) = empty_world_state();
     // Fund generously so balance doesn't fail.
-    fund(&mut state, kp.address(), Amount::from_lem(100).expect("100 LEM"));
+    fund(
+        &mut state,
+        kp.address(),
+        Amount::from_lem(100).expect("100 LEM"),
+    );
     // nonce = MAX_NONCE_GAP is exactly the boundary — must be accepted.
     let tx = signed_transfer(&kp, MAX_NONCE_GAP, Amount::zero(), Amount::zero(), 1);
     assert!(
@@ -279,7 +350,10 @@ fn validate_rejects_insufficient_balance_for_gas() {
     let tx = signed_transfer(&kp, 0, Amount::from_drop(1_000), Amount::zero(), 1);
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject when balance < gas cost");
-    assert!(matches!(err, MempoolError::InsufficientBalance { .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::InsufficientBalance { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 #[test]
@@ -291,7 +365,10 @@ fn validate_rejects_insufficient_balance_for_value() {
     let tx = signed_transfer(&kp, 0, Amount::zero(), Amount::from_drop(1_000), 1);
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("must reject when balance < value");
-    assert!(matches!(err, MempoolError::InsufficientBalance { .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::InsufficientBalance { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 #[test]
@@ -301,17 +378,26 @@ fn validate_rejects_balance_overflow_as_insufficient() {
     // u128::MAX gas_price causes overflow in gas_cost; treated as InsufficientBalance.
     fund(&mut state, kp.address(), Amount::from_drop(u128::MAX));
     let mut tx = Transaction::new(
-        Hash::zero(), *kp.address(), Some(Address::zero()),
-        0, 1, Amount::zero(),
-        2,                                  // gas_limit = 2
+        Hash::zero(),
+        *kp.address(),
+        Some(Address::zero()),
+        0,
+        1,
+        Amount::zero(),
+        2,                                    // gas_limit = 2
         Amount::from_drop(u128::MAX / 2 + 1), // gas_price s.t. 2 × gas_price overflows
-        TxType::Transfer, vec![], Signature::Unsigned,
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
     )
     .expect("construction must succeed");
     sign_transaction(&mut tx, &kp).expect("signing must succeed");
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("overflow must yield InsufficientBalance, not panic");
-    assert!(matches!(err, MempoolError::InsufficientBalance { .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::InsufficientBalance { .. }),
+        "unexpected err: {err}"
+    );
 }
 
 // ── Step 9: gas price below base fee ─────────────────────────────────────────
@@ -320,14 +406,28 @@ fn validate_rejects_balance_overflow_as_insufficient() {
 fn validate_rejects_gas_price_below_base_fee() {
     let kp = KeyPair::generate().expect("keygen");
     let (mut state, _dir) = empty_world_state();
-    fund(&mut state, kp.address(), Amount::from_lem(1).expect("1 LEM"));
+    fund(
+        &mut state,
+        kp.address(),
+        Amount::from_lem(1).expect("1 LEM"),
+    );
     let tx = signed_transfer(&kp, 0, Amount::from_drop(100), Amount::zero(), 1);
     // Base fee = 500 > gas_price = 100.
-    let ctx = ValidationContext { chain_id: 1, base_fee: Amount::from_drop(500) };
+    let ctx = ValidationContext {
+        chain_id: 1,
+        base_fee: Amount::from_drop(500),
+    };
     let err = validate_transaction(&tx, &kp.public_key(), &state, &ctx)
         .expect_err("must reject gas_price < base_fee");
     assert!(
-        matches!(err, MempoolError::GasPriceTooLow { provided: 100, base_fee: 500, .. }),
+        matches!(
+            err,
+            MempoolError::GasPriceTooLow {
+                provided: 100,
+                base_fee: 500,
+                ..
+            }
+        ),
         "unexpected err: {err}"
     );
 }
@@ -336,9 +436,16 @@ fn validate_rejects_gas_price_below_base_fee() {
 fn validate_accepts_gas_price_exactly_at_base_fee() {
     let kp = KeyPair::generate().expect("keygen");
     let (mut state, _dir) = empty_world_state();
-    fund(&mut state, kp.address(), Amount::from_lem(1).expect("1 LEM"));
+    fund(
+        &mut state,
+        kp.address(),
+        Amount::from_lem(1).expect("1 LEM"),
+    );
     let tx = signed_transfer(&kp, 0, Amount::from_drop(500), Amount::zero(), 1);
-    let ctx = ValidationContext { chain_id: 1, base_fee: Amount::from_drop(500) };
+    let ctx = ValidationContext {
+        chain_id: 1,
+        base_fee: Amount::from_drop(500),
+    };
     assert!(
         validate_transaction(&tx, &kp.public_key(), &state, &ctx).is_ok(),
         "gas_price == base_fee must be accepted"
@@ -351,7 +458,7 @@ fn validate_accepts_gas_price_exactly_at_base_fee() {
 fn validate_treats_missing_account_as_zero_nonce_and_balance() {
     let kp = KeyPair::generate().expect("keygen");
     let (state, _dir) = empty_world_state(); // sender not in state
-    // nonce=0, value=0, gas_price=0 → total cost=0 → zero balance is enough.
+                                             // nonce=0, value=0, gas_price=0 → total cost=0 → zero balance is enough.
     let tx = signed_transfer(&kp, 0, Amount::zero(), Amount::zero(), 1);
     assert!(
         validate_transaction(&tx, &kp.public_key(), &state, &default_ctx()).is_ok(),
@@ -366,5 +473,8 @@ fn validate_rejects_missing_account_with_nonzero_cost() {
     let tx = signed_transfer(&kp, 0, Amount::from_drop(1), Amount::zero(), 1);
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())
         .expect_err("missing account with nonzero cost must fail balance check");
-    assert!(matches!(err, MempoolError::InsufficientBalance { available: 0, .. }), "unexpected err: {err}");
+    assert!(
+        matches!(err, MempoolError::InsufficientBalance { available: 0, .. }),
+        "unexpected err: {err}"
+    );
 }

@@ -41,12 +41,7 @@
 
 use lemma_core::{address::Address, validator_set::ValidatorSet};
 
-use crate::{
-    dag::block::Slot,
-    error::ConsensusError,
-    reputation::LeaderSwapTable,
-    LEADER_OFFSET,
-};
+use crate::{dag::block::Slot, error::ConsensusError, reputation::LeaderSwapTable, LEADER_OFFSET};
 
 // ── LeaderSchedule ────────────────────────────────────────────────────────────
 
@@ -102,10 +97,7 @@ impl LeaderSchedule {
     /// # Errors
     ///
     /// Returns [`ConsensusError::EmptyCommittee`] if `vset` has no members.
-    pub fn with_offset(
-        vset: &ValidatorSet,
-        offset: u64,
-    ) -> Result<Self, ConsensusError> {
+    pub fn with_offset(vset: &ValidatorSet, offset: u64) -> Result<Self, ConsensusError> {
         Self::with_swap(vset, offset, LeaderSwapTable::identity())
     }
 
@@ -134,7 +126,11 @@ impl LeaderSchedule {
         // This is the canonical committee ordering — identical on every node
         // given the same validator set (AGENTS §7.1 determinism).
         let committee_order: Vec<Address> = vset.members.keys().copied().collect();
-        Ok(Self { committee_order, offset, swap })
+        Ok(Self {
+            committee_order,
+            offset,
+            swap,
+        })
     }
 
     /// Elect the leader for `round`.

@@ -282,8 +282,14 @@ fn all_three_disqualifiers_each_prevent_eligibility_independently() {
     // Verify each flag, in isolation (other two clear), causes Fallback.
 
     // is_express_eligible=false only
-    let r1 = classify(TxType::Transfer, Some(&ExpressHint::new(false, false, false)));
-    assert_eq!(r1.fallback_reason(), Some(FallbackReason::NotCompilerEligible));
+    let r1 = classify(
+        TxType::Transfer,
+        Some(&ExpressHint::new(false, false, false)),
+    );
+    assert_eq!(
+        r1.fallback_reason(),
+        Some(FallbackReason::NotCompilerEligible)
+    );
 
     // reads_shared_state=true only
     let r2 = classify(TxType::Transfer, Some(&ExpressHint::new(true, true, false)));

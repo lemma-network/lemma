@@ -9,8 +9,7 @@ use super::*;
 fn test_peer() -> PeerId {
     use libp2p::identity::{ed25519, Keypair};
     let mut seed = [0u8; 32];
-    let secret =
-        ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed seed is always valid");
+    let secret = ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed seed is always valid");
     let kp = Keypair::from(ed25519::Keypair::from(secret));
     kp.public().to_peer_id()
 }
@@ -19,8 +18,7 @@ fn test_peer() -> PeerId {
 fn test_peer_b() -> PeerId {
     use libp2p::identity::{ed25519, Keypair};
     let mut seed = [1u8; 32];
-    let secret =
-        ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed seed is always valid");
+    let secret = ed25519::SecretKey::try_from_bytes(&mut seed).expect("fixed seed is always valid");
     let kp = Keypair::from(ed25519::Keypair::from(secret));
     kp.public().to_peer_id()
 }
@@ -46,7 +44,10 @@ fn peer_event_invalid_block_has_negative_delta() {
 #[test]
 fn peer_event_invalid_state_chunk_has_negative_delta() {
     assert!(PeerEvent::InvalidStateChunk.delta() < 0.0);
-    assert_eq!(PeerEvent::InvalidStateChunk.delta(), DELTA_INVALID_STATE_CHUNK);
+    assert_eq!(
+        PeerEvent::InvalidStateChunk.delta(),
+        DELTA_INVALID_STATE_CHUNK
+    );
 }
 
 #[test]
@@ -168,7 +169,10 @@ fn remove_peer_returns_info_for_known_peer() {
     table.add_peer(peer);
 
     let info = table.remove_peer(&peer);
-    assert!(info.is_some(), "remove_peer must return Some for a known peer");
+    assert!(
+        info.is_some(),
+        "remove_peer must return Some for a known peer"
+    );
     assert_eq!(info.unwrap().peer_id, peer);
 }
 
@@ -246,14 +250,12 @@ fn record_multiple_events_accumulate_correctly() {
     let peer = test_peer();
     table.add_peer(peer);
 
-    table.record_event(&peer, PeerEvent::InvalidBlock);   // -10
+    table.record_event(&peer, PeerEvent::InvalidBlock); // -10
     table.record_event(&peer, PeerEvent::InvalidMessage); // -5
-    table.record_event(&peer, PeerEvent::ValidBlock);     // +1
+    table.record_event(&peer, PeerEvent::ValidBlock); // +1
 
-    let expected = INITIAL_APP_SCORE
-        + DELTA_INVALID_BLOCK
-        + DELTA_INVALID_MESSAGE
-        + DELTA_VALID_BLOCK;
+    let expected =
+        INITIAL_APP_SCORE + DELTA_INVALID_BLOCK + DELTA_INVALID_MESSAGE + DELTA_VALID_BLOCK;
     assert_eq!(table.score(&peer), Some(expected));
 }
 
@@ -266,7 +268,11 @@ fn record_event_on_unknown_peer_is_noop() {
 
     table.record_event(&peer, PeerEvent::InvalidBlock); // no-op
 
-    assert_eq!(table.score(&peer), None, "unknown peer must not appear in table");
+    assert_eq!(
+        table.score(&peer),
+        None,
+        "unknown peer must not appear in table"
+    );
     assert_eq!(table.peer_count(), 0);
 }
 
@@ -385,8 +391,7 @@ fn graylisted_peers_iterator_yields_only_graylisted() {
         table.record_event(&bad, PeerEvent::InvalidQuorumCert); // -60 total → graylisted
     }
 
-    let graylisted: Vec<PeerId> =
-        table.graylisted_peers().map(|p| p.peer_id).collect();
+    let graylisted: Vec<PeerId> = table.graylisted_peers().map(|p| p.peer_id).collect();
 
     assert_eq!(graylisted.len(), 1);
     assert_eq!(graylisted[0], bad);
@@ -505,8 +510,7 @@ fn connected_peers_iterator_yields_only_connected() {
     table.add_peer(disconnected);
     table.mark_connected(&connected);
 
-    let connected_ids: Vec<PeerId> =
-        table.connected_peers().map(|p| p.peer_id).collect();
+    let connected_ids: Vec<PeerId> = table.connected_peers().map(|p| p.peer_id).collect();
 
     assert_eq!(connected_ids.len(), 1);
     assert_eq!(connected_ids[0], connected);
@@ -532,8 +536,7 @@ fn scores_to_apply_yields_all_peers() {
     table.add_peer(peer_a);
     table.add_peer(peer_b);
 
-    let scores: Vec<(PeerId, f64)> =
-        table.scores_to_apply().map(|(&id, s)| (id, s)).collect();
+    let scores: Vec<(PeerId, f64)> = table.scores_to_apply().map(|(&id, s)| (id, s)).collect();
 
     assert_eq!(scores.len(), 2, "must yield one entry per peer");
 }
@@ -546,8 +549,7 @@ fn scores_to_apply_reflects_current_score() {
     table.record_event(&peer, PeerEvent::InvalidBlock);
 
     let expected_score = INITIAL_APP_SCORE + DELTA_INVALID_BLOCK;
-    let scores: Vec<(PeerId, f64)> =
-        table.scores_to_apply().map(|(&id, s)| (id, s)).collect();
+    let scores: Vec<(PeerId, f64)> = table.scores_to_apply().map(|(&id, s)| (id, s)).collect();
 
     assert_eq!(scores.len(), 1);
     assert_eq!(scores[0].1, expected_score);

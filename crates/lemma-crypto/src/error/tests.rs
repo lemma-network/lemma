@@ -30,7 +30,10 @@ fn invalid_classical_len(got: usize) -> CryptoError {
 
 fn invalid_quantum_len(got: usize) -> CryptoError {
     // expected is always 3293 for Dilithium3 — the parameter set used by lemma-crypto.
-    CryptoError::InvalidQuantumSignatureLength { expected: 3293, got }
+    CryptoError::InvalidQuantumSignatureLength {
+        expected: 3293,
+        got,
+    }
 }
 
 fn invalid_pubkey(reason: &str) -> CryptoError {
@@ -342,7 +345,10 @@ fn key_generation_failed_same_reason_are_equal() {
 
 #[test]
 fn key_generation_failed_different_reason_are_not_equal() {
-    assert_ne!(key_gen_failed("RNG failure"), key_gen_failed("entropy exhausted"));
+    assert_ne!(
+        key_gen_failed("RNG failure"),
+        key_gen_failed("entropy exhausted")
+    );
 }
 
 // ── SerializationFailed — Display ─────────────────────────────────────────────

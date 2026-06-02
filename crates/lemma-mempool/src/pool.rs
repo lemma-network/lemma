@@ -67,7 +67,12 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use lemma_core::{amount::Amount, hash::Hash, transaction::{Transaction, TxType}, Address};
+use lemma_core::{
+    amount::Amount,
+    hash::Hash,
+    transaction::{Transaction, TxType},
+    Address,
+};
 use lemma_crypto::PublicKey;
 use lemma_storage::WorldState;
 
@@ -272,7 +277,10 @@ impl Mempool {
         ctx: &AdmitContext,
     ) -> Result<AdmitOutcome, MempoolError> {
         // ── Step 1: Ingress validation (cheap → expensive per validation.rs) ──
-        let val_ctx = ValidationContext { chain_id: ctx.chain_id, base_fee: ctx.base_fee };
+        let val_ctx = ValidationContext {
+            chain_id: ctx.chain_id,
+            base_fee: ctx.base_fee,
+        };
         validate_transaction(&tx, sender_pubkey, state, &val_ctx)?;
 
         // ── Step 2: Circuit breaker — shed by tx type under load ──────────────
@@ -362,9 +370,20 @@ impl Mempool {
         let sender = tx.sender;
         let nonce = tx.nonce;
 
-        self.entries.insert(hash, PoolEntry { tx, priority, seq, express });
+        self.entries.insert(
+            hash,
+            PoolEntry {
+                tx,
+                priority,
+                seq,
+                express,
+            },
+        );
         self.priority_index.insert((priority, seq), hash);
-        self.by_sender.entry(sender).or_default().insert(nonce, hash);
+        self.by_sender
+            .entry(sender)
+            .or_default()
+            .insert(nonce, hash);
 
         let outcome = match replaced_hash {
             Some(h) => AdmitOutcome::Replaced { replaced_hash: h },

@@ -46,12 +46,7 @@
 
 use std::collections::BTreeMap;
 
-use lemma_core::{
-    address::Address,
-    amount::Amount,
-    validator::Validator,
-    Epoch, QuorumCert,
-};
+use lemma_core::{address::Address, amount::Amount, validator::Validator, Epoch, QuorumCert};
 
 use std::collections::BTreeSet;
 
@@ -104,9 +99,7 @@ pub enum RecoveryError {
     /// Replay-proof guard (spec §6.2 property 3: on-chain record "references
     /// a specific epoch/commit so an old recovery cannot be replayed"). The
     /// caller maintains a `BTreeSet<(epoch_number, commit_index)>` dedup set.
-    #[error(
-        "recovery already applied for epoch {epoch_number} at commit {at_commit_index}"
-    )]
+    #[error("recovery already applied for epoch {epoch_number} at commit {at_commit_index}")]
     Duplicate {
         /// The epoch that already has a recovery.
         epoch_number: u64,
@@ -261,7 +254,11 @@ pub fn force_epoch_close(
     )
     .map_err(|e| RecoveryError::SettlementFailed { source: e })?;
 
-    Ok(RecoveryOutput { epoch_output, recovery_cert, at_commit_index })
+    Ok(RecoveryOutput {
+        epoch_output,
+        recovery_cert,
+        at_commit_index,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
