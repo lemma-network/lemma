@@ -20,8 +20,9 @@ fn write_config_file(json: &str) -> NamedTempFile {
 
 fn valid_config() -> NodeConfig {
     NodeConfig {
-        data_dir: PathBuf::from("/tmp/lemma-data"),
-        genesis_path: PathBuf::from("/tmp/genesis.json"),
+        data_dir:          PathBuf::from("/tmp/lemma-data"),
+        genesis_path:      PathBuf::from("/tmp/genesis.json"),
+        block_interval_ms: 500,
     }
 }
 
@@ -78,6 +79,31 @@ fn validate_rejects_empty_data_dir() {
 fn validate_rejects_empty_genesis_path() {
     let cfg = NodeConfig { genesis_path: PathBuf::from(""), ..valid_config() };
     let err = cfg.validate().expect_err("empty genesis_path must error");
+    assert!(matches!(err, NodeError::Config(_)));
+}
+
+// ── block_interval_ms ────────────────────────────────────────────────────────
+
+#[test]
+fn load_applies_default_block_interval_when_absent_from_json() {
+    let json = r#"{"data_dir":"/tmp/d","genesis_path":"/tmp/g.json"}"#;
+    let f = write_config_file(json);
+    let cfg = NodeConfig::load(f.path()).expect("valid JSON must parse");
+    assert_eq!(cfg.block_interval_ms, 500, "default must be 500 ms");
+}
+
+#[test]
+fn load_accepts_explicit_block_interval() {
+    let json = r#"{"data_dir":"/tmp/d","genesis_path":"/tmp/g.json","block_interval_ms":200}"#;
+    let f = write_config_file(json);
+    let cfg = NodeConfig::load(f.path()).expect("valid JSON must parse");
+    assert_eq!(cfg.block_interval_ms, 200);
+}
+
+#[test]
+fn validate_rejects_zero_block_interval() {
+    let cfg = NodeConfig { block_interval_ms: 0, ..valid_config() };
+    let err = cfg.validate().expect_err("zero interval must error");
     assert!(matches!(err, NodeError::Config(_)));
 }
 
