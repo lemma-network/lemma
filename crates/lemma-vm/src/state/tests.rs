@@ -175,3 +175,78 @@ fn round_trip_write_read_delete_read() {
     view.delete(&addr, key);
     assert_eq!(view.read(&addr, key), None);
 }
+
+// ── Nonce tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn nonce_returns_zero_for_new_account() {
+    let view = InMemoryStateView::new();
+    let addr = test_address(1);
+    assert_eq!(view.nonce(&addr), 0);
+}
+
+#[test]
+fn set_nonce_then_nonce_returns_stored_value() {
+    let mut view = InMemoryStateView::new();
+    let addr = test_address(1);
+    view.set_nonce(&addr, 42);
+    assert_eq!(view.nonce(&addr), 42);
+}
+
+#[test]
+fn set_nonce_overwrites_previous_nonce() {
+    let mut view = InMemoryStateView::new();
+    let addr = test_address(1);
+    view.set_nonce(&addr, 5);
+    view.set_nonce(&addr, 10);
+    assert_eq!(view.nonce(&addr), 10);
+}
+
+#[test]
+fn nonce_is_isolated_per_account() {
+    let mut view = InMemoryStateView::new();
+    let addr_a = test_address(1);
+    let addr_b = test_address(2);
+    view.set_nonce(&addr_a, 7);
+    // addr_b nonce is unaffected.
+    assert_eq!(view.nonce(&addr_b), 0);
+    assert_eq!(view.nonce(&addr_a), 7);
+}
+
+// ── Code tests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn code_returns_none_for_eoa() {
+    let view = InMemoryStateView::new();
+    let addr = test_address(1);
+    assert!(view.code(&addr).is_none());
+}
+
+#[test]
+fn set_code_then_code_returns_stored_bytecode() {
+    let mut view = InMemoryStateView::new();
+    let addr = test_address(1);
+    let bytecode = b"(module)".to_vec();
+    view.set_code(&addr, bytecode.clone());
+    assert_eq!(view.code(&addr), Some(bytecode));
+}
+
+#[test]
+fn set_code_overwrites_previous_bytecode() {
+    let mut view = InMemoryStateView::new();
+    let addr = test_address(1);
+    view.set_code(&addr, b"old".to_vec());
+    view.set_code(&addr, b"new".to_vec());
+    assert_eq!(view.code(&addr), Some(b"new".to_vec()));
+}
+
+#[test]
+fn code_is_isolated_per_address() {
+    let mut view = InMemoryStateView::new();
+    let addr_a = test_address(1);
+    let addr_b = test_address(2);
+    view.set_code(&addr_a, b"contract_a".to_vec());
+    // addr_b has no code.
+    assert!(view.code(&addr_b).is_none());
+    assert!(view.code(&addr_a).is_some());
+}

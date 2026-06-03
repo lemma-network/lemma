@@ -94,6 +94,56 @@ pub trait ContractStateView {
     /// * `addr` — the account address.
     /// * `amount` — the new balance in Drop.
     fn set_balance(&mut self, addr: &Address, amount: Amount);
+
+    /// Read the transaction nonce of an account.
+    ///
+    /// The nonce is incremented after every executed transaction (including
+    /// failed ones) to prevent replay attacks and to derive deterministic
+    /// contract addresses on deploy (08-EXECUTION_SPEC §5).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` — the account address.
+    ///
+    /// # Returns
+    ///
+    /// The current nonce. Returns `0` for accounts that have never sent a
+    /// transaction (new accounts start at nonce 0).
+    fn nonce(&self, addr: &Address) -> u64;
+
+    /// Set the transaction nonce of an account.
+    ///
+    /// Called by the executor after every transaction (success or failure) to
+    /// advance the nonce and prevent replay (08-EXECUTION_SPEC §5).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` — the account address.
+    /// * `nonce` — the new nonce value.
+    fn set_nonce(&mut self, addr: &Address, nonce: u64);
+
+    /// Read deployed bytecode for a contract address.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` — the contract address.
+    ///
+    /// # Returns
+    ///
+    /// `Some(bytecode)` if a contract is deployed at `addr`, `None` if the
+    /// address is an EOA or has never been deployed to.
+    fn code(&self, addr: &Address) -> Option<Vec<u8>>;
+
+    /// Store deployed bytecode at a contract address.
+    ///
+    /// Called by the executor's deploy path after successful compilation and
+    /// address derivation (08-EXECUTION_SPEC §5, B4).
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` — the contract address (derived via `Address::from_deployer`).
+    /// * `code` — the compiled WASM bytecode to store.
+    fn set_code(&mut self, addr: &Address, code: Vec<u8>);
 }
 
 // ── InMemoryStateView ─────────────────────────────────────────────────────────
@@ -113,20 +163,27 @@ pub struct InMemoryStateView {
     storage: BTreeMap<(Address, Vec<u8>), Vec<u8>>,
     /// Account balances in Drop.
     balances: BTreeMap<Address, Amount>,
+    /// Account nonces — incremented after every executed transaction.
+    nonces: BTreeMap<Address, u64>,
+    /// Deployed contract bytecode: `contract_address → WASM bytes`.
+    code: BTreeMap<Address, Vec<u8>>,
 }
 
 impl InMemoryStateView {
-    /// Create an empty state view with no storage and zero balances.
+    /// Create an empty state view with no storage, zero balances, and no code.
     pub fn new() -> Self {
         Self {
             storage: BTreeMap::new(),
             balances: BTreeMap::new(),
+            nonces: BTreeMap::new(),
+            code: BTreeMap::new(),
         }
     }
 
     /// Create a state view pre-seeded with the given balances.
     ///
     /// Useful for tests that need accounts with non-zero starting balances.
+    /// Nonces and code start empty.
     ///
     /// # Arguments
     ///
@@ -135,6 +192,8 @@ impl InMemoryStateView {
         Self {
             storage: BTreeMap::new(),
             balances,
+            nonces: BTreeMap::new(),
+            code: BTreeMap::new(),
         }
     }
 }
@@ -171,6 +230,22 @@ impl ContractStateView for InMemoryStateView {
 
     fn set_balance(&mut self, addr: &Address, amount: Amount) {
         self.balances.insert(*addr, amount);
+    }
+
+    fn nonce(&self, addr: &Address) -> u64 {
+        self.nonces.get(addr).copied().unwrap_or(0)
+    }
+
+    fn set_nonce(&mut self, addr: &Address, nonce: u64) {
+        self.nonces.insert(*addr, nonce);
+    }
+
+    fn code(&self, addr: &Address) -> Option<Vec<u8>> {
+        self.code.get(addr).cloned()
+    }
+
+    fn set_code(&mut self, addr: &Address, code: Vec<u8>) {
+        self.code.insert(*addr, code);
     }
 }
 
