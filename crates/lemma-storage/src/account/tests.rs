@@ -229,7 +229,8 @@ fn mutating_copy_does_not_affect_original() {
     let original = eoa_with_balance(100);
     let mut copy = original;
     copy.nonce = 99;
-    // original must be unchanged
+    // The copy reflects the mutation, the original does not (Account is Copy).
+    assert_eq!(copy.nonce, 99);
     assert_eq!(original.nonce, 0);
 }
 

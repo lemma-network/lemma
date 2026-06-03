@@ -375,7 +375,7 @@ fn deal_verify_with_larger_committee() {
 #[test]
 fn aggregate_of_single_transcript_equals_itself() {
     let (_, _, tr) = valid_setup();
-    let agg = aggregate(&[tr.clone()]).unwrap();
+    let agg = aggregate(std::slice::from_ref(&tr)).unwrap();
     assert_eq!(
         agg.coeff_comms, tr.coeff_comms,
         "aggregate([tr]) coeff_comms must equal tr"

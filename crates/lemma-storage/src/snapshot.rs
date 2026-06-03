@@ -312,7 +312,7 @@ impl SnapshotManager {
             .collect();
 
         // Sort newest-first (highest height first).
-        snapshots.sort_by(|a, b| b.height.cmp(&a.height));
+        snapshots.sort_by_key(|s| std::cmp::Reverse(s.height));
         Ok(snapshots)
     }
 
@@ -530,7 +530,7 @@ impl SnapshotManager {
             .collect();
 
         // Newest-first (highest height first).
-        dirs.sort_by(|a, b| b.0.cmp(&a.0));
+        dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
         Ok(dirs.into_iter().map(|(_, p)| p).collect())
     }
 }

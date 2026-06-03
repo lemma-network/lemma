@@ -399,7 +399,7 @@ fn parse_bootstrap_peers_extracts_peer_id_from_valid_address() {
     let peer = peer_a();
     let addr = addr_with_peer(peer);
 
-    let result = parse_bootstrap_peers(&[addr.clone()]);
+    let result = parse_bootstrap_peers(std::slice::from_ref(&addr));
 
     assert_eq!(result.len(), 1);
     assert_eq!(
