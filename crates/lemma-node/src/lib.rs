@@ -19,6 +19,7 @@
 //! production engine. The Surge dissemination loop drives the DAG, Pulse decides
 //! committed leaders, and each `Commit` maps to one chain `Block` (spec §5.2).
 
+pub mod block_exec;
 pub mod config;
 pub mod dag_driver;
 pub mod error;
@@ -26,6 +27,7 @@ pub mod genesis_boot;
 pub mod network_runner;
 pub mod producer;
 pub mod shield_orchestrator;
+pub mod state_view;
 pub mod sync;
 
 pub use config::NodeConfig;

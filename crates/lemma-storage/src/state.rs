@@ -39,6 +39,8 @@
 //! [`put_account`]: WorldState::put_account
 //! [`BlockHeader::state_root`]: lemma_core::BlockHeader
 
+use std::sync::Arc;
+
 use lemma_core::{Address, Amount, Hash};
 
 use crate::{
@@ -55,7 +57,8 @@ const STORAGE_KEY_LEN: usize = 52;
 
 /// Typed world-state access over a [`LemmaDb`].
 ///
-/// `WorldState` owns the database and tracks the current state trie root.
+/// `WorldState` holds an `Arc<LemmaDb>` so it can be constructed from a shared
+/// database handle (the running node shares `Arc<LemmaDb>` across tasks).
 /// All account and contract storage reads/writes go through this struct.
 ///
 /// ## Lifetime note
@@ -63,7 +66,8 @@ const STORAGE_KEY_LEN: usize = 52;
 /// [`MerklePatriciaTrie`] borrows `&LemmaDb`, creating a self-referential
 /// lifetime if we stored it as a field. Instead `WorldState` stores only the
 /// root hash and creates short-lived trie instances per operation — no lifetime
-/// gymnastics, no `unsafe`.
+/// gymnastics, no `unsafe`. With `Arc<LemmaDb>`, trie instances borrow from
+/// `&*self.db` (the deref target) for the duration of the method call only.
 ///
 /// ## Thread safety
 ///
@@ -71,9 +75,9 @@ const STORAGE_KEY_LEN: usize = 52;
 /// requires an `Arc<RwLock<WorldState>>` on the caller side
 /// (see `04-BUILD_GUIDE.md §10`).
 pub struct WorldState {
-    /// The underlying RocksDB database. Owned by `WorldState` so the trie can
-    /// borrow from it without lifetime issues.
-    db: LemmaDb,
+    /// Shared database handle. `Arc` allows construction from the node's shared
+    /// `Arc<LemmaDb>` without transferring ownership.
+    db: Arc<LemmaDb>,
     /// Current state trie root. `None` for a fresh (empty) state.
     state_root: Option<Hash>,
 }
@@ -85,7 +89,7 @@ impl WorldState {
     ///
     /// The state trie starts empty (`state_root = None`). Use this for genesis
     /// block construction or unit tests.
-    pub fn new(db: LemmaDb) -> Self {
+    pub fn new(db: Arc<LemmaDb>) -> Self {
         Self {
             db,
             state_root: None,
@@ -94,26 +98,16 @@ impl WorldState {
 
     /// Resume world state from a persisted `state_root`.
     ///
-    /// Used when loading an existing chain from disk. The root hash must
-    /// correspond to trie nodes already present in the `trie_nodes` column
-    /// family — if not, the first account read will return
+    /// Used when loading an existing chain from disk, or when the node
+    /// execution layer needs a read-only snapshot of committed state.
+    /// The root hash must correspond to trie nodes already present in the
+    /// `trie_nodes` column family — if not, the first account read will return
     /// [`StorageError::TrieNodeNotFound`].
-    pub fn with_state_root(db: LemmaDb, state_root: Hash) -> Self {
+    pub fn with_state_root(db: Arc<LemmaDb>, state_root: Hash) -> Self {
         Self {
             db,
             state_root: Some(state_root),
         }
-    }
-
-    /// Consume this `WorldState` and return the underlying [`LemmaDb`].
-    ///
-    /// Used by the genesis boot path: after all genesis accounts have been
-    /// written (and [`state_root`] captured), the caller reclaims the DB
-    /// handle to write the genesis block and chain metadata atomically.
-    ///
-    /// [`state_root`]: WorldState::state_root
-    pub fn into_db(self) -> LemmaDb {
-        self.db
     }
 
     // ── State root ────────────────────────────────────────────────────────────
@@ -194,7 +188,7 @@ impl WorldState {
         account: &Account,
     ) -> Result<(), StorageError> {
         let bytes = bincode::serialize(account)?;
-        let mut trie = self.open_trie();
+        let mut trie = self.open_trie_mut();
         trie.insert(address.as_bytes(), bytes)?;
         // insert() writes all trie nodes atomically via WriteBatch before updating
         // trie.root(). If insert() errors, the ? propagates and state_root is
@@ -333,13 +327,12 @@ impl WorldState {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
-    /// Open a trie instance rooted at the current state root.
+    /// Open a mutable trie instance rooted at the current state root.
     ///
-    /// The returned trie is mutable (`MerklePatriciaTrie::insert` takes
-    /// `&mut self`). If `state_root` is `None` (empty state), opens a fresh
-    /// empty trie. Named `open_trie` rather than `trie_mut` to avoid confusion:
-    /// the receiver is `&self` (not `&mut self`) — it's the trie that is mutable.
-    fn open_trie(&self) -> MerklePatriciaTrie<'_> {
+    /// If `state_root` is `None` (empty state), opens a fresh empty trie.
+    /// The trie borrows `&*self.db` for the duration of the returned value;
+    /// the borrow is scoped to the calling method, never stored in `self`.
+    fn open_trie_mut(&self) -> MerklePatriciaTrie<'_> {
         match self.state_root {
             Some(root) => MerklePatriciaTrie::with_root(&self.db, root),
             None => MerklePatriciaTrie::new(&self.db),

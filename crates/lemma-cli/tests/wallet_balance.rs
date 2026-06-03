@@ -15,6 +15,7 @@
 //! exercising `lem_sendTransaction` → mempool admit → VM execution → receipt.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tempfile::TempDir;
 
@@ -157,7 +158,7 @@ fn balance_query_returns_genesis_amount() {
         .expect("get")
         .expect("genesis exists");
     let state_root = genesis_block.header.state_root;
-    let result = WorldState::with_state_root(db2, state_root)
+    let result = WorldState::with_state_root(Arc::new(db2), state_root)
         .get_balance(&address)
         .expect("get_balance");
     assert_eq!(result, balance, "balance must match genesis allocation");
@@ -210,7 +211,7 @@ fn unknown_address_has_zero_balance() {
     assert!(chain.latest_height().unwrap().is_some());
 
     let genesis = chain.get_block_by_height(0).unwrap().unwrap();
-    let state = WorldState::with_state_root(db2, genesis.header.state_root);
+    let state = WorldState::with_state_root(Arc::new(db2), genesis.header.state_root);
 
     // A completely different (unfunded) address should return 0 LEM.
     let unknown = Address::zero();

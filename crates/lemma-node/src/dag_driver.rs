@@ -69,12 +69,19 @@ use lemma_consensus::{
 };
 use lemma_core::{
     address::Address, block::Block, error::CoreError, hash::Hash, header::BlockHeader,
-    signature::Signature, validator_set::ValidatorSet,
+    signature::Signature, transaction::Transaction, validator_set::ValidatorSet,
 };
 use lemma_mempool::pool::Mempool;
 use lemma_storage::{ChainStore, LemmaDb};
 
-use crate::{error::NodeError, producer::commit_block, sync::compute_block_hash};
+use crate::{
+    block_exec::{
+        collect_committed_hashes, execute_committed_block, mempool_post_commit, MAX_TXS_PER_BLOCK,
+    },
+    error::NodeError,
+    producer::commit_block,
+    sync::compute_block_hash,
+};
 
 // ── DagConfig ─────────────────────────────────────────────────────────────────
 
@@ -125,27 +132,41 @@ pub fn build_dag_block(
     )
 }
 
-/// Map a [`Commit`] to a chain [`Block`] (spec §5.2).
+/// Map a [`Commit`] to a chain [`Block`] (spec §5.2), executing pending txs
+/// from the mempool against the parent state.
 ///
-/// The mapping is:
-/// - `header.height`     = `commit.index`
-/// - `header.timestamp`  = `commit.timestamp_ms / 1000` (ms → seconds,
+/// ## Commit → BlockHeader mapping
+///
+/// - `header.height`            = `commit.index`
+/// - `header.timestamp`         = `commit.timestamp_ms / 1000` (ms → seconds,
 ///   clamped to be strictly > parent timestamp for chain monotonicity)
-/// - `header.dag_round`  = `commit.leader.round`
-/// - `header.dag_anchor` = `commit.leader.digest`
+/// - `header.dag_round`         = `commit.leader.round`
+/// - `header.dag_anchor`        = `commit.leader.digest`
+/// - `header.state_root`        = new state root after executing `txs`
+/// - `header.transactions_root` = Blake3 hash of serialized `txs`
+/// - `header.receipts_root`     = Blake3 hash of serialized receipts
+/// - `header.gas_used`          = total gas consumed by `txs`
 ///
-/// Empty txs/receipts — no VM execution in Phase 2.
+/// ## `txs` parameter
+///
+/// The caller is responsible for pulling `txs` from the mempool before
+/// calling this function. Pass an empty `Vec` to produce an empty block
+/// (the fast path used in tests and when the mempool is empty).
 ///
 /// # Errors
 ///
-/// - [`NodeError::Config`] — chain tip missing (call `init_chain` first).
+/// - [`NodeError::Config`] — chain tip missing (call `init_chain` first),
+///   or wasmtime engine init failed.
 /// - [`NodeError::Block`] — `BlockHeader` or `Block` construction failed.
 /// - [`NodeError::Core`] — base-fee arithmetic overflow.
+/// - [`NodeError::Storage`] — world-state write failed during execution.
 /// - [`NodeError::Serialization`] — block hash encoding failed.
 pub fn build_block_from_commit(
     commit: &Commit,
     chain: &ChainStore<'_>,
     proposer: Address,
+    db: Arc<LemmaDb>,
+    txs: Vec<Transaction>,
 ) -> Result<(Block, Hash), NodeError> {
     use lemma_consensus::calculate_base_fee;
 
@@ -171,13 +192,16 @@ pub fn build_block_from_commit(
     // Clamp for monotonicity: must be strictly > parent timestamp.
     let timestamp = (commit.timestamp_ms / 1_000).max(parent.header.timestamp + 1);
 
+    // Execute pending transactions against committed parent state (C·Step 13).
+    let exec_out = execute_committed_block(txs, &parent, commit, proposer, db)?;
+
     let header = BlockHeader::new(
         commit.index, // height = commit index
         timestamp,
-        parent_hash,              // parent_hash from chain tip
-        Hash::zero(),             // transactions_root — no txs (Phase 2)
-        parent.header.state_root, // state_root — unchanged (no VM)
-        Hash::zero(),             // receipts_root — no receipts (Phase 2)
+        parent_hash, // parent_hash from chain tip
+        exec_out.transactions_root,
+        exec_out.state_root, // new state root (was parent.header.state_root)
+        exec_out.receipts_root,
         proposer,
         parent.header.epoch,
         commit.leader.round,  // dag_round — leader round of this commit
@@ -185,12 +209,12 @@ pub fn build_block_from_commit(
         parent.header.validators_hash,
         parent.header.next_validators_hash,
         parent.header.gas_limit,
-        0, // gas_used = 0 (no execution, Phase 2)
+        exec_out.gas_used, // was 0
         base_fee,
         vec![], // extra_data
     )?;
 
-    let block = Block::new(header, vec![], vec![])?;
+    let block = Block::new(header, exec_out.txs, exec_out.receipts)?;
     let hash = compute_block_hash(&block).map_err(|e| NodeError::Serialization(e.to_string()))?;
 
     Ok((block, hash))
@@ -321,12 +345,23 @@ pub async fn run_dag_driver(
             warn!(equivocation = ?equiv, "dag_driver: equivocation detected — evidence deferred to Phase 3");
         }
 
-        // Process commits: build chain blocks and persist them.
+        // Process commits: pull txs from mempool, execute, build chain blocks.
         let chain = ChainStore::new(&db);
         for commit in &output.commits {
-            match build_block_from_commit(commit, &chain, cfg.proposer) {
+            // Pull txs from mempool under a short read-lock (non-blocking).
+            // Cloned out before calling build_block_from_commit (sync path).
+            let txs: Vec<Transaction> = mempool
+                .read()
+                .await
+                .pending_by_priority(MAX_TXS_PER_BLOCK)
+                .into_iter()
+                .cloned()
+                .collect();
+
+            match build_block_from_commit(commit, &chain, cfg.proposer, Arc::clone(&db), txs) {
                 Ok((block, hash)) => {
                     let height = block.height();
+                    let committed_hashes = collect_committed_hashes(&block.transactions);
 
                     {
                         let _guard = write_lock.lock().await;
@@ -345,12 +380,18 @@ pub async fn run_dag_driver(
                         }
                     }
 
-                    mempool.write().await.on_new_block(Instant::now());
+                    // Remove committed txs from pool + tick maintenance.
+                    mempool_post_commit(
+                        &mut *mempool.write().await,
+                        &committed_hashes,
+                        Instant::now(),
+                    );
 
                     info!(
                         height,
                         dag_round = commit.leader.round,
                         commit_idx = commit.index,
+                        tx_count = committed_hashes.len(),
                         "dag_driver: chain block committed from DAG consensus"
                     );
                 }

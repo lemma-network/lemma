@@ -18,6 +18,7 @@
 //! single replacement point — the calling CLI code stays unchanged.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use lemma_core::Address;
 use lemma_storage::{db::LemmaDb, ChainStore, WorldState};
@@ -63,6 +64,6 @@ pub fn query_balance_from_db(data_dir: &Path, address: &Address) -> Result<Strin
     // Resume WorldState from the tip block's state_root so we read the
     // persisted account trie (WorldState::new starts with an empty trie).
     let state_root = tip_block.header.state_root;
-    let balance = WorldState::with_state_root(db, state_root).get_balance(address)?;
+    let balance = WorldState::with_state_root(Arc::new(db), state_root).get_balance(address)?;
     Ok(balance.to_string())
 }

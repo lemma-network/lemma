@@ -9,6 +9,7 @@
 //! Uses real `KeyPair`, `WorldState` (tempfile RocksDB), and `sign_transaction`
 //! — the same pattern as `validation/tests.rs`.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use tempfile::TempDir;
@@ -39,7 +40,7 @@ const GAS_LIMIT: u64 = 1_000_000;
 fn empty_world_state() -> (WorldState, TempDir) {
     let dir = TempDir::new().expect("tempdir must be created");
     let db = LemmaDb::open(dir.path()).expect("LemmaDb must open on fresh tempdir");
-    (WorldState::new(db), dir)
+    (WorldState::new(Arc::new(db)), dir)
 }
 
 /// Fund `address` with `balance` Drop in `state`.

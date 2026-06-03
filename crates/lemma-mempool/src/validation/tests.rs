@@ -10,6 +10,8 @@
 //! - Arithmetic edge cases: overflow in cost calculation.
 //! - Account-not-found handled as zero nonce/balance.
 
+use std::sync::Arc;
+
 use tempfile::TempDir;
 
 use lemma_core::{
@@ -33,7 +35,7 @@ use crate::{
 fn empty_world_state() -> (WorldState, TempDir) {
     let dir = TempDir::new().expect("tempdir must be created");
     let db = LemmaDb::open(dir.path()).expect("LemmaDb::open must succeed on a fresh tempdir");
-    (WorldState::new(db), dir)
+    (WorldState::new(Arc::new(db)), dir)
 }
 
 /// A `ValidationContext` with `chain_id = 1` and zero base fee.

@@ -25,6 +25,8 @@
 //! 12. return InitOutcome::Initialized
 //! ```
 
+use std::sync::Arc;
+
 use lemma_core::{
     address::Address, block::Block, genesis::GenesisConfig, hash::Hash, header::BlockHeader,
     validator_set::ValidatorSet,
@@ -81,17 +83,17 @@ pub fn init_chain(db: LemmaDb, genesis: &GenesisConfig) -> Result<InitOutcome, N
     // Steps 3–4: write pre-funded genesis accounts to the world-state trie.
     // BTreeMap iteration is deterministic (AGENTS §7.1) — same state root on
     // every node for identical genesis configs.
+    // Wrap db in Arc so WorldState can hold a shared reference; the Arc is
+    // local to init_chain — it is not shared with any other task here.
     let accounts = genesis.initial_balances.len();
-    let mut state = WorldState::new(db);
+    let db = Arc::new(db);
+    let mut state = WorldState::new(Arc::clone(&db));
     for (addr, amount) in &genesis.initial_balances {
         state.put_account(addr, &Account::new_eoa(*amount))?;
     }
 
     // Step 5: capture the state root (None when initial_balances is empty).
     let state_root = state.state_root().unwrap_or(Hash::zero());
-
-    // Step 6: reclaim the DB handle for block writes (see WorldState::into_db).
-    let db = state.into_db();
 
     // Step 7: build ValidatorSet for epoch 0 using the canonical constructor
     // (AGENTS §2.2/§2.4 — same filter + overflow handling as advance_epoch).

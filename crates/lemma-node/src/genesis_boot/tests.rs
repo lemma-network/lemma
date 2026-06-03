@@ -184,7 +184,8 @@ fn init_chain_credits_genesis_balance_to_state_trie() {
         bincode::deserialize(&block_bytes).expect("block deserialise must succeed");
     let state_root = block.header.state_root;
 
-    let ws = lemma_storage::state::WorldState::with_state_root(db2, state_root);
+    let ws =
+        lemma_storage::state::WorldState::with_state_root(std::sync::Arc::new(db2), state_root);
     let balance = ws
         .get_balance(&addr(0x01))
         .expect("get_balance must succeed");

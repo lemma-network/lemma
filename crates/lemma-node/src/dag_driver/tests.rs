@@ -2,7 +2,8 @@
 //!
 //! Covers: DagBlock assembly, Commit→chain block mapping (height, timestamp,
 //! dag_round, dag_anchor), timestamp clamping, integration test for the full
-//! single-node DAG driver producing committed chain blocks.
+//! single-node DAG driver producing committed chain blocks with VM execution
+//! (C·Step 13: Transfer tx → real state_root change).
 //!
 //! AGENTS §11: separate tests.rs, `{action}_{outcome}` naming, AAA pattern.
 
@@ -21,8 +22,9 @@ use lemma_core::{
     validator::{ConsensusKey, Stake, Validator, ValidatorStatus, VotingPower},
     validator_set::{Member, ValidatorSet},
 };
-use lemma_mempool::pool::Mempool;
-use lemma_storage::db::LemmaDb;
+use lemma_crypto::{sign_transaction, KeyPair};
+use lemma_mempool::pool::{AdmitContext, Mempool};
+use lemma_storage::{db::LemmaDb, state::WorldState};
 
 use crate::{
     dag_driver::{build_block_from_commit, build_dag_block, DagConfig},
@@ -170,7 +172,8 @@ fn build_block_from_commit_maps_height_to_commit_index() {
     let chain = lemma_storage::ChainStore::new(&db);
     let commit = make_commit(1, 3, proposer);
 
-    let (block, _hash) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    let (block, _hash) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
     assert_eq!(block.height(), 1, "height must equal commit.index");
 }
 
@@ -181,7 +184,8 @@ fn build_block_from_commit_maps_dag_round_and_anchor() {
     let chain = lemma_storage::ChainStore::new(&db);
     let commit = make_commit(1, 3, proposer);
 
-    let (block, _hash) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    let (block, _hash) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
     assert_eq!(
         block.header.dag_round, 3,
         "dag_round must equal commit.leader.round"
@@ -202,7 +206,8 @@ fn build_block_from_commit_timestamp_is_seconds_not_millis() {
     let mut commit = make_commit(1, 3, proposer);
     commit.timestamp_ms = 5_000;
 
-    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    let (block, _) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
     // Genesis timestamp is 1_000_000 (from minimal_genesis), so 5s < parent → clamped.
     // The clamped value must be > parent (1_000_000), which means >= 1_000_001.
     assert!(
@@ -221,7 +226,8 @@ fn build_block_from_commit_timestamp_is_monotonic_when_below_parent() {
     let mut commit = make_commit(1, 3, proposer);
     commit.timestamp_ms = 0; // way before parent
 
-    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    let (block, _) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
     let (_, parent_hash) = lemma_storage::ChainStore::new(&db).tip().unwrap().unwrap();
     let parent = lemma_storage::ChainStore::new(&db)
         .get_block_by_hash(&parent_hash)
@@ -241,10 +247,12 @@ fn build_block_from_commit_produces_empty_block() {
     let chain = lemma_storage::ChainStore::new(&db);
     let commit = make_commit(1, 3, proposer);
 
-    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
-    assert!(block.transactions.is_empty(), "Phase 2: no txs");
-    assert!(block.receipts.is_empty(), "Phase 2: no receipts");
-    assert_eq!(block.header.gas_used, 0, "Phase 2: zero gas used");
+    let (block, _) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
+    // Empty txs vec → no execution → empty block.
+    assert!(block.transactions.is_empty(), "no txs passed → empty block");
+    assert!(block.receipts.is_empty(), "no txs → no receipts");
+    assert_eq!(block.header.gas_used, 0, "no txs → zero gas used");
 }
 
 #[test]
@@ -256,7 +264,7 @@ fn build_block_from_commit_fails_on_uninitialised_chain() {
     let chain = lemma_storage::ChainStore::new(&db);
     let commit = make_commit(1, 3, proposer);
 
-    let result = build_block_from_commit(&commit, &chain, proposer);
+    let result = build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]);
     assert!(
         result.is_err(),
         "uninitialised chain must return Err (no tip)"
@@ -397,7 +405,8 @@ fn build_block_from_commit_uses_commit_timestamp_when_above_parent() {
     let mut commit = make_commit(1, 3, proposer);
     commit.timestamp_ms = 2_000_000_000; // 2_000_000 seconds
 
-    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    let (block, _) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
     assert_eq!(
         block.header.timestamp, 2_000_000,
         "when commit_secs > parent.timestamp, header.timestamp = commit.timestamp_ms / 1000"
@@ -415,7 +424,8 @@ fn build_block_from_commit_clamps_timestamp_below_parent_plus_one() {
     let mut commit = make_commit(1, 3, proposer);
     commit.timestamp_ms = 0; // 0 seconds << genesis 1_000_000
 
-    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    let (block, _) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
 
     // Fetch genesis block to get its timestamp.
     let (_, genesis_hash) = lemma_storage::ChainStore::new(&db).tip().unwrap().unwrap();
@@ -428,5 +438,177 @@ fn build_block_from_commit_clamps_timestamp_below_parent_plus_one() {
         block.header.timestamp,
         genesis.header.timestamp + 1,
         "when commit_secs < parent.timestamp, header.timestamp = parent.timestamp + 1"
+    );
+}
+
+// ── C·Step 13: run_dag_driver executes txs + changes state_root ──────────────
+
+/// C·Step 13 integration test: single-node DAG driver executes a Transfer tx
+/// from the mempool, produces a real receipt, and changes state_root.
+///
+/// This closes the "tx ingestion → VM exec → real state_root" milestone.
+#[tokio::test]
+async fn run_dag_driver_executes_transfer_and_changes_state_root() {
+    // Arrange: fund a sender via genesis, create a signed Transfer tx.
+    let proposer = addr(1);
+    let sender_kp = KeyPair::generate().expect("KeyPair::generate");
+    let sender = *sender_kp.address();
+    let recipient = addr(0xBB);
+
+    // Fund sender with 1_000_000 Drop (covers value + gas with zero gas_price tx).
+    let mut initial_balances = BTreeMap::new();
+    initial_balances.insert(sender, Amount::from_drop(1_000_000));
+    let genesis_cfg = GenesisConfig {
+        chain_id: 1,
+        genesis_timestamp: 1_000_000,
+        initial_gas_limit: 30_000_000,
+        initial_base_fee: Amount::from_drop(1_000_000_000),
+        initial_balances,
+        genesis_validators: {
+            let validator = lemma_core::validator::Validator {
+                address: proposer,
+                consensus_pubkey: dummy_key(),
+                status: lemma_core::validator::ValidatorStatus::Bonded,
+                tombstoned: false,
+                self_stake: lemma_core::validator::Stake {
+                    active: Amount::from_drop(1_000_000),
+                    pending_active: Amount::from_drop(0),
+                    pending_inactive: vec![],
+                    inactive: Amount::from_drop(0),
+                },
+                delegated: Amount::from_drop(0),
+                commission_bps: 0,
+                jailed_until: None,
+            };
+            let mut m = BTreeMap::new();
+            m.insert(proposer, validator);
+            m
+        },
+    };
+
+    let dir = TempDir::new().unwrap();
+    init_chain(LemmaDb::open(dir.path()).unwrap(), &genesis_cfg).unwrap();
+    let db = Arc::new(LemmaDb::open(dir.path()).unwrap());
+
+    // Build a signed Transfer tx and admit it into the mempool directly.
+    let genesis_block = lemma_storage::ChainStore::new(&db)
+        .get_block_by_height(0)
+        .unwrap()
+        .unwrap();
+    let genesis_state_root = genesis_block.header.state_root;
+    // Use gas_price=0 (and base_fee=0 in AdmitContext below) for test isolation:
+    // avoids requiring sender to hold 100 LEM just to cover gas costs.
+    let mut signed_tx = lemma_core::transaction::Transaction::new(
+        Hash::zero(),
+        sender,
+        Some(recipient),
+        0, // nonce
+        1, // chain_id
+        Amount::from_drop(1_000),
+        100_000,        // gas_limit
+        Amount::zero(), // gas_price=0
+        lemma_core::transaction::TxType::Transfer,
+        vec![],
+        lemma_core::signature::Signature::Unsigned,
+    )
+    .unwrap();
+    // sign_transaction mutates in-place: sets hash + Signature::Hybrid.
+    sign_transaction(&mut signed_tx, &sender_kp).unwrap();
+
+    let mempool = Arc::new(RwLock::new(Mempool::new(100)));
+    {
+        let world = WorldState::with_state_root(Arc::clone(&db), genesis_state_root);
+        let ctx = AdmitContext {
+            chain_id: 1,
+            base_fee: Amount::zero(), // zero base_fee for test isolation
+            now: std::time::Instant::now(),
+        };
+        let pubkey = sender_kp.public_key();
+        let _ = mempool
+            .write()
+            .await
+            .admit(
+                signed_tx,
+                &pubkey,
+                Amount::zero(),
+                None::<&lemma_mempool::express::ExpressHint>,
+                &world,
+                &ctx,
+            )
+            .expect("Mempool::admit must accept a valid Transfer tx");
+    }
+    assert_eq!(
+        mempool.read().await.len(),
+        1,
+        "mempool must contain the admitted tx"
+    );
+
+    // Run the DAG driver until at least one block is committed.
+    let write_lock = Arc::new(Mutex::new(()));
+    let (block_tx, mut block_rx) = tokio::sync::mpsc::channel(16);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let vset = single_vset(proposer);
+    let cfg = DagConfig {
+        epoch: 0,
+        proposer,
+        validator_set: vset,
+    };
+    let db_clone = Arc::clone(&db);
+    let mp_clone = Arc::clone(&mempool);
+    let wl_clone = Arc::clone(&write_lock);
+    tokio::spawn(async move {
+        let _ = crate::dag_driver::run_dag_driver(
+            db_clone,
+            mp_clone,
+            cfg,
+            Some(block_tx),
+            None,
+            wl_clone,
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    // Wait for the first committed block.
+    let committed = tokio::time::timeout(std::time::Duration::from_secs(10), block_rx.recv())
+        .await
+        .expect("timed out — no chain block within 10s")
+        .expect("block_tx closed before first block");
+
+    let _ = shutdown_tx.send(true);
+
+    // Assert: the committed block contains the Transfer tx.
+    assert_eq!(committed.transactions.len(), 1, "block must contain 1 tx");
+    assert_eq!(committed.receipts.len(), 1, "block must contain 1 receipt");
+    assert!(
+        committed.receipts[0].success,
+        "Transfer must execute successfully"
+    );
+    assert!(committed.header.gas_used > 0, "gas_used must be > 0");
+    assert_ne!(
+        committed.header.state_root, genesis_state_root,
+        "state_root must change after Transfer tx"
+    );
+    assert_ne!(
+        committed.header.transactions_root,
+        Hash::zero(),
+        "transactions_root must be non-zero"
+    );
+
+    // Assert: mempool is empty after commit (tx removed by mempool_post_commit).
+    assert_eq!(
+        mempool.read().await.len(),
+        0,
+        "mempool must be empty after committed tx is removed"
+    );
+
+    // Assert: recipient balance updated in the new world state.
+    let new_world = WorldState::with_state_root(db, committed.header.state_root);
+    let recipient_balance = new_world.get_balance(&recipient).unwrap();
+    assert_eq!(
+        recipient_balance,
+        Amount::from_drop(1_000),
+        "recipient must receive exactly 1_000 Drop"
     );
 }

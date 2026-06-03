@@ -29,6 +29,7 @@ lemma-crypto    = { path = "../lemma-crypto" }
 lemma-mempool   = { path = "../lemma-mempool" }
 lemma-consensus = { path = "../lemma-consensus" }
 lemma-network   = { path = "../lemma-network" }
+lemma-vm        = { path = "../lemma-vm" }
 libp2p          = { workspace = true }
 
 [dev-dependencies]

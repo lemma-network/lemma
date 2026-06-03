@@ -4,6 +4,7 @@
 //! Fixtures: shared helpers per AGENTS.md §11.2 DRY rule.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use tempfile::tempdir;
 
@@ -51,7 +52,7 @@ fn create_checkpoint_captures_written_data() {
     // Write an account, then checkpoint.
     let state_root = {
         let db = open_db(db_dir.path());
-        let mut ws = WorldState::new(db);
+        let mut ws = WorldState::new(Arc::new(db));
         let addr = Address::from_public_key(&[0x42u8; 32]);
         let account = Account::new_eoa(Amount::from_drop(9999));
         ws.put_account(&addr, &account).expect("put must succeed");
@@ -67,7 +68,7 @@ fn create_checkpoint_captures_written_data() {
 
     // Open checkpoint and verify the account is readable.
     let ckpt_db = open_db(&ckpt_dir.path().join("ckpt"));
-    let ws = WorldState::with_state_root(ckpt_db, state_root);
+    let ws = WorldState::with_state_root(Arc::new(ckpt_db), state_root);
     let addr = lemma_core::Address::from_public_key(&[0x42u8; 32]);
     let got = ws.get_account(&addr).expect("get_account must succeed");
     assert!(got.is_some(), "checkpoint must capture the written account");
@@ -316,7 +317,7 @@ fn create_checkpoint_excludes_writes_made_after_checkpoint() {
     // Write addr_before, commit, take checkpoint, then write addr_after.
     let state_root = {
         let db = open_db(db_dir.path());
-        let mut ws = WorldState::new(db);
+        let mut ws = WorldState::new(Arc::new(db));
         ws.put_account(&addr_before, &Account::new_eoa(Amount::from_drop(1)))
             .expect("put addr_before must succeed");
         ws.commit().expect("commit must succeed")
@@ -328,13 +329,13 @@ fn create_checkpoint_excludes_writes_made_after_checkpoint() {
         db.create_checkpoint(&ckpt_path)
             .expect("checkpoint must succeed");
         // Write addr_after AFTER the checkpoint — must not appear in checkpoint.
-        let mut ws = WorldState::with_state_root(db, state_root);
+        let mut ws = WorldState::with_state_root(Arc::new(db), state_root);
         ws.put_account(&addr_after, &Account::new_eoa(Amount::from_drop(2)))
             .expect("put addr_after must succeed");
     }
 
     let ckpt_db = open_db(&ckpt_path);
-    let ws = WorldState::with_state_root(ckpt_db, state_root);
+    let ws = WorldState::with_state_root(Arc::new(ckpt_db), state_root);
     assert!(
         ws.get_account(&addr_before)
             .expect("get must succeed")

@@ -3,6 +3,8 @@
 //! Test naming: `{action}_{condition}_{expected_outcome}` per AGENTS.md §11.3.
 //! Fixtures: shared helpers per AGENTS.md §11.2 (DRY in tests).
 
+use std::sync::Arc;
+
 use tempfile::tempdir;
 
 use super::*;
@@ -19,7 +21,7 @@ fn open_db() -> (LemmaDb, tempfile::TempDir) {
 
 fn world_state() -> (WorldState, tempfile::TempDir) {
     let (db, dir) = open_db();
-    (WorldState::new(db), dir)
+    (WorldState::new(Arc::new(db)), dir)
 }
 
 fn addr(byte: u8) -> Address {
@@ -51,7 +53,7 @@ fn new_world_state_has_no_state_root() {
 fn with_state_root_preserves_root() {
     let (db, _dir) = open_db();
     let root = Hash::from_bytes([0xAB; 32]);
-    let ws = WorldState::with_state_root(db, root);
+    let ws = WorldState::with_state_root(Arc::new(db), root);
     assert_eq!(ws.state_root(), Some(root));
 }
 
@@ -435,15 +437,15 @@ fn with_state_root_get_account_returns_persisted_account() {
     let account = account_with_balance(12_345);
     let root = {
         let db = LemmaDb::open(dir.path()).expect("first open must succeed");
-        let mut ws = WorldState::new(db);
+        let mut ws = WorldState::new(Arc::new(db));
         ws.put_account(&address, &account)
             .expect("put must succeed");
         ws.commit().expect("commit must succeed")
-        // ws (and its LemmaDb) drops here — RocksDB lock released
+        // ws (and its Arc<LemmaDb>) drops here — RocksDB lock released
     };
     // Reopen the same path and resume from the captured root.
     let db2 = LemmaDb::open(dir.path()).expect("reopen after first close must succeed");
-    let ws2 = WorldState::with_state_root(db2, root);
+    let ws2 = WorldState::with_state_root(Arc::new(db2), root);
     let got = ws2
         .get_account(&address)
         .expect("get must succeed on resumed state");
@@ -515,47 +517,4 @@ fn storage_key_collision_different_addresses_same_slot() {
             .expect("get addr 0x22 must succeed"),
         Some(b"val_22".to_vec()),
     );
-}
-
-// ── into_db ───────────────────────────────────────────────────────────────────
-
-#[test]
-fn into_db_returns_underlying_db_after_account_writes() {
-    // Arrange: write an account then reclaim the DB handle.
-    let (db, _dir) = open_db();
-    let mut ws = WorldState::new(db);
-    ws.put_account(&addr(0xAB), &account_with_balance(1_000))
-        .expect("put_account must succeed");
-    let root = ws.state_root();
-
-    // Act: consume WorldState, recover the DB.
-    let db = ws.into_db();
-
-    // Assert: the DB is still functional — we can open a new WorldState on
-    // the recovered handle and read the account we wrote earlier.
-    let ws2 = WorldState::with_state_root(db, root.expect("root must be Some after put"));
-    let acct = ws2
-        .get_account(&addr(0xAB))
-        .expect("get_account must succeed")
-        .expect("account must exist");
-    assert_eq!(acct.balance, Amount::from_drop(1_000));
-}
-
-#[test]
-fn into_db_on_empty_state_returns_functional_db() {
-    // Arrange: no accounts written.
-    let (db, _dir) = open_db();
-    let ws = WorldState::new(db);
-    assert!(ws.state_root().is_none());
-
-    // Act: reclaim DB without any writes.
-    let db = ws.into_db();
-
-    // Assert: DB is still functional for direct metadata writes.
-    db.put(crate::db::CF_METADATA, b"test_key", b"test_val")
-        .expect("put to metadata CF must succeed");
-    let val = db
-        .get(crate::db::CF_METADATA, b"test_key")
-        .expect("get from metadata CF must succeed");
-    assert_eq!(val, Some(b"test_val".to_vec()));
 }

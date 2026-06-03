@@ -9,7 +9,7 @@
 //! |-------|---------------|
 //! | `BlockReceived` | Update highest-seen; apply if next height; issue range request if gap |
 //! | `RangeRequest` | Serve blocks from `ChainStore::get_range` → `SendRangeResponse` |
-//! | `TransactionReceived` | Log only — Phase 2 hook (needs WorldState context) |
+//! | `TransactionReceived` | Log only — C·Step 13-residual (gossip must carry sender_pubkey) |
 //! | `PeerConnected` / `PeerDisconnected` | Log peer lifecycle |
 //! | `ListeningOn` | Log local listen address |
 //!
@@ -30,11 +30,12 @@
 //! (the network service fans out each block in a `RangeResponse` individually).
 //! The same handler covers both paths.
 //!
-//! ## Phase 1 scope limits
+//! ## Gossip tx admission (C·Step 13-residual)
 //!
 //! **`TransactionReceived` is log-only**: [`Mempool::admit`] requires
-//! `WorldState`, sender `PublicKey`, `sender_stake`, and `AdmitContext`
-//! (`base_fee`, `chain_id`) — not available here until Phase 2 (VM live).
+//! `sender_pubkey: &PublicKey`, which the gossip wire format does not carry
+//! (Ed25519/ML-DSA-65 do not support key recovery). Fix: extend
+//! `GossipMessage::NewTransaction` to carry the sender pubkey — C·Step 13-residual.
 //!
 //! **`BlockReceived` apply is structural-only** (no QC): the `BlockVerifier`
 //! trait seam is in `sync.rs`; Phase 2 adds `CertifiedVerifier`.
@@ -221,15 +222,28 @@ async fn handle_network_event(
             serve_range_request(from, request, channel, db, handle).await?;
         }
 
-        // ── Inbound transaction — Phase 1: log only ───────────────────────────
+        // ── Inbound transaction — gossip admission (Phase 2 residual) ────────
         //
-        // Phase 2 forward note: full admission requires WorldState + sender
-        // PublicKey + sender_stake + AdmitContext { chain_id, base_fee }.
+        // Full admission via `Mempool::admit` requires `sender_pubkey: &PublicKey`,
+        // which is not carried in `NetworkEvent::TransactionReceived` (the gossip
+        // wire format `GossipMessage::NewTransaction(Transaction)` only carries the
+        // `Transaction`, not the sender's public key).
+        //
+        // Ed25519 and ML-DSA-65 do NOT support key recovery from signatures — the
+        // public key MUST be transmitted alongside the transaction. This is
+        // **C·Step 13-residual**, blocked on:
+        //   1. Extending `GossipMessage::NewTransaction` to carry `sender_pubkey`.
+        //   2. Propagating it through `NetworkEvent::TransactionReceived`.
+        //
+        // Until then, gossiped transactions are logged and discarded.
+        // For single-node operation (Phase 2), transactions are submitted
+        // directly to `Mempool::admit` by RPC (Phase 4) or test fixtures.
         NetworkEvent::TransactionReceived { from, tx } => {
             debug!(
                 peer = %from,
                 tx   = %tx.hash.to_hex(),
-                "gossiped tx received (not admitted — Phase 2 hook)"
+                "gossiped tx received (not admitted — C·Step 13-residual: \
+                 gossip wire format must carry sender_pubkey)"
             );
         }
 

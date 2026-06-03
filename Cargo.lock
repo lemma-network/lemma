@@ -2369,6 +2369,7 @@ dependencies = [
  "lemma-mempool",
  "lemma-network",
  "lemma-storage",
+ "lemma-vm",
  "libp2p",
  "rand 0.8.6",
  "serde",
