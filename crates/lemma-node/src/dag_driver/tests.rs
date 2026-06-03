@@ -1,0 +1,432 @@
+//! Tests for `lemma_node::dag_driver`.
+//!
+//! Covers: DagBlock assembly, Commit→chain block mapping (height, timestamp,
+//! dag_round, dag_anchor), timestamp clamping, integration test for the full
+//! single-node DAG driver producing committed chain blocks.
+//!
+//! AGENTS §11: separate tests.rs, `{action}_{outcome}` naming, AAA pattern.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use tempfile::TempDir;
+use tokio::sync::{Mutex, RwLock};
+
+use lemma_consensus::{commit::Commit, dag::block::DagBlockRef};
+use lemma_core::{
+    address::Address,
+    amount::Amount,
+    genesis::GenesisConfig,
+    hash::Hash,
+    validator::{ConsensusKey, Stake, Validator, ValidatorStatus, VotingPower},
+    validator_set::{Member, ValidatorSet},
+};
+use lemma_mempool::pool::Mempool;
+use lemma_storage::db::LemmaDb;
+
+use crate::{
+    dag_driver::{build_block_from_commit, build_dag_block, DagConfig},
+    genesis_boot::init_chain,
+};
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+fn addr(n: u8) -> Address {
+    Address::from_public_key(&[n; 32])
+}
+
+fn dummy_key() -> ConsensusKey {
+    ConsensusKey::from_bytes(vec![0u8; 32], vec![0u8; 32])
+}
+
+/// Single-validator ValidatorSet at epoch 0 (genesis epoch).
+fn single_vset(proposer: Address) -> ValidatorSet {
+    let power = VotingPower(Amount::from_drop(1_000_000));
+    let mut members = BTreeMap::new();
+    members.insert(
+        proposer,
+        Member {
+            consensus_pubkey: dummy_key(),
+            power,
+        },
+    );
+    ValidatorSet {
+        epoch: 0, // genesis epoch (matches genesis_boot epoch 0)
+        members,
+        total_power: Amount::from_drop(1_000_000),
+    }
+}
+
+/// Minimal genesis config for initialising a chain in tests.
+fn minimal_genesis(proposer: Address) -> GenesisConfig {
+    let validator = Validator {
+        address: proposer,
+        consensus_pubkey: dummy_key(),
+        status: ValidatorStatus::Bonded,
+        tombstoned: false,
+        self_stake: Stake {
+            active: Amount::from_drop(1_000_000),
+            pending_active: Amount::from_drop(0),
+            pending_inactive: vec![],
+            inactive: Amount::from_drop(0),
+        },
+        delegated: Amount::from_drop(0),
+        commission_bps: 0,
+        jailed_until: None,
+    };
+    let mut genesis_validators = BTreeMap::new();
+    genesis_validators.insert(proposer, validator);
+
+    GenesisConfig {
+        chain_id: 1,
+        genesis_timestamp: 1_000_000,
+        initial_gas_limit: 30_000_000,
+        initial_base_fee: Amount::from_drop(1_000_000_000),
+        initial_balances: BTreeMap::new(),
+        genesis_validators,
+    }
+}
+
+/// Open a fresh temp-dir LemmaDb and initialise the chain.
+fn fresh_chain(proposer: Address) -> (TempDir, Arc<LemmaDb>) {
+    let dir = TempDir::new().unwrap();
+    let genesis = minimal_genesis(proposer);
+    init_chain(LemmaDb::open(dir.path()).unwrap(), &genesis).unwrap();
+    let db = Arc::new(LemmaDb::open(dir.path()).unwrap());
+    (dir, db)
+}
+
+/// Build a minimal Commit at the given index / leader round.
+/// `timestamp_ms` is set to (index * 1000) ms so commits are monotonically
+/// spaced and their ms/1000 values are 1-second apart.
+fn make_commit(index: u64, leader_round: u64, leader_author: Address) -> Commit {
+    let leader = DagBlockRef::new(
+        leader_round,
+        leader_author,
+        Hash::from_bytes([index as u8; 32]),
+    );
+    Commit {
+        index,
+        previous_digest: Hash::zero(),
+        timestamp_ms: index * 1_000, // ms — gives timestamp = index seconds
+        leader,
+        blocks: vec![leader],
+    }
+}
+
+// ── build_dag_block ───────────────────────────────────────────────────────────
+
+#[test]
+fn build_dag_block_sets_round_and_author() {
+    let proposer = addr(1);
+    let block = build_dag_block(3, proposer, vec![], 1, 1_000);
+    assert_eq!(block.round, 3);
+    assert_eq!(block.author, proposer);
+}
+
+#[test]
+fn build_dag_block_sets_epoch_and_timestamp() {
+    let proposer = addr(1);
+    let block = build_dag_block(0, proposer, vec![], 42, 9_999);
+    assert_eq!(block.epoch, 42);
+    assert_eq!(block.timestamp_ms, 9_999);
+}
+
+#[test]
+fn build_dag_block_includes_ancestors() {
+    let proposer = addr(1);
+    let ancestor = DagBlockRef::new(0, proposer, Hash::from_bytes([0xAB; 32]));
+    let block = build_dag_block(1, proposer, vec![ancestor], 1, 0);
+    assert_eq!(block.ancestors.len(), 1);
+    assert_eq!(block.ancestors[0], ancestor);
+}
+
+#[test]
+fn build_dag_block_has_empty_payload_and_commit_votes() {
+    let block = build_dag_block(0, addr(1), vec![], 1, 0);
+    assert!(block.payload.is_empty(), "Phase 2: no batch payload");
+    assert!(
+        block.commit_votes.is_empty(),
+        "Phase 2: no commit votes piggybacked"
+    );
+}
+
+#[test]
+fn build_dag_block_reference_matches_block() {
+    let proposer = addr(2);
+    let block = build_dag_block(5, proposer, vec![], 1, 0);
+    let r = block.reference();
+    assert_eq!(r.round, 5);
+    assert_eq!(r.author, proposer);
+    assert_eq!(r.digest, block.digest);
+}
+
+// ── build_block_from_commit ───────────────────────────────────────────────────
+
+#[test]
+fn build_block_from_commit_maps_height_to_commit_index() {
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+    let commit = make_commit(1, 3, proposer);
+
+    let (block, _hash) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    assert_eq!(block.height(), 1, "height must equal commit.index");
+}
+
+#[test]
+fn build_block_from_commit_maps_dag_round_and_anchor() {
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+    let commit = make_commit(1, 3, proposer);
+
+    let (block, _hash) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    assert_eq!(
+        block.header.dag_round, 3,
+        "dag_round must equal commit.leader.round"
+    );
+    assert_eq!(
+        block.header.dag_anchor, commit.leader.digest,
+        "dag_anchor must equal commit.leader.digest"
+    );
+}
+
+#[test]
+fn build_block_from_commit_timestamp_is_seconds_not_millis() {
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+
+    // commit.timestamp_ms = 5_000 ms → header.timestamp = 5 seconds.
+    let mut commit = make_commit(1, 3, proposer);
+    commit.timestamp_ms = 5_000;
+
+    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    // Genesis timestamp is 1_000_000 (from minimal_genesis), so 5s < parent → clamped.
+    // The clamped value must be > parent (1_000_000), which means >= 1_000_001.
+    assert!(
+        block.header.timestamp > 1_000_000,
+        "timestamp must be > parent (monotonicity clamp applied)"
+    );
+}
+
+#[test]
+fn build_block_from_commit_timestamp_is_monotonic_when_below_parent() {
+    // commit timestamp of 0 ms → 0 s, which is < parent (genesis) → clamped to parent + 1.
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+
+    let mut commit = make_commit(1, 3, proposer);
+    commit.timestamp_ms = 0; // way before parent
+
+    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    let (_, parent_hash) = lemma_storage::ChainStore::new(&db).tip().unwrap().unwrap();
+    let parent = lemma_storage::ChainStore::new(&db)
+        .get_block_by_hash(&parent_hash)
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        block.header.timestamp > parent.header.timestamp,
+        "timestamp must be strictly > parent even when commit.timestamp_ms is 0"
+    );
+}
+
+#[test]
+fn build_block_from_commit_produces_empty_block() {
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+    let commit = make_commit(1, 3, proposer);
+
+    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    assert!(block.transactions.is_empty(), "Phase 2: no txs");
+    assert!(block.receipts.is_empty(), "Phase 2: no receipts");
+    assert_eq!(block.header.gas_used, 0, "Phase 2: zero gas used");
+}
+
+#[test]
+fn build_block_from_commit_fails_on_uninitialised_chain() {
+    let proposer = addr(1);
+    let dir = TempDir::new().unwrap();
+    // Do NOT call init_chain — chain is empty.
+    let db = Arc::new(LemmaDb::open(dir.path()).unwrap());
+    let chain = lemma_storage::ChainStore::new(&db);
+    let commit = make_commit(1, 3, proposer);
+
+    let result = build_block_from_commit(&commit, &chain, proposer);
+    assert!(
+        result.is_err(),
+        "uninitialised chain must return Err (no tip)"
+    );
+}
+
+// ── Integration: run_dag_driver produces chain blocks ────────────────────────
+
+#[tokio::test]
+async fn run_dag_driver_produces_chain_block_from_dag_consensus() {
+    // Arrange: single-validator chain, dag driver runs until it produces ≥1 block.
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let mempool = Arc::new(RwLock::new(Mempool::new(100)));
+    let write_lock = Arc::new(Mutex::new(()));
+    let (block_tx, mut block_rx) = tokio::sync::mpsc::channel(16);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Genesis boots at epoch 0; driver must match chain epoch.
+    let vset = single_vset(proposer);
+    let cfg = DagConfig {
+        epoch: 0,
+        proposer,
+        validator_set: vset,
+    };
+
+    // Run the driver in a background task; shut it down after the first block.
+    let db_clone = Arc::clone(&db);
+    let mempool_clone = Arc::clone(&mempool);
+    let write_lock_clone = Arc::clone(&write_lock);
+    let driver_handle = tokio::spawn(async move {
+        crate::dag_driver::run_dag_driver(
+            db_clone,
+            mempool_clone,
+            cfg,
+            Some(block_tx),
+            None, // no dag_block_tx needed for this test
+            write_lock_clone,
+            shutdown_rx,
+        )
+        .await
+    });
+
+    // Wait for the first committed chain block (timeout = 5s).
+    let committed_block = tokio::time::timeout(std::time::Duration::from_secs(5), block_rx.recv())
+        .await
+        .expect("timed out — no chain block produced within 5s (dag driver stalled)")
+        .expect("block_tx closed before first block");
+
+    // Signal shutdown.
+    let _ = shutdown_tx.send(true);
+    let _ = driver_handle.await;
+
+    // Assert: the produced block has correct DAG consensus fields.
+    assert_eq!(
+        committed_block.height(),
+        1,
+        "first DAG-consensus block at height 1"
+    );
+    assert_ne!(
+        committed_block.header.dag_round, 0,
+        "dag_round must be non-zero (wave-1 leader at round 3)"
+    );
+    assert_ne!(
+        committed_block.header.dag_anchor,
+        Hash::zero(),
+        "dag_anchor must be non-zero (set to leader block digest)"
+    );
+}
+
+#[tokio::test]
+async fn run_dag_driver_chain_block_height_matches_commit_index() {
+    // The second chain block must be at height 2 (commit.index=2).
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let mempool = Arc::new(RwLock::new(Mempool::new(100)));
+    let write_lock = Arc::new(Mutex::new(()));
+    let (block_tx, mut block_rx) = tokio::sync::mpsc::channel(16);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let vset = single_vset(proposer);
+    let cfg = DagConfig {
+        epoch: 0,
+        proposer,
+        validator_set: vset,
+    };
+
+    let db_clone = Arc::clone(&db);
+    let mp_clone = Arc::clone(&mempool);
+    let wl_clone = Arc::clone(&write_lock);
+    tokio::spawn(async move {
+        let _ = crate::dag_driver::run_dag_driver(
+            db_clone,
+            mp_clone,
+            cfg,
+            Some(block_tx),
+            None,
+            wl_clone,
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    // Drain 2 committed blocks.
+    let b1 = tokio::time::timeout(std::time::Duration::from_secs(5), block_rx.recv())
+        .await
+        .expect("timed out waiting for block 1")
+        .unwrap();
+
+    let b2 = tokio::time::timeout(std::time::Duration::from_secs(5), block_rx.recv())
+        .await
+        .expect("timed out waiting for block 2")
+        .unwrap();
+
+    let _ = shutdown_tx.send(true);
+
+    assert_eq!(b1.height(), 1, "first committed block at height 1");
+    assert_eq!(b2.height(), 2, "second committed block at height 2");
+    // Chain must be monotonically ordered.
+    assert!(
+        b2.header.timestamp >= b1.header.timestamp,
+        "timestamps must be monotonically non-decreasing"
+    );
+}
+
+// ── Q16: build_block_from_commit timestamp — both branches of .max() ─────────
+
+#[test]
+fn build_block_from_commit_uses_commit_timestamp_when_above_parent() {
+    // Tests the UN-clamped path: commit.timestamp_ms/1000 > parent.timestamp
+    // → header.timestamp == commit.timestamp_ms / 1000.
+    // Genesis timestamp = 1_000_000 s; commit.timestamp_ms = 2_000_000_000 ms
+    // → commit_secs = 2_000_000 > 1_000_000 → no clamp applied.
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+
+    let mut commit = make_commit(1, 3, proposer);
+    commit.timestamp_ms = 2_000_000_000; // 2_000_000 seconds
+
+    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+    assert_eq!(
+        block.header.timestamp, 2_000_000,
+        "when commit_secs > parent.timestamp, header.timestamp = commit.timestamp_ms / 1000"
+    );
+}
+
+#[test]
+fn build_block_from_commit_clamps_timestamp_below_parent_plus_one() {
+    // Tests the CLAMPED path: commit.timestamp_ms/1000 < parent.timestamp
+    // → header.timestamp == parent.timestamp + 1.
+    let proposer = addr(1);
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+
+    let mut commit = make_commit(1, 3, proposer);
+    commit.timestamp_ms = 0; // 0 seconds << genesis 1_000_000
+
+    let (block, _) = build_block_from_commit(&commit, &chain, proposer).unwrap();
+
+    // Fetch genesis block to get its timestamp.
+    let (_, genesis_hash) = lemma_storage::ChainStore::new(&db).tip().unwrap().unwrap();
+    let genesis = lemma_storage::ChainStore::new(&db)
+        .get_block_by_hash(&genesis_hash)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        block.header.timestamp,
+        genesis.header.timestamp + 1,
+        "when commit_secs < parent.timestamp, header.timestamp = parent.timestamp + 1"
+    );
+}

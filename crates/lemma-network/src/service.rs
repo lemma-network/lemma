@@ -88,6 +88,16 @@ pub enum NetworkCommand {
     /// Published on `lemma/tx/1`.
     BroadcastTransaction(Transaction),
 
+    /// Broadcast a DAG block proposal to all gossip mesh peers.
+    ///
+    /// The payload is a JSON-serialized `DagBlock` (opaque bytes — `lemma-network`
+    /// does not depend on `lemma-consensus`; the node layer handles encode/decode).
+    /// Published on `lemma/dag/1` via [`GossipMessage::DagProposal`].
+    ///
+    /// Phase 2 (single-node): self-proposes one DagBlock per round.
+    /// Phase 3+: broadcasted to all validator peers.
+    BroadcastDagProposal(Vec<u8>),
+
     /// Send a bounded range request to a specific peer (partition-heal path,
     /// 12-NETWORK_SYNC_SPEC §2.2).
     RequestRange {
@@ -153,6 +163,20 @@ pub enum NetworkEvent {
         channel: request_response::ResponseChannel<RangeResponse>,
     },
 
+    /// A DAG block proposal was received from a peer.
+    ///
+    /// The payload is a JSON-serialized `DagBlock` (opaque bytes — decoding
+    /// happens at the node layer where `lemma-consensus` is available). The
+    /// node layer verifies the hybrid signature and injects `sig_ok: bool`
+    /// before calling `SurgeDriver::on_block` (DB-12 — consensus never calls
+    /// lemma-crypto directly).
+    DagProposalReceived {
+        /// The peer that propagated the proposal.
+        from: PeerId,
+        /// Raw JSON-serialized `DagBlock` bytes.
+        bytes: Vec<u8>,
+    },
+
     /// A connection to a new peer was established.
     PeerConnected(PeerId),
 
@@ -193,6 +217,19 @@ impl NetworkHandle {
     /// Returns [`NetworkError::Transport`] if the command channel is closed.
     pub async fn broadcast_transaction(&self, tx: Transaction) -> Result<(), NetworkError> {
         self.send(NetworkCommand::BroadcastTransaction(tx)).await
+    }
+
+    /// Broadcast a DAG block proposal to the gossip mesh.
+    ///
+    /// `bytes` must be a JSON-serialized `DagBlock` (produced via
+    /// `serde_json::to_vec(&dag_block)`). The network layer routes it to the
+    /// `lemma/dag/1` topic without interpreting the payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn broadcast_dag_proposal(&self, bytes: Vec<u8>) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::BroadcastDagProposal(bytes)).await
     }
 
     /// Send a bounded range request to a specific peer (partition-heal path).
@@ -524,6 +561,12 @@ impl NetworkService {
                 self.emit(NetworkEvent::TransactionReceived { from, tx });
             }
 
+            Ok(GossipMessage::DagProposal(bytes)) => {
+                // Emit raw bytes — the node layer decodes into DagBlock,
+                // verifies the hybrid signature, and injects sig_ok (DB-12).
+                self.emit(NetworkEvent::DagProposalReceived { from, bytes });
+            }
+
             Err(err) => {
                 // Malformed message — demote sender.
                 tracing::warn!(
@@ -614,6 +657,29 @@ impl NetworkService {
                     &msg,
                 ) {
                     tracing::debug!(error = %e, "BroadcastTransaction publish failed (non-fatal)");
+                }
+            }
+
+            NetworkCommand::BroadcastDagProposal(bytes) => {
+                // Symmetric size guard with the decode side (MAX_GOSSIP_DECODE_BYTES = 1 MiB).
+                // A DagBlock with empty payload should be a few hundred bytes; exceeding
+                // 1 MiB indicates a bug in the encode path or an unexpected payload growth.
+                if bytes.len() > crate::messages::MAX_GOSSIP_DECODE_BYTES {
+                    tracing::warn!(
+                        size = bytes.len(),
+                        max = crate::messages::MAX_GOSSIP_DECODE_BYTES,
+                        "BroadcastDagProposal: oversized — rejected (AGENTS §15.1)"
+                    );
+                    return; // do not publish
+                }
+                let msg = GossipMessage::DagProposal(bytes);
+                if let Err(e) = gossip::publish(
+                    self.swarm.behaviour_mut().gossipsub_mut(),
+                    &self.topics,
+                    &msg,
+                ) {
+                    // NoPeersSubscribedToTopic is expected in single-node mode.
+                    tracing::debug!(error = %e, "BroadcastDagProposal publish failed (non-fatal)");
                 }
             }
 

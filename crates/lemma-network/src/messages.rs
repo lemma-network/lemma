@@ -302,7 +302,7 @@ impl RangeResponse {
 
 // ── GossipMessage ─────────────────────────────────────────────────────────────
 
-/// A gossipsub message envelope carrying one of the three broadcast payload types.
+/// A gossipsub message envelope carrying one of the Lemma broadcast payload types.
 ///
 /// Serialized to `Vec<u8>` via JSON ([`serde_json`]) for gossipsub wire
 /// transmission. JSON is used (not bincode) because `lemma-core` types use
@@ -312,12 +312,16 @@ impl RangeResponse {
 /// The [`GossipMessage::topic`] method returns the gossipsub topic string this
 /// message should be published to — determined by variant, not caller choice.
 ///
-/// # DAG messages (deferred)
+/// # DAG consensus messages
 ///
-/// `DagProposal` and `DagVote` variants will be added once `lemma-consensus`
-/// defines those types.
-/// TODO(network): add `DagProposal(DagBlock)` and `DagVote(Vote)` variants —
-/// blocked on `lemma-consensus` defining `DagBlock` / `Vote` types.
+/// [`GossipMessage::DagProposal`] carries a [`DagBlock`] produced by a
+/// validator during the Surge dissemination round. Published on
+/// [`TOPIC_DAG`] — every validator broadcasts one DagBlock per DAG round.
+/// Receivers feed it into `SurgeDriver::on_block` after verifying the
+/// hybrid signature (`sig_ok: bool` injected per DB-12 / decisions-log).
+///
+/// `DagVote` is **not needed** — commit votes piggyback inside
+/// `DagBlock.commit_votes` (Decision 3b, `07-CONSENSUS_SPEC §2.1`).
 ///
 /// # Examples
 ///
@@ -333,20 +337,40 @@ impl RangeResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum GossipMessage {
-    /// A newly finalized block, broadcast on [`TOPIC_BLOCKS`].
+    /// A newly finalized chain block, broadcast on [`TOPIC_BLOCKS`].
     ///
     /// Published by the block proposer immediately after the block is
-    /// committed (12-NETWORK_SYNC_SPEC §2.1). Receivers verify the block's
-    /// quorum certificate before extending their chain — gossip is a *hint*,
-    /// the QC is the *proof*.
+    /// committed to the chain store (`12-NETWORK_SYNC_SPEC §2.1`).
+    /// Receivers verify the block's structural integrity before extending
+    /// their chain — gossip is a *hint*, structural + QC verification is
+    /// the *proof*.
     NewBlock(Block),
 
     /// A pending transaction, broadcast on [`TOPIC_TX`].
     ///
     /// Published by the submitting client or relaying node. Encrypted
     /// (Shield) transactions appear here in ciphertext form and are
-    /// decrypted only after ordering (11-MEMPOOL_SHIELD_SPEC).
+    /// decrypted only after ordering (`11-MEMPOOL_SHIELD_SPEC`).
     NewTransaction(Transaction),
+
+    /// A DAG block proposal from a validator, broadcast on [`TOPIC_DAG`].
+    ///
+    /// The payload is a **JSON-serialized `DagBlock`** (opaque `Vec<u8>` at
+    /// the network layer). `lemma-consensus::DagBlock` is defined in build
+    /// layer 6 (consensus), while `lemma-network` is layer 4 — the network
+    /// crate cannot import the typed struct without a build-order violation
+    /// (AGENTS §8). The node layer (`lemma-node`) handles encode/decode:
+    /// `serde_json::to_vec(&dag_block)` before publish, `from_slice` on receive.
+    ///
+    /// Published by every validator once per DAG round, after observing a
+    /// 2f+1 quorum of blocks from the previous round (`07-CONSENSUS_SPEC §2.3`
+    /// Surge loop). Receivers verify the hybrid Ed25519+ML-DSA-65 signature
+    /// (`sig_ok: bool` injected at node layer per DB-12) and feed the block
+    /// into `SurgeDriver::on_block`.
+    ///
+    /// `CommitVote`s piggyback inside `DagBlock.commit_votes` (Decision 3b,
+    /// `07-CONSENSUS_SPEC §2.1`) — no separate `DagVote` gossip is needed.
+    DagProposal(Vec<u8>),
 }
 
 impl GossipMessage {
@@ -359,6 +383,7 @@ impl GossipMessage {
         match self {
             GossipMessage::NewBlock(_) => config::TOPIC_BLOCKS,
             GossipMessage::NewTransaction(_) => config::TOPIC_TX,
+            GossipMessage::DagProposal(_) => config::TOPIC_DAG,
         }
     }
 

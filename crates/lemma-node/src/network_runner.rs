@@ -233,6 +233,20 @@ async fn handle_network_event(
             );
         }
 
+        // ── Inbound DAG proposal — Phase 2: log only ─────────────────────────
+        //
+        // Phase 3 forward hook: decode JSON bytes → DagBlock, verify hybrid
+        // signature (`sig_ok: bool`), call `SurgeDriver::on_block(block, sig_ok)`.
+        // The DAG driver will be extended to accept incoming proposals from peers
+        // and process them through the same Surge loop (multi-validator gossip).
+        NetworkEvent::DagProposalReceived { from, bytes } => {
+            debug!(
+                peer  = %from,
+                bytes = bytes.len(),
+                "DAG proposal received — Phase 3 hook (multi-validator gossip)"
+            );
+        }
+
         // ── Peer lifecycle ────────────────────────────────────────────────────
         NetworkEvent::PeerConnected(peer_id) => {
             info!(peer = %peer_id, "peer connected");
