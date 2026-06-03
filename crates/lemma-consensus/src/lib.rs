@@ -23,6 +23,7 @@
 //! | `pulse` | Commit rule, leader schedule, linearizer (§4–6) |
 //! | `commit`| `Commit` / `CommittedSubDag`, commit-chain digest (§5) |
 //! | `reputation` | `ReputationScores` / `LeaderSwapTable` (§6) |
+//! | `dag::surge` | [`SurgeDriver`] — per-epoch consensus orchestrator (spec §11) |
 //! | `fee`   | Burn Fee Model: base-fee calc + distribution (§fee) |
 //! | `cert`      | `verify_quorum_cert` — 2f+1 stake-weighted cert verification (B4a) |
 //! | `rewards`   | Inflation mint + validator distribution (§7, B2) |
@@ -96,6 +97,7 @@ pub use cert::{verify_quorum_cert, CertError};
 pub use commit::Commit;
 pub use dag::block::{CommitVote, DagBlock, DagBlockBody, DagBlockRef, Slot, TxBatchRef};
 pub use dag::graph::{Dag, InsertOutcome};
+pub use dag::surge::{SurgeDriver, SurgeOutput};
 pub use dag::threshold_clock::ThresholdClock;
 pub use epoch::{
     advance_epoch, EpochError, EpochOutput, EPOCH_DURATION_SECONDS,
