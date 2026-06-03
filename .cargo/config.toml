@@ -1,0 +1,21 @@
+# Cargo configuration for the Lemma workspace.
+#
+# Goal: stop the `librocksdb-sys` rebuild churn that made gates "suddenly slow"
+# (see living-notes Technical Debt "rocksdb rebuild churn").
+#
+# ROOT CAUSE (no external tool fixes this — it is cargo's design):
+#   - `cargo test`            → `test` profile  (one artifact set)
+#   - `cargo build`/`check`   → `dev`  profile  (a DIFFERENT artifact set)
+#   - `cargo clippy`          → clippy driver   (a THIRD metadata set)
+# Each set caches RocksDB's C++ build separately, so SWITCHING between them
+# forces a ~4 min rebuild. The only real fix is to NOT interleave commands of
+# different profiles — enforced by the `Makefile` gate targets (use `make ...`).
+#
+# This file does the small, tool-free part: turn off per-crate incremental
+# compilation. Incremental artifacts are not shared across profiles and add
+# fingerprint instability (spurious rebuilds). For a CI-style gate workflow
+# (clean builds, run-once) incremental gives ~no benefit, and removing it makes
+# fingerprints more stable.
+
+[build]
+incremental = false
