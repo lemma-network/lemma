@@ -29,12 +29,13 @@
 //! AGENTS.md §9.3 "no panics in the settlement path").
 
 pub mod error;
+pub mod gas;
 pub mod runtime;
-// B2–B5 modules added as they are built:
-// pub mod gas;
+// B3–B5 modules added as they are built:
 // pub mod host;
 // pub mod executor;
 // pub mod parallel;
 
 pub use error::VmError;
+pub use gas::{gas_used, FuelMeter, Gas, GasMeter, GasSchedule};
 pub use runtime::{deterministic_config, LemmaEngine, MAX_CALL_DEPTH, MAX_WASM_STACK};
