@@ -30,12 +30,15 @@
 
 pub mod error;
 pub mod gas;
+pub mod host;
 pub mod runtime;
-// B3–B5 modules added as they are built:
-// pub mod host;
-// pub mod executor;
-// pub mod parallel;
+pub mod state;
+// B4–B5 modules added as they are built:
+// pub mod executor;  // B4
+// pub mod parallel;  // B5
 
 pub use error::VmError;
 pub use gas::{gas_used, FuelMeter, Gas, GasMeter, GasSchedule};
+pub use host::{BlockContext, CallContext, HostFunctions, HostState};
 pub use runtime::{deterministic_config, LemmaEngine, MAX_CALL_DEPTH, MAX_WASM_STACK};
+pub use state::{ContractStateView, InMemoryStateView};

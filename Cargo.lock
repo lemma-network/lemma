@@ -2414,7 +2414,9 @@ dependencies = [
 name = "lemma-vm"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "lemma-core",
+ "lemma-crypto",
  "thiserror 1.0.69",
  "wasmtime",
 ]

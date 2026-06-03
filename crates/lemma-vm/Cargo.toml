@@ -5,8 +5,10 @@ edition = "2021"
 description = "LemmaVM: WASM execution, gas metering, host functions, Flux parallel execution"
 
 [dependencies]
-thiserror  = { workspace = true }
-wasmtime   = { workspace = true }
-lemma-core = { path = "../lemma-core" }
+thiserror    = { workspace = true }
+wasmtime     = { workspace = true }
+bincode      = { workspace = true }
+lemma-core   = { path = "../lemma-core" }
+lemma-crypto = { path = "../lemma-crypto" }
 # serde reserved for B4 executor (TransactionReceipt serialization)
 # tracing reserved for B4 executor (settlement-path logging)
