@@ -32,14 +32,17 @@ pub mod error;
 pub mod executor;
 pub mod gas;
 pub mod host;
+pub mod parallel;
 pub mod runtime;
 pub mod state;
-// B5 module added when built:
-// pub mod parallel;  // B5
 
 pub use error::VmError;
 pub use executor::Executor;
 pub use gas::{gas_used, FuelMeter, Gas, GasMeter, GasSchedule};
 pub use host::{BlockContext, CallContext, HostFunctions, HostState};
+pub use parallel::{
+    execute_block_parallel, execute_block_sequential, BlockOutput, BlockScheduler, FluxConfig,
+    MvState, ParallelScheduler, SequentialScheduler, StateKey, StateValue,
+};
 pub use runtime::{deterministic_config, LemmaEngine, MAX_CALL_DEPTH, MAX_WASM_STACK};
 pub use state::{ContractStateView, InMemoryStateView};

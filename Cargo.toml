@@ -56,6 +56,13 @@ rocksdb = "0.24"
 tempfile = "3.10"
 proptest = "1"
 
+# Flux parallel execution (Block-STM model — aptos-core Apache-2.0 reference)
+# DashMap: the SOLE concurrency-container exception (AGENTS §7.1) — used only as
+# MvState's multi-version store; its iteration order never escapes (state root is
+# collected into sorted BTreeMap before hashing). rayon: bounded worker pool.
+dashmap = "6"
+rayon = "1.12"
+
 # Networking (0.56 is tokio-only — async-std removed; decisions-log 2026-05-30)
 # request-response + cbor: bounded pull-sync (/lemma/sync/1) via CBOR codec
 # (12-NETWORK_SYNC_SPEC §2.2, §1 transport table)
