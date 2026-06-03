@@ -1,6 +1,6 @@
 //! Lemma full-node binary entry point.
 //!
-//! ## Boot sequence (Phase 2 — DAG consensus driver)
+//! ## Boot sequence (Phase 2 — DAG consensus driver + batch dissemination)
 //!
 //! ```text
 //! 1.  Parse CLI args → load + validate NodeConfig
@@ -8,17 +8,20 @@
 //! 3.  init_chain (one-time setup, separate LemmaDb handle — consumed + dropped)
 //! 4.  Re-open LemmaDb as Arc<LemmaDb> (shared runtime handle)
 //! 5.  Create Arc<RwLock<Mempool>>
-//! 6.  Wire shutdown signal (watch channel + CTRL+C handler)
-//! 7.  Build NetworkConfig from NodeConfig + start NetworkService
-//! 8.  Wire committed-block channel (dag_driver → broadcaster)
-//! 9.  Wire dag_block channel (dag_driver → broadcaster for DAG gossip)
-//! 10. Create shared write-lock (dag_driver + range-sync consumer)
-//! 11. Build ValidatorSet from genesis config (single-validator, Phase 2)
-//! 12. Spawn five tasks and join: network_service, block_broadcaster,
-//!     dag_block_broadcaster, network_dispatch, dag_driver
+//! 6.  Create BatchStore (Arc<RwLock<HashMap<Hash, Batch>>>) — shared between
+//!     dag_driver (writer: own batches) and network_dispatch (writer: peer batches)
+//! 7.  Wire shutdown signal (watch channel + CTRL+C handler)
+//! 8.  Build NetworkConfig from NodeConfig + start NetworkService
+//! 9.  Wire committed-block channel (dag_driver → broadcaster)
+//! 10. Wire dag_block channel (dag_driver → broadcaster for DAG gossip)
+//! 11. Wire batch channel (dag_driver → broadcaster for batch gossip, C·Step 14)
+//! 12. Create shared write-lock (dag_driver + range-sync consumer)
+//! 13. Build ValidatorSet from genesis config (single-validator, Phase 2)
+//! 14. Spawn six tasks and join: network_service, block_broadcaster,
+//!     dag_block_broadcaster, batch_broadcaster, network_dispatch, dag_driver
 //! ```
 //!
-//! ## Task topology (Phase 2)
+//! ## Task topology (Phase 2 + C·Step 14)
 //!
 //! ```text
 //!                   ┌─────────────────────────┐
@@ -29,12 +32,17 @@
 //!                   ┌──────────▼──────────────┐
 //!                   │  run_network_dispatch    │ ← serves RangeRequests
 //!                   │  (network_runner)        │   applies synced blocks
-//!                   └────────────┬────────────┘   issues RequestRange on gap
+//!                   │  + BatchReceived → pin   │   pins inbound batches
+//!                   └────────────┬────────────┘
 //!                           write_lock │
 //!         block_tx (mpsc)             │ write_lock
-//! dag_driver ──────────────► run_block_broadcaster → broadcast_block (gossip)
+//! dag_driver ──────────────► run_block_broadcaster → broadcast_block
 //!    │ dag_block_tx                                   (separate task)
-//!    └─────────────────────► run_dag_block_broadcaster → broadcast_dag_proposal
+//!    ├─────────────────────► run_dag_block_broadcaster → broadcast_dag_proposal
+//!    │ batch_tx                                        (separate task)
+//!    └─────────────────────► run_batch_broadcaster → broadcast_batch
+//!              ▲
+//!     BatchStore (shared with network_dispatch for inbound batch pinning)
 //! ```
 //!
 //! ## Write-lock
@@ -61,8 +69,8 @@ use lemma_core::{
 use lemma_mempool::pool::Mempool;
 use lemma_network::{service::NetworkHandle, service::NetworkService, NetworkConfig};
 use lemma_node::{
-    dag_driver::DagConfig, init_chain, run_block_broadcaster, run_dag_driver, run_network_dispatch,
-    InitOutcome, NodeConfig,
+    dag_driver::DagConfig, init_chain, new_batch_store, run_block_broadcaster, run_dag_driver,
+    run_network_dispatch, InitOutcome, NodeConfig,
 };
 use lemma_storage::db::LemmaDb;
 
@@ -70,6 +78,8 @@ const MEMPOOL_CAPACITY: usize = 10_000;
 const BLOCK_CHANNEL_CAPACITY: usize = 32;
 /// Capacity for the raw DagBlock bytes channel (dag_driver → broadcaster).
 const DAG_BLOCK_CHANNEL_CAPACITY: usize = 256;
+/// Capacity for the raw Batch bytes channel (dag_driver → broadcaster, C·Step 14).
+const BATCH_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -121,6 +131,11 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("opening runtime DB at {}", cfg.data_dir.display()))?,
     );
     let mempool = Arc::new(RwLock::new(Mempool::new(MEMPOOL_CAPACITY)));
+
+    // BatchStore: shared between dag_driver (pins own batches) and
+    // network_dispatch (pins batches received from peers via C·Step 14).
+    let batch_store = new_batch_store();
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     let tx_ctrlc = shutdown_tx.clone();
@@ -183,6 +198,9 @@ async fn main() -> anyhow::Result<()> {
     // DAG block gossip channel: raw JSON-encoded DagBlock bytes.
     let (dag_block_tx, dag_block_rx) = mpsc::channel::<Vec<u8>>(DAG_BLOCK_CHANNEL_CAPACITY);
 
+    // Batch gossip channel: raw JSON-encoded Batch bytes (C·Step 14).
+    let (batch_tx, batch_rx) = mpsc::channel::<Vec<u8>>(BATCH_CHANNEL_CAPACITY);
+
     info!(
         epoch    = dag_cfg.epoch,
         proposer = %dag_cfg.proposer,
@@ -190,8 +208,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let net_handle_dag = net_handle.clone();
+    let net_handle_batch = net_handle.clone();
 
-    let (net_res, bcast_res, dag_bcast_res, dispatch_res, dag_res) = tokio::join!(
+    let (net_res, bcast_res, dag_bcast_res, batch_bcast_res, dispatch_res, dag_res) = tokio::join!(
         tokio::spawn(net_service.run()),
         tokio::spawn(run_block_broadcaster(
             net_handle.clone(),
@@ -203,9 +222,15 @@ async fn main() -> anyhow::Result<()> {
             dag_block_rx,
             shutdown_rx.clone(),
         )),
+        tokio::spawn(run_batch_broadcaster(
+            net_handle_batch,
+            batch_rx,
+            shutdown_rx.clone(),
+        )),
         tokio::spawn(run_network_dispatch(
             Arc::clone(&db),
             Arc::clone(&mempool),
+            Arc::clone(&batch_store),
             net_handle,
             Arc::clone(&write_lock),
             event_rx,
@@ -215,8 +240,10 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&db),
             Arc::clone(&mempool),
             dag_cfg,
+            batch_store,
             Some(block_tx),
             Some(dag_block_tx),
+            Some(batch_tx),
             Arc::clone(&write_lock),
             shutdown_rx,
         )),
@@ -225,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
     net_res.context("network service task panicked")?;
     bcast_res.context("block broadcaster task panicked")?;
     dag_bcast_res.context("dag block broadcaster task panicked")?;
+    batch_bcast_res.context("batch broadcaster task panicked")?;
     dispatch_res
         .context("network dispatch task panicked")?
         .context("network dispatch error")?;
@@ -314,6 +342,35 @@ async fn run_dag_block_broadcaster(
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     tracing::info!("dag_block_broadcaster: shutdown signal — stopping");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Broadcast raw Batch bytes to the gossip mesh (lemma/batch/1 topic, C·Step 14).
+///
+/// Drains `batch_rx` and calls `NetworkHandle::broadcast_batch`.
+/// Must fire BEFORE the `DagBlock` that references the batch is broadcast —
+/// peers need to pin the batch before commit-time resolution.
+/// Phase 2 (single-node): broadcast fails with "no peers subscribed" (non-fatal).
+async fn run_batch_broadcaster(
+    net_handle: NetworkHandle,
+    mut batch_rx: mpsc::Receiver<Vec<u8>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            Some(bytes) = batch_rx.recv() => {
+                if let Err(e) = net_handle.broadcast_batch(bytes).await {
+                    tracing::debug!(error = %e, "batch broadcast failed (non-fatal)");
+                }
+            }
+
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("batch_broadcaster: shutdown signal — stopping");
                     break;
                 }
             }

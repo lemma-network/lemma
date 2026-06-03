@@ -9,6 +9,8 @@
 //!   through without error.
 //! - `BlockReceived` gap detection: block at tip+1 is applied; block at
 //!   tip+2 triggers a range request.
+//! - `handle_batch_received`: valid batch pinned; malformed JSON dropped; duplicate
+//!   idempotent; forged `tx.hash` rejected (per-tx hash integrity, C·Step 14).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,8 +31,13 @@ use lemma_mempool::pool::Mempool;
 use lemma_network::service::NetworkEvent;
 use lemma_storage::{chain::ChainStore, db::LemmaDb};
 
+use lemma_crypto::{compute_tx_hash, sign_transaction, KeyPair};
+
 use super::*;
-use crate::sync::compute_block_hash;
+use crate::{
+    batch::{new_batch_store, Batch},
+    sync::compute_block_hash,
+};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -190,7 +197,15 @@ async fn dispatch_exits_when_event_channel_closes() {
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        run_network_dispatch(db, mempool, handle, write_lock(), closed_rx, shutdown_rx),
+        run_network_dispatch(
+            db,
+            mempool,
+            new_batch_store(),
+            handle,
+            write_lock(),
+            closed_rx,
+            shutdown_rx,
+        ),
     )
     .await;
 
@@ -210,7 +225,15 @@ async fn dispatch_exits_on_shutdown_signal() {
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        run_network_dispatch(db, mempool, handle, write_lock(), event_rx, shutdown_rx),
+        run_network_dispatch(
+            db,
+            mempool,
+            new_batch_store(),
+            handle,
+            write_lock(),
+            event_rx,
+            shutdown_rx,
+        ),
     )
     .await;
 
@@ -250,6 +273,7 @@ async fn dispatch_applies_block_at_tip_plus_one() {
     let dispatch_handle = tokio::spawn(run_network_dispatch(
         db_for_dispatch,
         mempool,
+        new_batch_store(),
         handle,
         lock,
         event_rx,
@@ -312,6 +336,7 @@ async fn dispatch_skips_block_already_in_chain() {
         run_network_dispatch(
             Arc::clone(&db),
             mempool,
+            new_batch_store(),
             handle,
             write_lock(),
             event_rx,
@@ -345,7 +370,15 @@ async fn dispatch_handles_peer_connected_without_error() {
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        run_network_dispatch(db, mempool, handle, write_lock(), event_rx, shutdown_rx),
+        run_network_dispatch(
+            db,
+            mempool,
+            new_batch_store(),
+            handle,
+            write_lock(),
+            event_rx,
+            shutdown_rx,
+        ),
     )
     .await;
     assert!(result.is_ok());
@@ -385,9 +418,110 @@ async fn dispatch_handles_transaction_received_without_error() {
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
-        run_network_dispatch(db, mempool, handle, write_lock(), event_rx, shutdown_rx),
+        run_network_dispatch(
+            db,
+            mempool,
+            new_batch_store(),
+            handle,
+            write_lock(),
+            event_rx,
+            shutdown_rx,
+        ),
     )
     .await;
     assert!(result.is_ok());
     assert!(result.unwrap().is_ok());
+}
+
+// ── handle_batch_received (C·Step 14) ────────────────────────────────────────
+
+/// Build a minimal signed tx for batch handler tests.
+fn make_signed_tx_for_batch(kp: &KeyPair, nonce: u64) -> Transaction {
+    let mut tx = Transaction::new(
+        Hash::zero(),
+        *kp.address(),
+        Some(Address::from_public_key(&[99u8; 32])),
+        nonce,
+        1,
+        Amount::from_drop(0),
+        21_000,
+        Amount::from_drop(1_000_000_000),
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("Transaction::new");
+    sign_transaction(&mut tx, kp).expect("sign_transaction");
+    tx
+}
+
+#[tokio::test]
+async fn handle_batch_received_valid_batch_is_pinned_under_correct_digest() {
+    let kp = KeyPair::generate().expect("keygen");
+    let tx = make_signed_tx_for_batch(&kp, 0);
+    let batch = Batch::new(Address::from_public_key(&[1u8; 32]), vec![tx]);
+    let digest = batch.digest().expect("digest");
+    let bytes = serde_json::to_vec(&batch).expect("encode");
+    let store = new_batch_store();
+
+    handle_batch_received(libp2p::PeerId::random(), bytes, &store).await;
+
+    let guard = store.read().await;
+    assert!(guard.contains_key(&digest), "valid batch must be pinned");
+    assert_eq!(guard.len(), 1);
+}
+
+#[tokio::test]
+async fn handle_batch_received_malformed_json_is_dropped_store_unchanged() {
+    let store = new_batch_store();
+    let garbage = b"not valid json {{{{".to_vec();
+
+    handle_batch_received(libp2p::PeerId::random(), garbage, &store).await;
+
+    assert!(
+        store.read().await.is_empty(),
+        "malformed JSON must be dropped, store stays empty"
+    );
+}
+
+#[tokio::test]
+async fn handle_batch_received_duplicate_batch_is_idempotent() {
+    let kp = KeyPair::generate().expect("keygen");
+    let tx = make_signed_tx_for_batch(&kp, 0);
+    let batch = Batch::new(Address::from_public_key(&[1u8; 32]), vec![tx]);
+    let bytes = serde_json::to_vec(&batch).expect("encode");
+    let digest = batch.digest().expect("digest");
+    let store = new_batch_store();
+    let peer = libp2p::PeerId::random();
+
+    handle_batch_received(peer, bytes.clone(), &store).await;
+    handle_batch_received(peer, bytes, &store).await;
+
+    let guard = store.read().await;
+    assert_eq!(guard.len(), 1, "duplicate must result in exactly one entry");
+    assert!(guard.contains_key(&digest));
+}
+
+#[tokio::test]
+async fn handle_batch_received_forged_tx_hash_is_rejected_store_unchanged() {
+    // Simulate a malicious peer forging tx.hash to cause consensus divergence.
+    // Per-tx hash verification (C·Step 14 security gate) must catch this.
+    let kp = KeyPair::generate().expect("keygen");
+    let mut tx = make_signed_tx_for_batch(&kp, 0);
+
+    // Overwrite tx.hash with a forged value.
+    tx.hash = Hash::from_bytes([0xDE; 32]);
+    let canonical = compute_tx_hash(&tx).expect("compute_tx_hash");
+    assert_ne!(canonical, tx.hash, "test precondition: hash must be forged");
+
+    let batch = Batch::new(Address::from_public_key(&[1u8; 32]), vec![tx]);
+    let bytes = serde_json::to_vec(&batch).expect("encode");
+    let store = new_batch_store();
+
+    handle_batch_received(libp2p::PeerId::random(), bytes, &store).await;
+
+    assert!(
+        store.read().await.is_empty(),
+        "forged tx.hash must cause batch rejection, store stays empty"
+    );
 }

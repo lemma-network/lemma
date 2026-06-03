@@ -13,7 +13,7 @@
 //! | [`RangeRequest`] | requester → responder | `/lemma/sync/1` |
 //! | [`RangeResponse`] | responder → requester | `/lemma/sync/1` |
 //!
-//! ## Gossipsub (bincode, `lemma/blocks/1` · `lemma/tx/1` · `lemma/dag/1`)
+//! ## Gossipsub (bincode, `lemma/blocks/1` · `lemma/tx/1` · `lemma/dag/1` · `lemma/batch/1`)
 //!
 //! Broadcast payloads pushed to all subscribed peers via the gossip mesh.
 //! The [`GossipMessage`] enum wraps the payload and knows its own topic.
@@ -371,6 +371,23 @@ pub enum GossipMessage {
     /// `CommitVote`s piggyback inside `DagBlock.commit_votes` (Decision 3b,
     /// `07-CONSENSUS_SPEC §2.1`) — no separate `DagVote` gossip is needed.
     DagProposal(Vec<u8>),
+
+    /// A Surge transaction batch, broadcast on [`TOPIC_BATCH`] (C·Step 14).
+    ///
+    /// The payload is a **JSON-serialized `Batch`** (opaque `Vec<u8>` at the
+    /// network layer). `lemma-node::batch::Batch` is defined in build layer 8+
+    /// (node), while `lemma-network` is layer 4 — same build-order constraint
+    /// as [`DagProposal`] (AGENTS §8, DB-A12). The node layer handles encode/decode.
+    ///
+    /// Published by a validator immediately before it proposes a `DagBlock`
+    /// that references this batch via `DagBlock.payload: Vec<TxBatchRef>`.
+    /// Peers pin the decoded `Batch` in their local `BatchStore` (keyed by
+    /// batch digest) so that `TxBatchRef → Vec<Transaction>` resolution
+    /// succeeds at commit time.
+    ///
+    /// The same 1 MiB [`MAX_GOSSIP_DECODE_BYTES`] guard applies — a batch
+    /// approaching this limit is already pathological under gas limits.
+    TxBatch(Vec<u8>),
 }
 
 impl GossipMessage {
@@ -384,6 +401,7 @@ impl GossipMessage {
             GossipMessage::NewBlock(_) => config::TOPIC_BLOCKS,
             GossipMessage::NewTransaction(_) => config::TOPIC_TX,
             GossipMessage::DagProposal(_) => config::TOPIC_DAG,
+            GossipMessage::TxBatch(_) => config::TOPIC_BATCH,
         }
     }
 

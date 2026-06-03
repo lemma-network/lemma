@@ -27,6 +27,7 @@ use lemma_mempool::pool::{AdmitContext, Mempool};
 use lemma_storage::{db::LemmaDb, state::WorldState};
 
 use crate::{
+    batch::new_batch_store,
     dag_driver::{build_block_from_commit, build_dag_block, DagConfig},
     genesis_boot::init_chain,
 };
@@ -121,7 +122,7 @@ fn make_commit(index: u64, leader_round: u64, leader_author: Address) -> Commit 
 #[test]
 fn build_dag_block_sets_round_and_author() {
     let proposer = addr(1);
-    let block = build_dag_block(3, proposer, vec![], 1, 1_000);
+    let block = build_dag_block(3, proposer, vec![], vec![], 1, 1_000);
     assert_eq!(block.round, 3);
     assert_eq!(block.author, proposer);
 }
@@ -129,7 +130,7 @@ fn build_dag_block_sets_round_and_author() {
 #[test]
 fn build_dag_block_sets_epoch_and_timestamp() {
     let proposer = addr(1);
-    let block = build_dag_block(0, proposer, vec![], 42, 9_999);
+    let block = build_dag_block(0, proposer, vec![], vec![], 42, 9_999);
     assert_eq!(block.epoch, 42);
     assert_eq!(block.timestamp_ms, 9_999);
 }
@@ -138,15 +139,18 @@ fn build_dag_block_sets_epoch_and_timestamp() {
 fn build_dag_block_includes_ancestors() {
     let proposer = addr(1);
     let ancestor = DagBlockRef::new(0, proposer, Hash::from_bytes([0xAB; 32]));
-    let block = build_dag_block(1, proposer, vec![ancestor], 1, 0);
+    let block = build_dag_block(1, proposer, vec![ancestor], vec![], 1, 0);
     assert_eq!(block.ancestors.len(), 1);
     assert_eq!(block.ancestors[0], ancestor);
 }
 
 #[test]
 fn build_dag_block_has_empty_payload_and_commit_votes() {
-    let block = build_dag_block(0, addr(1), vec![], 1, 0);
-    assert!(block.payload.is_empty(), "Phase 2: no batch payload");
+    let block = build_dag_block(0, addr(1), vec![], vec![], 1, 0);
+    assert!(
+        block.payload.is_empty(),
+        "Phase 2: empty payload when passed vec![]"
+    );
     assert!(
         block.commit_votes.is_empty(),
         "Phase 2: no commit votes piggybacked"
@@ -156,7 +160,7 @@ fn build_dag_block_has_empty_payload_and_commit_votes() {
 #[test]
 fn build_dag_block_reference_matches_block() {
     let proposer = addr(2);
-    let block = build_dag_block(5, proposer, vec![], 1, 0);
+    let block = build_dag_block(5, proposer, vec![], vec![], 1, 0);
     let r = block.reference();
     assert_eq!(r.round, 5);
     assert_eq!(r.author, proposer);
@@ -300,8 +304,10 @@ async fn run_dag_driver_produces_chain_block_from_dag_consensus() {
             db_clone,
             mempool_clone,
             cfg,
+            new_batch_store(),
             Some(block_tx),
             None, // no dag_block_tx needed for this test
+            None, // no batch_tx needed for this test
             write_lock_clone,
             shutdown_rx,
         )
@@ -360,7 +366,9 @@ async fn run_dag_driver_chain_block_height_matches_commit_index() {
             db_clone,
             mp_clone,
             cfg,
+            new_batch_store(),
             Some(block_tx),
+            None,
             None,
             wl_clone,
             shutdown_rx,
@@ -562,7 +570,9 @@ async fn run_dag_driver_executes_transfer_and_changes_state_root() {
             db_clone,
             mp_clone,
             cfg,
+            new_batch_store(),
             Some(block_tx),
+            None,
             None,
             wl_clone,
             shutdown_rx,

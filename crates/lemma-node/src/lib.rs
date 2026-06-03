@@ -6,6 +6,8 @@
 //!
 //! | Module | Responsibility |
 //! |--------|----------------|
+//! | `batch` | **C·Step 14** — [`Batch`], [`BatchStore`], [`resolve_committed_txs`]: Surge tx-batch dissemination + resolution |
+//! | `block_exec` | [`execute_committed_block`], [`apply_writes`]: Flux execution + state-root |
 //! | `config` | [`NodeConfig`] — data dir, genesis path, block interval, network params |
 //! | `dag_driver` | **Phase 2** — DAG consensus driver ([`run_dag_driver`]): Surge loop, Commit→block |
 //! | `error` | [`NodeError`] — all node-layer error variants |
@@ -13,12 +15,13 @@
 //! | `network_runner` | Network event-dispatch loop + block broadcaster + range-sync consumer |
 //! | `producer` | **Phase 1** — timer-based empty-block producer (superseded by `dag_driver` in Phase 2) |
 //! | `shield_orchestrator` | [`run_epoch_shield`], [`apply_withholding_slashes`] — Shield DKG/reshare + withholding slashes |
+//! | `state_view` | [`WorldStateView`] — read-only `ContractStateView` for Flux (C·Step 13) |
 //! | `sync` | [`BlockVerifier`] trait, [`StructuralVerifier`], [`SyncTracker`], [`apply_synced_block`] |
 //!
-//! Phase 2 (Track A Step 12): `dag_driver` replaces `producer` as the block-
-//! production engine. The Surge dissemination loop drives the DAG, Pulse decides
-//! committed leaders, and each `Commit` maps to one chain `Block` (spec §5.2).
+//! Phase 2 (C·Step 12–14): `dag_driver` drives the DAG, `batch` supplies the
+//! real tx source via Surge dissemination, and `block_exec` executes via Flux.
 
+pub mod batch;
 pub mod block_exec;
 pub mod config;
 pub mod dag_driver;
@@ -30,6 +33,7 @@ pub mod shield_orchestrator;
 pub mod state_view;
 pub mod sync;
 
+pub use batch::{new_batch_store, resolve_committed_txs, Batch, BatchStore};
 pub use config::NodeConfig;
 pub use dag_driver::{build_block_from_commit, build_dag_block, run_dag_driver, DagConfig};
 pub use error::NodeError;

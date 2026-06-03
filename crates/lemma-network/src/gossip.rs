@@ -16,7 +16,8 @@
 //! |-------|---------|--------------|
 //! | `lemma/blocks/1` | Finalized blocks | Block proposer |
 //! | `lemma/tx/1` | Pending transactions | Any node or client |
-//! | `lemma/dag/1` | DAG consensus msgs | Validators (v2, deferred) |
+//! | `lemma/dag/1` | DAG consensus msgs | Validators |
+//! | `lemma/batch/1` | Surge tx batches | Validators (C·Step 14) |
 //!
 //! ## "Gossip is a hint, the QC is the proof" (§2.1)
 //!
@@ -55,13 +56,17 @@ pub struct GossipTopics {
     pub blocks: gossipsub::IdentTopic,
 
     /// gossipsub topic for DAG consensus messages — `lemma/dag/1`.
-    ///
-    /// Populated now so the node subscribes on startup, ready for when
-    /// `DagProposal`/`DagVote` variants land in `GossipMessage`.
     pub dag: gossipsub::IdentTopic,
 
     /// gossipsub topic for pending transactions — `lemma/tx/1`.
     pub tx: gossipsub::IdentTopic,
+
+    /// gossipsub topic for Surge transaction batches — `lemma/batch/1` (C·Step 14).
+    ///
+    /// Validators broadcast serialized batches here before proposing a `DagBlock`
+    /// that references them. Peers pin received batches so `TxBatchRef → txs`
+    /// resolution succeeds at commit time.
+    pub batch: gossipsub::IdentTopic,
 }
 
 impl GossipTopics {
@@ -71,6 +76,7 @@ impl GossipTopics {
             blocks: gossipsub::IdentTopic::new(config::TOPIC_BLOCKS),
             dag: gossipsub::IdentTopic::new(config::TOPIC_DAG),
             tx: gossipsub::IdentTopic::new(config::TOPIC_TX),
+            batch: gossipsub::IdentTopic::new(config::TOPIC_BATCH),
         }
     }
 
@@ -88,6 +94,7 @@ impl GossipTopics {
             t if t == config::TOPIC_BLOCKS => &self.blocks,
             t if t == config::TOPIC_TX => &self.tx,
             t if t == config::TOPIC_DAG => &self.dag,
+            t if t == config::TOPIC_BATCH => &self.batch,
             other => {
                 tracing::warn!(
                     topic = other,
@@ -127,6 +134,7 @@ pub fn subscribe_all(
         (&topics.blocks, config::TOPIC_BLOCKS),
         (&topics.dag, config::TOPIC_DAG),
         (&topics.tx, config::TOPIC_TX),
+        (&topics.batch, config::TOPIC_BATCH),
     ];
 
     for (topic, name) in to_subscribe {

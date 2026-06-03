@@ -57,6 +57,20 @@ pub const TOPIC_DAG: &str = "lemma/dag/1";
 /// form; decryption happens after ordering (11-MEMPOOL_SHIELD_SPEC).
 pub const TOPIC_TX: &str = "lemma/tx/1";
 
+/// gossipsub topic — Surge transaction batches (batch dissemination, C·Step 14).
+///
+/// Validators broadcast serialized [`Batch`](lemma_node::batch) payloads here
+/// before proposing a `DagBlock` that references them. Peers pin received batches
+/// in their local `BatchStore` so `TxBatchRef` → `Vec<Transaction>` resolution
+/// succeeds at commit time.
+///
+/// The payload is opaque bytes at the network layer (`lemma-network` does not
+/// import `lemma-node`) — the node layer handles encode/decode (same DB-A12
+/// pattern as `TOPIC_DAG`).
+///
+/// `ValidationMode::Strict` is required (same as all Lemma gossip topics).
+pub const TOPIC_BATCH: &str = "lemma/batch/1";
+
 /// request-response protocol — bounded range/backfill sync.
 ///
 /// Leading slash: libp2p multistream-select convention (see module-level doc).

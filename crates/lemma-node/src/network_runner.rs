@@ -61,9 +61,12 @@ use lemma_network::{
 use lemma_storage::db::LemmaDb;
 
 use crate::{
+    batch::{Batch, BatchStore},
     error::NodeError,
     sync::{apply_synced_block, ApplyOutcome, StructuralVerifier, SyncTracker},
 };
+
+use lemma_crypto::compute_tx_hash;
 
 // ── run_network_dispatch ──────────────────────────────────────────────────────
 
@@ -103,6 +106,7 @@ const SYNC_RETRY_INTERVAL_MS: u64 = 5_000;
 pub async fn run_network_dispatch(
     db: Arc<LemmaDb>,
     mempool: Arc<RwLock<Mempool>>,
+    batch_store: BatchStore,
     handle: NetworkHandle,
     write_lock: Arc<Mutex<()>>,
     mut event_rx: mpsc::Receiver<NetworkEvent>,
@@ -121,7 +125,7 @@ pub async fn run_network_dispatch(
                 match event {
                     Some(e) => {
                         handle_network_event(
-                            e, &db, &mempool, &handle,
+                            e, &db, &mempool, &batch_store, &handle,
                             &write_lock, &verifier, &mut tracker,
                         ).await?;
                     }
@@ -198,10 +202,12 @@ pub async fn run_block_broadcaster(
 
 // ── Event handlers ────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // 8 params: event + 5 shared-state refs + 2 mutable; no natural grouping
 async fn handle_network_event(
     event: NetworkEvent,
     db: &Arc<LemmaDb>,
     _mempool: &Arc<RwLock<Mempool>>,
+    batch_store: &BatchStore,
     handle: &NetworkHandle,
     write_lock: &Arc<Mutex<()>>,
     verifier: &StructuralVerifier,
@@ -259,6 +265,20 @@ async fn handle_network_event(
                 bytes = bytes.len(),
                 "DAG proposal received — Phase 3 hook (multi-validator gossip)"
             );
+        }
+
+        // ── Inbound batch — verify + pin in BatchStore (C·Step 14) ──────────
+        //
+        // Decode JSON bytes → Batch, verify per-tx hash integrity + envelope
+        // digest, then pin by digest key. Peers must receive and pin batches
+        // BEFORE the referencing DagBlock is committed, so TxBatchRef →
+        // Vec<Transaction> resolution succeeds at commit time.
+        //
+        // See `handle_batch_received` for the full verification layers
+        // (envelope digest + per-tx hash). Signature verification is deferred
+        // to D·Step 15 (SECURITY GATE noted in that function).
+        NetworkEvent::BatchReceived { from, bytes } => {
+            handle_batch_received(from, bytes, batch_store).await;
         }
 
         // ── Peer lifecycle ────────────────────────────────────────────────────
@@ -438,6 +458,113 @@ pub(crate) fn fetch_range(
             vec![]
         }
     }
+}
+
+// ── Batch-received handler ────────────────────────────────────────────────────
+
+/// Decode, verify, and pin an inbound gossip batch (C·Step 14).
+///
+/// ## Verification layers
+///
+/// 1. **Size guard** (upstream): `GossipMessage::decode` enforces
+///    `MAX_GOSSIP_DECODE_BYTES` before JSON parsing begins — this function
+///    never sees an oversized payload (AGENTS §15.1).
+/// 2. **Envelope integrity**: recomputes the batch digest from the decoded
+///    struct and uses it as the store key. This closes the envelope-level
+///    store-poisoning vector (peer sends a valid batch under a forged key).
+/// 3. **Per-tx hash integrity**: recomputes each `Transaction.hash` from the
+///    transaction body via [`compute_tx_hash`] and compares against the
+///    wire value. A mismatch causes the whole batch to be rejected — this
+///    makes `tx.hash` a trustworthy dedup key and prevents the
+///    consensus-divergence vector described in `batch.rs` §Trust model.
+///
+/// ## Security gate (D·Step 15 — signature verification)
+///
+/// Per-tx signature verification is **deferred** to D·Step 15.
+/// See `batch.rs` §Trust model for the full rationale. The comment below marks
+/// the insertion point so it cannot be missed at that phase boundary:
+///
+/// // SECURITY GATE (D·Step 15): add full Ed25519+ML-DSA-65 signature
+/// // verification here before real validator peers are admitted.
+/// // Requires extending the gossip wire format to carry `sender_pubkey`
+/// // (same fix as `residual-2` for `TransactionReceived`).
+///
+/// ## No panics
+///
+/// All failure paths return `()` after logging. A crafted payload must never
+/// crash the node (AGENTS §7.2).
+async fn handle_batch_received(from: libp2p::PeerId, bytes: Vec<u8>, batch_store: &BatchStore) {
+    // ── 1. Decode JSON → Batch ────────────────────────────────────────────────
+    // Input is already bounded to ≤ MAX_GOSSIP_DECODE_BYTES by the upstream
+    // `GossipMessage::decode` call in `NetworkService::handle_gossip_message`.
+    let batch: Batch = match serde_json::from_slice(&bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                peer  = %from,
+                error = %e,
+                "BatchReceived: JSON decode failed — batch dropped (peer misbehaviour)"
+            );
+            return;
+        }
+    };
+
+    // ── 2. Per-tx hash integrity check ────────────────────────────────────────
+    // Recompute each tx's canonical hash and compare against the wire value.
+    // This makes `tx.hash` trustworthy as a dedup key in resolve_committed_txs.
+    // A mismatch on ANY tx causes the WHOLE batch to be rejected — partial
+    // acceptance would leave the store in an inconsistent state.
+    for tx in &batch.txs {
+        let expected = match compute_tx_hash(tx) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(
+                    peer  = %from,
+                    error = %e,
+                    tx    = %tx.hash.to_hex(),
+                    "BatchReceived: tx hash computation failed — batch dropped"
+                );
+                return;
+            }
+        };
+        if expected != tx.hash {
+            warn!(
+                peer     = %from,
+                expected = %expected.to_hex(),
+                got      = %tx.hash.to_hex(),
+                "BatchReceived: tx hash mismatch — batch dropped (forged tx.hash, \
+                 peer misbehaviour — potential consensus-divergence attack)"
+            );
+            return;
+        }
+    }
+    // SECURITY GATE (D·Step 15): add full Ed25519+ML-DSA-65 signature verification here.
+
+    // ── 3. Envelope digest → store key ───────────────────────────────────────
+    // Recompute the batch digest AFTER per-tx hash validation so the digest is
+    // computed over a batch whose tx hashes we've already verified.
+    let digest = match batch.digest() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                peer  = %from,
+                error = %e,
+                "BatchReceived: digest computation failed — batch dropped"
+            );
+            return;
+        }
+    };
+
+    // ── 4. Pin in store (idempotent — same digest twice is harmless) ──────────
+    let tx_count = batch.txs.len();
+    batch_store.write().await.insert(digest, batch);
+
+    debug!(
+        peer      = %from,
+        digest    = %digest.to_hex(),
+        tx_count,
+        "BatchReceived: batch verified and pinned in store"
+    );
 }
 
 #[cfg(test)]

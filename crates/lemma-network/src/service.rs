@@ -98,6 +98,17 @@ pub enum NetworkCommand {
     /// Phase 3+: broadcasted to all validator peers.
     BroadcastDagProposal(Vec<u8>),
 
+    /// Broadcast a Surge transaction batch to all gossip mesh peers (C·Step 14).
+    ///
+    /// The payload is a JSON-serialized `Batch` (opaque bytes — `lemma-network`
+    /// does not depend on `lemma-node`; the node layer handles encode/decode).
+    /// Published on `lemma/batch/1` via [`GossipMessage::TxBatch`].
+    ///
+    /// Must be broadcast BEFORE the `DagBlock` that references this batch via
+    /// `DagBlock.payload: Vec<TxBatchRef>` — peers must be able to resolve the
+    /// ref to actual transactions at commit time.
+    BroadcastBatch(Vec<u8>),
+
     /// Send a bounded range request to a specific peer (partition-heal path,
     /// 12-NETWORK_SYNC_SPEC §2.2).
     RequestRange {
@@ -177,6 +188,19 @@ pub enum NetworkEvent {
         bytes: Vec<u8>,
     },
 
+    /// A Surge transaction batch was received from a peer (C·Step 14).
+    ///
+    /// The payload is a JSON-serialized `Batch` (opaque bytes — decoding
+    /// happens at the node layer). The node layer decodes it, verifies the
+    /// batch digest, and pins it in the local `BatchStore` so that
+    /// `TxBatchRef → Vec<Transaction>` resolution succeeds at commit time.
+    BatchReceived {
+        /// The peer that propagated the batch.
+        from: PeerId,
+        /// Raw JSON-serialized `Batch` bytes.
+        bytes: Vec<u8>,
+    },
+
     /// A connection to a new peer was established.
     PeerConnected(PeerId),
 
@@ -230,6 +254,23 @@ impl NetworkHandle {
     /// Returns [`NetworkError::Transport`] if the command channel is closed.
     pub async fn broadcast_dag_proposal(&self, bytes: Vec<u8>) -> Result<(), NetworkError> {
         self.send(NetworkCommand::BroadcastDagProposal(bytes)).await
+    }
+
+    /// Broadcast a Surge transaction batch to the gossip mesh (C·Step 14).
+    ///
+    /// `bytes` must be a JSON-serialized `Batch` (produced via
+    /// `serde_json::to_vec(&batch)`). The network layer routes it to the
+    /// `lemma/batch/1` topic without interpreting the payload.
+    ///
+    /// Must be called BEFORE [`broadcast_dag_proposal`](Self::broadcast_dag_proposal)
+    /// for the `DagBlock` that references this batch — peers must pin the batch
+    /// before they can resolve `TxBatchRef → Vec<Transaction>` at commit time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn broadcast_batch(&self, bytes: Vec<u8>) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::BroadcastBatch(bytes)).await
     }
 
     /// Send a bounded range request to a specific peer (partition-heal path).
@@ -567,6 +608,12 @@ impl NetworkService {
                 self.emit(NetworkEvent::DagProposalReceived { from, bytes });
             }
 
+            Ok(GossipMessage::TxBatch(bytes)) => {
+                // Emit raw bytes — the node layer decodes into Batch,
+                // verifies the digest, and pins in BatchStore (C·Step 14).
+                self.emit(NetworkEvent::BatchReceived { from, bytes });
+            }
+
             Err(err) => {
                 // Malformed message — demote sender.
                 tracing::warn!(
@@ -680,6 +727,28 @@ impl NetworkService {
                 ) {
                     // NoPeersSubscribedToTopic is expected in single-node mode.
                     tracing::debug!(error = %e, "BroadcastDagProposal publish failed (non-fatal)");
+                }
+            }
+
+            NetworkCommand::BroadcastBatch(bytes) => {
+                // Symmetric 1 MiB size guard — a batch approaching this limit is
+                // already pathological under gas limits (AGENTS §15.1).
+                if bytes.len() > crate::messages::MAX_GOSSIP_DECODE_BYTES {
+                    tracing::warn!(
+                        size = bytes.len(),
+                        max = crate::messages::MAX_GOSSIP_DECODE_BYTES,
+                        "BroadcastBatch: oversized — rejected (AGENTS §15.1)"
+                    );
+                    return; // do not publish
+                }
+                let msg = GossipMessage::TxBatch(bytes);
+                if let Err(e) = gossip::publish(
+                    self.swarm.behaviour_mut().gossipsub_mut(),
+                    &self.topics,
+                    &msg,
+                ) {
+                    // NoPeersSubscribedToTopic is expected in single-node mode.
+                    tracing::debug!(error = %e, "BroadcastBatch publish failed (non-fatal)");
                 }
             }
 

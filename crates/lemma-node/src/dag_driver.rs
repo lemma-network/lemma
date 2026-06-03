@@ -5,16 +5,19 @@
 //! [`SurgeDriver`], building chain blocks **from Pulse commits** rather than
 //! from a wall-clock tick.
 //!
-//! ## Surge loop (single-node, Phase 2)
+//! ## Surge loop (single-node, Phase 2 + C·Step 14)
 //!
 //! ```text
-//! bootstrap: propose DagBlock at round 0
+//! bootstrap: build Batch from mempool → pin in BatchStore → broadcast on lemma/batch/1
+//!   → build DagBlock with payload=[batch.to_ref()] at round 0
 //!   → on_block → SurgeOutput
-//!   → new_round = Some(r) → propose DagBlock at round r
+//!   → new_round = Some(r) → build new Batch → DagBlock at round r
 //!   → ... (repeats until commit ready)
 //!   → commits non-empty
-//!       → for each Commit → build_block_from_commit → commit to chain
-//!       → emit on block_tx (gossip seam)
+//!       → for each Commit:
+//!           resolve_committed_txs(commit, dag, store) → Vec<Transaction>
+//!           → execute → build chain block
+//!           → emit on block_tx (gossip seam)
 //! ```
 //!
 //! In single-node mode a single validator holds 100% stake, so every DagBlock
@@ -41,15 +44,30 @@
 //! - `header.dag_round`  = `commit.leader.round`
 //! - `header.dag_anchor` = `commit.leader.digest`
 //!
-//! Empty txs/receipts (no VM execution yet — Phase 3 wires `lemma-vm`).
+//! ## Batch dissemination (C·Step 14)
+//!
+//! Before proposing each DagBlock, the driver:
+//! 1. Drains the mempool into a [`Batch`].
+//! 2. Pins the batch in [`BatchStore`] (keyed by digest).
+//! 3. Broadcasts the JSON-encoded batch on `lemma/batch/1`.
+//! 4. Sets `DagBlock.payload = [batch.to_ref()]` (or `[]` if the batch is empty).
+//!
+//! At commit time, [`resolve_committed_txs`] walks `Commit.blocks` in
+//! deterministic `(round ASC, author ASC)` order, looks up each `DagBlock` in
+//! the driver's DAG, resolves `TxBatchRef → Vec<Transaction>` via the
+//! `BatchStore`, deduplicates by tx hash, and hands the ordered list to Flux.
+//! This replaces the old `mempool.pending_by_priority()` shortcut, which would
+//! diverge across nodes in multi-validator mode.
 //!
 //! ## Gossip seams (Phase 2 → Phase 3)
 //!
 //! - `block_tx`: committed chain blocks → network broadcaster (same as Phase 1).
 //! - `dag_block_tx`: raw JSON-encoded DagBlocks → `NetworkHandle::broadcast_dag_proposal`
-//!   (closes H1 — `DagProposal` gossip on `lemma/dag/1`). Phase 3 incoming
-//!   DagBlocks arrive via `NetworkEvent::DagProposalReceived` and are fed back
-//!   into `on_block` after sig verification.
+//!   (closes H1 — `DagProposal` gossip on `lemma/dag/1`).
+//! - `batch_tx`: raw JSON-encoded Batches → `NetworkHandle::broadcast_batch`
+//!   (C·Step 14 — `TxBatch` gossip on `lemma/batch/1`).
+//!   Phase 3 incoming batches arrive via `NetworkEvent::BatchReceived` and
+//!   are pinned in `BatchStore` by `network_runner`.
 //!
 //! ## Write-lock contract
 //!
@@ -75,9 +93,8 @@ use lemma_mempool::pool::Mempool;
 use lemma_storage::{ChainStore, LemmaDb};
 
 use crate::{
-    block_exec::{
-        collect_committed_hashes, execute_committed_block, mempool_post_commit, MAX_TXS_PER_BLOCK,
-    },
+    batch::{resolve_committed_txs, Batch, BatchStore},
+    block_exec::{collect_committed_hashes, execute_committed_block, mempool_post_commit},
     error::NodeError,
     producer::commit_block,
     sync::compute_block_hash,
@@ -108,13 +125,16 @@ pub struct DagConfig {
 /// are trusted; `sig_ok = true` is passed to `SurgeDriver::on_block`).
 /// Phase 3 replaces this with a real Ed25519+ML-DSA-65 signature.
 ///
-/// The payload is empty (no transaction batches — batch dissemination is
-/// Phase 3). `commit_votes` is empty (piggybacking is a Phase 3 optimization).
+/// `payload` carries the [`TxBatchRef`]s for this round (C·Step 14 — set by
+/// the caller after building and pinning the batch). Pass `vec![]` for empty
+/// rounds (mempool was empty when the block was proposed).
+/// `commit_votes` is empty (piggybacking is a Phase 3 optimization).
 #[must_use]
 pub fn build_dag_block(
     round: u64,
     author: Address,
     ancestors: Vec<DagBlockRef>,
+    payload: Vec<lemma_consensus::dag::block::TxBatchRef>,
     epoch: u64,
     timestamp_ms: u64,
 ) -> DagBlock {
@@ -125,7 +145,7 @@ pub fn build_dag_block(
             author,
             timestamp_ms,
             ancestors,
-            payload: vec![],
+            payload,
             commit_votes: vec![],
         },
         Signature::Unsigned,
@@ -224,24 +244,35 @@ pub fn build_block_from_commit(
 
 /// Run the DAG consensus driver until `shutdown` is signalled.
 ///
-/// ## Single-node Surge loop
+/// ## Single-node Surge loop (C·Step 14 — batch dissemination)
 ///
-/// 1. **Bootstrap**: propose DagBlock at round 0 → feed into `SurgeDriver::on_block`.
-/// 2. **Round advancement**: when `SurgeOutput::new_round = Some(r)`, collect
-///    accepted ancestors at round r-1, build DagBlock at round r, call
-///    `on_block` again. Also encode + send via `dag_block_tx` for gossip.
-/// 3. **Commits**: for each `Commit` in `SurgeOutput::commits`, call
-///    `build_block_from_commit` → `commit_block` (under `write_lock`) → emit
-///    on `block_tx` for the network broadcaster.
+/// 1. **Bootstrap**: build [`Batch`] from mempool → pin in `batch_store` →
+///    broadcast on `lemma/batch/1` → propose DagBlock at round 0 with
+///    `payload = [batch.to_ref()]` (or `[]` if mempool empty).
+/// 2. **Round advancement**: when `SurgeOutput::new_round = Some(r)`, build a
+///    new batch, gossip it, build DagBlock at round r with the batch ref, call
+///    `on_block` again. Also encode + send DagBlock via `dag_block_tx`.
+/// 3. **Commits**: for each `Commit` in `SurgeOutput::commits`:
+///    - [`resolve_committed_txs`] walks `commit.blocks`, looks up each
+///      `DagBlock` in the driver's DAG, resolves `TxBatchRef → Vec<Transaction>`
+///      via `batch_store`, deduplicates by tx hash.
+///    - Passes the resolved txs to `build_block_from_commit` → Flux execution.
+///    - This replaces the old `mempool.pending_by_priority()` shortcut, which
+///      would diverge across nodes in multi-validator mode.
 /// 4. **Equivocations**: logged. Evidence construction + broadcasting is Phase 3.
+///
+/// ## Batch availability miss
+///
+/// If a `TxBatchRef` is not in `batch_store` at commit time, the ref is
+/// skipped (logged as WARN). The block is still produced with the available
+/// txs. A dedicated fetch-on-miss path is deferred to D·Step 15.
 ///
 /// ## Phase 3 hook
 ///
 /// Incoming DagBlocks from peers arrive via `NetworkEvent::DagProposalReceived`
 /// in `network_runner.rs`. The dispatch loop decodes them and calls
 /// `on_dag_proposal(bytes, from_peer)` — to be added in Phase 3 alongside real
-/// signature verification. For now (Phase 2, single-node), all DagBlocks are
-/// self-proposed and trivially trusted.
+/// signature verification.
 ///
 /// ## Error policy
 ///
@@ -254,12 +285,15 @@ pub fn build_block_from_commit(
 ///   the consensus loop.
 /// - **Persist errors** (`commit_block` failures): returned as `Err` — chain
 ///   integrity compromised (Sui-stall lesson: don't swallow settlement failures).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_dag_driver(
     db: Arc<LemmaDb>,
     mempool: Arc<RwLock<Mempool>>,
     cfg: DagConfig,
+    batch_store: BatchStore,
     block_tx: Option<mpsc::Sender<Block>>,
     dag_block_tx: Option<mpsc::Sender<Vec<u8>>>,
+    batch_tx: Option<mpsc::Sender<Vec<u8>>>,
     write_lock: Arc<Mutex<()>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), NodeError> {
@@ -271,12 +305,20 @@ pub async fn run_dag_driver(
     info!(
         epoch    = cfg.epoch,
         proposer = %cfg.proposer,
-        "dag_driver: starting single-node Surge loop"
+        "dag_driver: starting Surge loop with batch dissemination (C·Step 14)"
     );
 
-    // Bootstrap: propose the genesis DAG round (round 0, no ancestors required).
+    // Bootstrap: build batch at round 0, pin, broadcast, then propose DagBlock.
     let boot_ts = current_unix_millis();
-    let boot_block = build_dag_block(0, cfg.proposer, vec![], cfg.epoch, boot_ts);
+    let boot_payload = build_and_gossip_batch(
+        &mempool,
+        cfg.proposer,
+        &batch_store,
+        &batch_tx,
+        0, // round 0
+    )
+    .await;
+    let boot_block = build_dag_block(0, cfg.proposer, vec![], boot_payload, cfg.epoch, boot_ts);
     let mut next_block = Some(boot_block);
 
     loop {
@@ -345,18 +387,15 @@ pub async fn run_dag_driver(
             warn!(equivocation = ?equiv, "dag_driver: equivocation detected — evidence deferred to Phase 3");
         }
 
-        // Process commits: pull txs from mempool, execute, build chain blocks.
+        // Process commits: resolve txs from sub-DAG, execute, build chain blocks.
         let chain = ChainStore::new(&db);
         for commit in &output.commits {
-            // Pull txs from mempool under a short read-lock (non-blocking).
-            // Cloned out before calling build_block_from_commit (sync path).
-            let txs: Vec<Transaction> = mempool
-                .read()
-                .await
-                .pending_by_priority(MAX_TXS_PER_BLOCK)
-                .into_iter()
-                .cloned()
-                .collect();
+            // Resolve txs from the committed sub-DAG (C·Step 14).
+            // Takes a read-lock snapshot of the store (non-blocking).
+            let txs: Vec<Transaction> = {
+                let store = batch_store.read().await;
+                resolve_committed_txs(commit, driver.dag(), &store)
+            };
 
             match build_block_from_commit(commit, &chain, cfg.proposer, Arc::clone(&db), txs) {
                 Ok((block, hash)) => {
@@ -405,8 +444,9 @@ pub async fn run_dag_driver(
             }
         }
 
-        // If this block triggered a clock advance, prepare the next DagBlock.
-        // We store it in `next_block` and YIELD first so other tasks can run.
+        // If this block triggered a clock advance, build the next round's batch
+        // + DagBlock. We store it in `next_block` and YIELD first so other
+        // tasks (block_rx receiver, network dispatch, mempool writes) can run.
         if let Some(new_round) = output.new_round {
             let ancestors: Vec<DagBlockRef> = driver
                 .dag()
@@ -414,17 +454,23 @@ pub async fn run_dag_driver(
                 .map(|b| b.reference())
                 .collect();
             let ts = current_unix_millis();
+
+            // Build + gossip batch for the new round, then embed its ref.
+            let payload =
+                build_and_gossip_batch(&mempool, cfg.proposer, &batch_store, &batch_tx, new_round)
+                    .await;
+
             next_block = Some(build_dag_block(
                 new_round,
                 cfg.proposer,
                 ancestors,
+                payload,
                 cfg.epoch,
                 ts,
             ));
         }
 
-        // Yield to the tokio scheduler so other tasks (block_rx receiver,
-        // network dispatch, mempool writes) can run between DAG rounds.
+        // Yield to the tokio scheduler so other tasks can run between DAG rounds.
         tokio::task::yield_now().await;
     }
 
@@ -432,6 +478,79 @@ pub async fn run_dag_driver(
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Drain the mempool into a [`Batch`], pin it in `batch_store`, gossip it on
+/// `lemma/batch/1` (via `batch_tx`), and return the `TxBatchRef` payload for
+/// the next `DagBlock`.
+///
+/// Returns `vec![]` when the mempool is empty (an empty batch advances the
+/// clock with no execution overhead — no need to gossip zero-tx batches).
+///
+/// Failures are non-fatal and logged:
+/// - `Batch::to_ref()` errors (serialization) → `warn!`, return `[]`.
+/// - `batch_tx.try_send()` overflow / closure → `debug!` (no peers in Phase 2).
+async fn build_and_gossip_batch(
+    mempool: &RwLock<Mempool>,
+    author: Address,
+    batch_store: &BatchStore,
+    batch_tx: &Option<mpsc::Sender<Vec<u8>>>,
+    round: u64,
+) -> Vec<lemma_consensus::dag::block::TxBatchRef> {
+    use crate::block_exec::MAX_TXS_PER_BLOCK;
+
+    // Drain mempool under a short read-lock (non-blocking).
+    let txs: Vec<Transaction> = mempool
+        .read()
+        .await
+        .pending_by_priority(MAX_TXS_PER_BLOCK)
+        .into_iter()
+        .cloned()
+        .collect();
+
+    if txs.is_empty() {
+        // Empty round — no batch needed.
+        return vec![];
+    }
+
+    let batch = Batch::new(author, txs);
+
+    // Build the ref (digest + author + size).
+    let batch_ref = match batch.to_ref() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(round, error = %e, "dag_driver: batch.to_ref failed — empty payload");
+            return vec![];
+        }
+    };
+
+    let digest = batch_ref.digest;
+
+    // Pin in store before gossiping — resolvers look up by digest.
+    batch_store.write().await.insert(digest, batch.clone());
+
+    // Gossip the batch on lemma/batch/1 (non-fatal: no peers in single-node).
+    if let Some(ref tx) = batch_tx {
+        match serde_json::to_vec(&batch) {
+            Ok(bytes) => {
+                if let Err(e) = tx.try_send(bytes) {
+                    debug!(round, error = ?e, "batch_tx send failed (non-fatal)");
+                }
+            }
+            Err(e) => {
+                warn!(round, error = %e, "Batch JSON encode failed (non-fatal)");
+            }
+        }
+    }
+
+    debug!(
+        round,
+        tx_count = batch.txs.len(),
+        digest   = %digest.to_hex(),
+        "dag_driver: batch built and pinned"
+    );
+
+    vec![batch_ref]
+}
 
 /// Current time as Unix milliseconds.
 ///
