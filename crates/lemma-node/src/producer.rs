@@ -159,7 +159,9 @@ pub fn build_next_block(
     // Build the empty block. Block::validate checks:
     //   receipts.len() == transactions.len() (both 0 ✓)
     //   gas_used == Σ receipt.gas_used      (0 == 0 ✓)
-    let block = Block::new(header, vec![], vec![])?;
+    // Phase 1 producer blocks have no quorum certificate (QC is a DAG-consensus
+    // artifact; Phase 1 uses a timer-based producer). D·15b wires Some(qc).
+    let block = Block::new(header, vec![], vec![], None)?;
 
     // Compute the canonical block hash (AGENTS §2.2: one canonical hash path).
     // compute_block_hash is the single definition; calling it here ensures the

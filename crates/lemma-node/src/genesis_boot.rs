@@ -121,7 +121,8 @@ pub fn init_chain(db: LemmaDb, genesis: &GenesisConfig) -> Result<InitOutcome, N
     )?;
 
     // Step 9: assemble the genesis block (no transactions, no receipts).
-    let block = Block::new(header, vec![], vec![])?;
+    // Genesis block has no quorum certificate — it is the chain anchor.
+    let block = Block::new(header, vec![], vec![], None)?;
 
     // Step 10: compute the genesis block hash (canonical Blake3, AGENTS §2.2).
     // Serialize once; hash_bytes reuses those bytes for CF_BLOCK_HASH storage.

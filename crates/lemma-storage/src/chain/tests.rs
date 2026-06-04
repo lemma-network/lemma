@@ -56,7 +56,7 @@ fn make_block_at(height: u64, parent_hash: Hash) -> (Block, Hash) {
     .expect("BlockHeader::new must succeed for valid params");
 
     let block =
-        Block::new(header, vec![], vec![]).expect("Block::new must succeed for valid params");
+        Block::new(header, vec![], vec![], None).expect("Block::new must succeed for valid params");
 
     // Compute hash from serialized bytes (canonical path, same as genesis_boot).
     let bytes = bincode::serialize(&block).expect("bincode::serialize must succeed");

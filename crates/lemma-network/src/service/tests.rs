@@ -34,7 +34,7 @@ fn test_block() -> Block {
         vec![],
     )
     .expect("test block header is always valid");
-    Block::new(header, vec![], vec![]).expect("test block is always valid")
+    Block::new(header, vec![], vec![], None).expect("test block is always valid")
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ fn network_handle_is_clone() {
 
 #[test]
 fn network_command_debug_contains_variant_name() {
-    let cmd = NetworkCommand::BroadcastBlock(test_block());
+    let cmd = NetworkCommand::BroadcastBlock(Box::new(test_block()));
     assert!(format!("{cmd:?}").contains("BroadcastBlock"));
 
     let cmd = NetworkCommand::Dial("/ip4/127.0.0.1/tcp/9000".parse().unwrap());

@@ -8,6 +8,7 @@ use super::*;
 use crate::{
     address::Address,
     amount::Amount,
+    cert::QuorumCert,
     error::BlockError,
     hash::Hash,
     header::BlockHeader,
@@ -125,7 +126,7 @@ fn transfer_receipt() -> TransactionReceipt {
 
 #[test]
 fn new_empty_block_with_valid_header_succeeds() {
-    let block = Block::new(genesis_header(), vec![], vec![]);
+    let block = Block::new(genesis_header(), vec![], vec![], None);
     assert!(block.is_ok());
 }
 
@@ -135,6 +136,7 @@ fn new_block_with_one_tx_and_one_receipt_succeeds() {
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     );
     assert!(block.is_ok());
 }
@@ -145,7 +147,7 @@ fn new_block_stores_all_fields_correctly() {
     let txs = vec![transfer_tx()];
     let receipts = vec![transfer_receipt()];
 
-    let block = Block::new(header.clone(), txs.clone(), receipts.clone()).unwrap();
+    let block = Block::new(header.clone(), txs.clone(), receipts.clone(), None).unwrap();
 
     assert_eq!(block.header, header);
     assert_eq!(block.transactions, txs);
@@ -157,7 +159,7 @@ fn new_block_stores_all_fields_correctly() {
 #[test]
 fn new_block_rejects_receipt_count_mismatch_more_receipts() {
     // 0 transactions, 1 receipt → mismatch
-    let result = Block::new(genesis_header(), vec![], vec![transfer_receipt()]);
+    let result = Block::new(genesis_header(), vec![], vec![transfer_receipt()], None);
     assert!(matches!(
         result.unwrap_err(),
         BlockError::ReceiptCountMismatch {
@@ -170,7 +172,7 @@ fn new_block_rejects_receipt_count_mismatch_more_receipts() {
 #[test]
 fn new_block_rejects_receipt_count_mismatch_fewer_receipts() {
     // 1 transaction, 0 receipts → mismatch
-    let result = Block::new(block_1_header(), vec![transfer_tx()], vec![]);
+    let result = Block::new(block_1_header(), vec![transfer_tx()], vec![], None);
     assert!(matches!(
         result.unwrap_err(),
         BlockError::ReceiptCountMismatch {
@@ -202,7 +204,12 @@ fn new_block_rejects_gas_accounting_mismatch() {
         vec![],
     )
     .unwrap();
-    let result = Block::new(bad_header, vec![transfer_tx()], vec![transfer_receipt()]);
+    let result = Block::new(
+        bad_header,
+        vec![transfer_tx()],
+        vec![transfer_receipt()],
+        None,
+    );
     assert!(matches!(
         result.unwrap_err(),
         BlockError::GasAccountingMismatch {
@@ -232,7 +239,7 @@ fn new_block_propagates_header_gas_limit_zero_error() {
         base_fee: base_fee(),
         extra_data: vec![],
     };
-    let result = Block::new(bad_header, vec![], vec![]);
+    let result = Block::new(bad_header, vec![], vec![], None);
     assert_eq!(result.unwrap_err(), BlockError::GasLimitZero);
 }
 
@@ -256,7 +263,7 @@ fn new_block_propagates_header_gas_exceeded_error() {
         base_fee: base_fee(),
         extra_data: vec![],
     };
-    let result = Block::new(bad_header, vec![], vec![]);
+    let result = Block::new(bad_header, vec![], vec![], None);
     assert!(matches!(
         result.unwrap_err(),
         BlockError::GasExceeded {
@@ -270,7 +277,7 @@ fn new_block_propagates_header_gas_exceeded_error() {
 
 #[test]
 fn validate_returns_ok_for_empty_block() {
-    assert!(Block::new(genesis_header(), vec![], vec![])
+    assert!(Block::new(genesis_header(), vec![], vec![], None)
         .unwrap()
         .validate()
         .is_ok());
@@ -282,6 +289,7 @@ fn validate_returns_ok_for_block_with_transactions() {
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     )
     .unwrap();
     assert!(block.validate().is_ok());
@@ -295,6 +303,7 @@ fn validate_rejects_receipt_count_mismatch_on_deserialized_block() {
         header: genesis_header(),
         transactions: vec![],
         receipts: vec![transfer_receipt()], // tampered: count mismatch
+        quorum_cert: None,
     };
     assert!(matches!(
         block.validate().unwrap_err(),
@@ -329,6 +338,7 @@ fn validate_rejects_gas_limit_zero_on_deserialized_block() {
         header: bad_header,
         transactions: vec![],
         receipts: vec![],
+        quorum_cert: None,
     };
     assert_eq!(block.validate().unwrap_err(), BlockError::GasLimitZero);
 }
@@ -357,6 +367,7 @@ fn validate_rejects_gas_exceeded_on_deserialized_block() {
         header: bad_header,
         transactions: vec![],
         receipts: vec![],
+        quorum_cert: None,
     };
     assert!(matches!(
         block.validate().unwrap_err(),
@@ -374,6 +385,7 @@ fn validate_rejects_gas_accounting_mismatch_on_deserialized_block() {
         header: block_1_header(), // gas_used = 21_000
         transactions: vec![transfer_tx()],
         receipts: vec![TransactionReceipt::new(Hash::zero(), true, 5_000, vec![])], // tampered
+        quorum_cert: None,
     };
     assert!(matches!(
         block.validate().unwrap_err(),
@@ -388,7 +400,7 @@ fn validate_rejects_gas_accounting_mismatch_on_deserialized_block() {
 
 #[test]
 fn is_empty_returns_true_for_block_with_no_transactions() {
-    let block = Block::new(genesis_header(), vec![], vec![]).unwrap();
+    let block = Block::new(genesis_header(), vec![], vec![], None).unwrap();
     assert!(block.is_empty());
 }
 
@@ -398,6 +410,7 @@ fn is_empty_returns_false_for_block_with_transactions() {
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     )
     .unwrap();
     assert!(!block.is_empty());
@@ -407,7 +420,7 @@ fn is_empty_returns_false_for_block_with_transactions() {
 
 #[test]
 fn is_genesis_returns_true_for_height_zero_block() {
-    let block = Block::new(genesis_header(), vec![], vec![]).unwrap();
+    let block = Block::new(genesis_header(), vec![], vec![], None).unwrap();
     assert!(block.is_genesis());
 }
 
@@ -417,6 +430,7 @@ fn is_genesis_returns_false_for_height_one_block() {
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     )
     .unwrap();
     assert!(!block.is_genesis());
@@ -426,7 +440,7 @@ fn is_genesis_returns_false_for_height_one_block() {
 
 #[test]
 fn transaction_count_returns_zero_for_empty_block() {
-    let block = Block::new(genesis_header(), vec![], vec![]).unwrap();
+    let block = Block::new(genesis_header(), vec![], vec![], None).unwrap();
     assert_eq!(block.transaction_count(), 0);
 }
 
@@ -436,6 +450,7 @@ fn transaction_count_returns_one_for_single_tx_block() {
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     )
     .unwrap();
     assert_eq!(block.transaction_count(), 1);
@@ -448,6 +463,7 @@ fn transaction_count_returns_correct_count_for_multi_tx_block() {
         block_2_header(),
         vec![transfer_tx(), transfer_tx()],
         vec![transfer_receipt(), transfer_receipt()],
+        None,
     )
     .unwrap();
     assert_eq!(block.transaction_count(), 2);
@@ -457,7 +473,7 @@ fn transaction_count_returns_correct_count_for_multi_tx_block() {
 
 #[test]
 fn height_returns_header_height_for_genesis_block() {
-    let block = Block::new(genesis_header(), vec![], vec![]).unwrap();
+    let block = Block::new(genesis_header(), vec![], vec![], None).unwrap();
     assert_eq!(block.height(), 0);
 }
 
@@ -467,6 +483,7 @@ fn height_returns_correct_value_for_non_genesis_block() {
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     )
     .unwrap();
     assert_eq!(block.height(), 1);
@@ -474,7 +491,7 @@ fn height_returns_correct_value_for_non_genesis_block() {
 
 #[test]
 fn timestamp_returns_header_timestamp_for_genesis_block() {
-    let block = Block::new(genesis_header(), vec![], vec![]).unwrap();
+    let block = Block::new(genesis_header(), vec![], vec![], None).unwrap();
     assert_eq!(block.timestamp(), 1_700_000_000);
 }
 
@@ -484,6 +501,7 @@ fn timestamp_returns_correct_value_for_non_genesis_block() {
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     )
     .unwrap();
     assert_eq!(block.timestamp(), 1_700_000_001);
@@ -493,7 +511,7 @@ fn timestamp_returns_correct_value_for_non_genesis_block() {
 
 #[test]
 fn empty_block_roundtrips_through_json() {
-    let original = Block::new(genesis_header(), vec![], vec![]).unwrap();
+    let original = Block::new(genesis_header(), vec![], vec![], None).unwrap();
     let json = serde_json::to_string(&original).expect("Block should serialize to JSON");
     let decoded: Block = serde_json::from_str(&json).expect("Block should deserialize from JSON");
     assert_eq!(decoded, original);
@@ -505,6 +523,7 @@ fn block_with_transactions_roundtrips_through_json() {
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     )
     .unwrap();
     let json = serde_json::to_string(&original).expect("Block should serialize to JSON");
@@ -516,18 +535,67 @@ fn block_with_transactions_roundtrips_through_json() {
 
 #[test]
 fn block_clone_equals_original() {
-    let block = Block::new(genesis_header(), vec![], vec![]).unwrap();
+    let block = Block::new(genesis_header(), vec![], vec![], None).unwrap();
     assert_eq!(block.clone(), block);
 }
 
 #[test]
 fn blocks_with_different_heights_are_not_equal() {
-    let b0 = Block::new(genesis_header(), vec![], vec![]).unwrap();
+    let b0 = Block::new(genesis_header(), vec![], vec![], None).unwrap();
     let b1 = Block::new(
         block_1_header(),
         vec![transfer_tx()],
         vec![transfer_receipt()],
+        None,
     )
     .unwrap();
     assert_ne!(b0, b1);
+}
+
+// ── quorum_cert field (D·15a) ─────────────────────────────────────────────────
+
+/// Helper: a minimal QuorumCert for testing (no real signatures needed here —
+/// we only test the Block wrapper, not crypto validity).
+fn test_qc(height: u64) -> QuorumCert {
+    use std::collections::BTreeMap;
+    QuorumCert::new(height, Hash::from_bytes([0xCC; 32]), BTreeMap::new())
+}
+
+#[test]
+fn block_with_some_quorum_cert_serializes_and_deserializes() {
+    // Arrange: genesis block carrying a QC.
+    let qc = test_qc(0);
+    let original = Block::new(genesis_header(), vec![], vec![], Some(qc)).unwrap();
+
+    // Act: JSON roundtrip.
+    let json = serde_json::to_string(&original).expect("serialize");
+    let decoded: Block = serde_json::from_str(&json).expect("deserialize");
+
+    // Assert: roundtrip equality and QC preserved.
+    assert_eq!(decoded, original);
+    assert!(decoded.quorum_cert.is_some());
+}
+
+#[test]
+fn block_without_quorum_cert_serializes_and_deserializes() {
+    // Arrange: genesis block with no QC (Phase 1 / uncertified range-sync).
+    let original = Block::new(genesis_header(), vec![], vec![], None).unwrap();
+
+    // Act: JSON roundtrip.
+    let json = serde_json::to_string(&original).expect("serialize");
+    let decoded: Block = serde_json::from_str(&json).expect("deserialize");
+
+    // Assert: roundtrip equality and QC absent.
+    assert_eq!(decoded, original);
+    assert!(decoded.quorum_cert.is_none());
+}
+
+#[test]
+fn block_validate_ignores_quorum_cert_field() {
+    // validate() checks only structural invariants — QC is irrelevant.
+    let with_qc = Block::new(genesis_header(), vec![], vec![], Some(test_qc(0))).unwrap();
+    let without_qc = Block::new(genesis_header(), vec![], vec![], None).unwrap();
+    // Both pass validate() — the QC field does not affect structural checks.
+    assert!(with_qc.validate().is_ok());
+    assert!(without_qc.validate().is_ok());
 }

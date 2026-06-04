@@ -89,6 +89,7 @@ use lemma_core::{
     address::Address, block::Block, error::CoreError, hash::Hash, header::BlockHeader,
     signature::Signature, transaction::Transaction, validator_set::ValidatorSet,
 };
+use lemma_crypto::KeyPair;
 use lemma_mempool::pool::Mempool;
 use lemma_storage::{ChainStore, LemmaDb};
 
@@ -121,15 +122,30 @@ pub struct DagConfig {
 
 /// Build a new `DagBlock` at `round` by `author`, referencing `ancestors`.
 ///
-/// **Phase 2**: uses `Signature::Unsigned` (single-node; self-authored blocks
-/// are trusted; `sig_ok = true` is passed to `SurgeDriver::on_block`).
-/// Phase 3 replaces this with a real Ed25519+ML-DSA-65 signature.
+/// Signs the block body digest with the validator's hybrid keypair
+/// (Ed25519 + ML-DSA-65). The signature is stored as [`Signature::Hybrid`].
+///
+/// ## Signing approach
+///
+/// `compute_digest` is crate-private in `lemma-consensus`. We derive the
+/// digest by constructing a temporary `DagBlock::new(body.clone(), Signature::Unsigned)` —
+/// `DagBlock::new` always recomputes the digest from the body, so both calls
+/// produce the same digest. We then sign `block.digest.as_bytes()` and build
+/// the real block with the hybrid signature.
 ///
 /// `payload` carries the [`TxBatchRef`]s for this round (C·Step 14 — set by
 /// the caller after building and pinning the batch). Pass `vec![]` for empty
 /// rounds (mempool was empty when the block was proposed).
 /// `commit_votes` is empty (piggybacking is a Phase 3 optimization).
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`NodeError::Config`] if `keypair.address() != &author` — signing
+/// a block whose `author` field differs from the signing key is a forgery
+/// (a peer running `CertifiedVerifier`, D·15c, will reject it). Caught here
+/// at the production site rather than silently emitting an invalid block.
+///
+/// Signing itself is infallible — `KeyPair::sign` never fails.
 pub fn build_dag_block(
     round: u64,
     author: Address,
@@ -137,19 +153,39 @@ pub fn build_dag_block(
     payload: Vec<lemma_consensus::dag::block::TxBatchRef>,
     epoch: u64,
     timestamp_ms: u64,
-) -> DagBlock {
-    DagBlock::new(
-        DagBlockBody {
-            epoch,
-            round,
-            author,
-            timestamp_ms,
-            ancestors,
-            payload,
-            commit_votes: vec![],
-        },
-        Signature::Unsigned,
-    )
+    keypair: &KeyPair,
+) -> Result<DagBlock, NodeError> {
+    // Guard: the signing key must match the declared author address.
+    // A mismatch would produce a block that CertifiedVerifier (D·15c) will
+    // reject — better to surface it immediately at the producer.
+    if keypair.address() != &author {
+        return Err(NodeError::Config(format!(
+            "build_dag_block: keypair address {kp} does not match author {author} \
+             (signing a block with a mismatched key produces an unverifiable signature)",
+            kp = keypair.address(),
+        )));
+    }
+
+    let body = DagBlockBody {
+        epoch,
+        round,
+        author,
+        timestamp_ms,
+        ancestors,
+        payload,
+        commit_votes: vec![],
+    };
+
+    // Derive the body digest via a temporary unsigned block.
+    // DagBlock::new always recomputes the digest from the body fields —
+    // both the temporary and the final block produce the same digest.
+    // compute_digest is pub(crate) in lemma-consensus; the temp-block pattern
+    // is the cleanest cross-crate approach until D·15a debt (living-notes) is
+    // closed by exposing a DagBlock::body_digest() helper.
+    let tmp = DagBlock::new(body.clone(), Signature::Unsigned);
+    let sig = keypair.sign_to_lemma(tmp.digest.as_bytes());
+
+    Ok(DagBlock::new(body, sig))
 }
 
 /// Map a [`Commit`] to a chain [`Block`] (spec §5.2), executing pending txs
@@ -234,7 +270,9 @@ pub fn build_block_from_commit(
         vec![], // extra_data
     )?;
 
-    let block = Block::new(header, exec_out.txs, exec_out.receipts)?;
+    // quorum_cert is None here — D·15b will assemble the QC from the commit's
+    // leader signatures and pass Some(qc). For now, blocks are uncertified.
+    let block = Block::new(header, exec_out.txs, exec_out.receipts, None)?;
     let hash = compute_block_hash(&block).map_err(|e| NodeError::Serialization(e.to_string()))?;
 
     Ok((block, hash))
@@ -290,6 +328,7 @@ pub async fn run_dag_driver(
     db: Arc<LemmaDb>,
     mempool: Arc<RwLock<Mempool>>,
     cfg: DagConfig,
+    keypair: Arc<KeyPair>,
     batch_store: BatchStore,
     block_tx: Option<mpsc::Sender<Block>>,
     dag_block_tx: Option<mpsc::Sender<Vec<u8>>>,
@@ -318,7 +357,16 @@ pub async fn run_dag_driver(
         0, // round 0
     )
     .await;
-    let boot_block = build_dag_block(0, cfg.proposer, vec![], boot_payload, cfg.epoch, boot_ts);
+    let boot_block = build_dag_block(
+        0,
+        cfg.proposer,
+        vec![],
+        boot_payload,
+        cfg.epoch,
+        boot_ts,
+        &keypair,
+    )
+    .map_err(|e| NodeError::Config(format!("build_dag_block at round 0 failed: {e}")))?;
     let mut next_block = Some(boot_block);
 
     loop {
@@ -460,14 +508,24 @@ pub async fn run_dag_driver(
                 build_and_gossip_batch(&mempool, cfg.proposer, &batch_store, &batch_tx, new_round)
                     .await;
 
-            next_block = Some(build_dag_block(
+            match build_dag_block(
                 new_round,
                 cfg.proposer,
                 ancestors,
                 payload,
                 cfg.epoch,
                 ts,
-            ));
+                &keypair,
+            ) {
+                Ok(b) => next_block = Some(b),
+                Err(e) => {
+                    warn!(
+                        round = new_round,
+                        error = %e,
+                        "dag_driver: build_dag_block failed — skipping round"
+                    );
+                }
+            }
         }
 
         // Yield to the tokio scheduler so other tasks can run between DAG rounds.

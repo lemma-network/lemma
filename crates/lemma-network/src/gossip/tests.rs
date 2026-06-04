@@ -60,7 +60,7 @@ fn test_block() -> Block {
         vec![],
     )
     .expect("test block header is always valid");
-    Block::new(header, vec![], vec![]).expect("test block is always valid")
+    Block::new(header, vec![], vec![], None).expect("test block is always valid")
 }
 
 /// Minimal valid `Transaction` for gossip tests.
@@ -143,7 +143,7 @@ fn gossip_topics_default_equals_new() {
 #[test]
 fn for_message_routes_new_block_to_blocks_topic() {
     let topics = GossipTopics::new();
-    let msg = GossipMessage::NewBlock(test_block());
+    let msg = GossipMessage::NewBlock(Box::new(test_block()));
 
     let routed = topics.for_message(&msg);
     assert_eq!(
@@ -173,7 +173,7 @@ fn for_message_routing_is_consistent_with_gossip_message_topic_string() {
     // messages.rs and gossip.rs.
     let topics = GossipTopics::new();
 
-    let block_msg = GossipMessage::NewBlock(test_block());
+    let block_msg = GossipMessage::NewBlock(Box::new(test_block()));
     let block_topic_str = block_msg.topic();
     let expected_block_hash = gossipsub::IdentTopic::new(block_topic_str).hash();
     assert_eq!(topics.for_message(&block_msg).hash(), expected_block_hash);
@@ -247,7 +247,7 @@ fn publish_returns_publish_error_when_no_peers_subscribed() {
 
     subscribe_all(&mut gs, &topics).expect("subscribe must succeed");
 
-    let msg = GossipMessage::NewBlock(test_block());
+    let msg = GossipMessage::NewBlock(Box::new(test_block()));
     let result = publish(&mut gs, &topics, &msg);
 
     // With no peers in the mesh, gossipsub returns NoPeersSubscribedToTopic.
@@ -264,7 +264,7 @@ fn publish_error_contains_topic_name() {
     let topics = GossipTopics::new();
     subscribe_all(&mut gs, &topics).expect("subscribe must succeed");
 
-    let msg = GossipMessage::NewBlock(test_block());
+    let msg = GossipMessage::NewBlock(Box::new(test_block()));
     let Err(NetworkError::Publish { topic, .. }) = publish(&mut gs, &topics, &msg) else {
         panic!("expected Publish error");
     };
@@ -294,7 +294,7 @@ fn publish_transaction_error_contains_tx_topic_name() {
 
 #[test]
 fn decode_incoming_valid_block_bytes_returns_correct_message() {
-    let original = GossipMessage::NewBlock(test_block());
+    let original = GossipMessage::NewBlock(Box::new(test_block()));
     let bytes = original.encode().expect("encode must succeed");
     let peer = test_peer();
 
@@ -386,7 +386,7 @@ fn decode_incoming_does_not_panic_on_any_byte_sequence() {
 fn gossip_message_encodes_and_decodes_through_gossip_layer() {
     // Verifies the full encode → decode round-trip that publish + receive does.
     let peer = test_peer();
-    let original = GossipMessage::NewBlock(test_block());
+    let original = GossipMessage::NewBlock(Box::new(test_block()));
 
     let encoded = original.encode().expect("encode must succeed");
     let decoded = decode_incoming(&peer, &encoded)

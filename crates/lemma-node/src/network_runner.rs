@@ -216,7 +216,7 @@ async fn handle_network_event(
     match event {
         // ── Block received (gossip or range-response fan-out) ─────────────────
         NetworkEvent::BlockReceived { from, block } => {
-            handle_block_received(from, block, db, handle, write_lock, verifier, tracker).await?;
+            handle_block_received(from, *block, db, handle, write_lock, verifier, tracker).await?;
         }
 
         // ── Inbound range request — serve from ChainStore ────────────────────

@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    cert::QuorumCert,
     error::BlockError,
     header::BlockHeader,
     transaction::{Transaction, TransactionReceipt},
@@ -27,10 +28,19 @@ use crate::{
 /// - `transactions.len() == receipts.len()` — one receipt per transaction.
 /// - `header.gas_used == sum(receipt.gas_used)` — gas accounting consistency.
 ///
+/// # Quorum certificate
+///
+/// `quorum_cert` carries the 2f+1 Pulse consensus certificate for this block.
+/// It is `None` for the genesis block and for any block not yet certified
+/// (Phase 1 range-sync). All blocks produced by the DAG consensus driver after
+/// D·15a carry `Some(qc)`. Verification is performed by `CertifiedVerifier`
+/// (D·15c) — **not** by `Block::validate`, which checks only structural
+/// invariants.
+///
 /// # Serde
 ///
 /// Serialized as a flat JSON object. The `header` is a nested object; both
-/// lists are JSON arrays.
+/// lists are JSON arrays. `quorum_cert` serializes as `null` when `None`.
 ///
 /// # Examples
 ///
@@ -43,7 +53,7 @@ use crate::{
 ///     0, 0, Hash::zero(), Hash::zero(), Hash::zero(),
 ///     30_000_000, 0, Amount::from_drop(1_000_000_000), vec![],
 /// ).unwrap();
-/// let block = Block::new(header, vec![], vec![]).unwrap();
+/// let block = Block::new(header, vec![], vec![], None).unwrap();
 /// assert!(block.is_empty());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,10 +64,23 @@ pub struct Block {
     pub transactions: Vec<Transaction>,
     /// Execution outcomes — one receipt per transaction, in the same order.
     pub receipts: Vec<TransactionReceipt>,
+    /// 2f+1 quorum certificate produced by Pulse consensus for this block.
+    ///
+    /// `None` for the genesis block and any block not yet certified
+    /// (Phase 1 range-sync). `Some(qc)` for every block produced by the DAG
+    /// consensus driver after D·15a. Verification is performed by
+    /// `CertifiedVerifier` (D·15c) — NOT here.
+    pub quorum_cert: Option<QuorumCert>,
 }
 
 impl Block {
     /// Create and validate a new `Block`.
+    ///
+    /// # Parameters
+    ///
+    /// - `quorum_cert` — the 2f+1 Pulse consensus certificate for this block,
+    ///   or `None` for the genesis block / uncertified range-sync blocks.
+    ///   QC verification is NOT performed here — use `CertifiedVerifier` (D·15c).
     ///
     /// # Errors
     ///
@@ -69,11 +92,13 @@ impl Block {
         header: BlockHeader,
         transactions: Vec<Transaction>,
         receipts: Vec<TransactionReceipt>,
+        quorum_cert: Option<QuorumCert>,
     ) -> Result<Self, BlockError> {
         let block = Self {
             header,
             transactions,
             receipts,
+            quorum_cert,
         };
         block.validate()?;
         Ok(block)

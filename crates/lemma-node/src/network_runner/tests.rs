@@ -68,7 +68,7 @@ fn make_block_at(height: u64, parent_hash: Hash) -> Block {
         vec![],
     )
     .expect("header must be valid");
-    Block::new(h, vec![], vec![]).expect("block must be valid")
+    Block::new(h, vec![], vec![], None).expect("block must be valid")
 }
 
 fn seed_n_blocks(db: &LemmaDb, n: u64) -> Hash {
@@ -261,7 +261,7 @@ async fn dispatch_applies_block_at_tip_plus_one() {
     event_tx
         .send(NetworkEvent::BlockReceived {
             from: libp2p::PeerId::random(),
-            block: block1,
+            block: Box::new(block1),
         })
         .await
         .expect("send");
@@ -324,7 +324,7 @@ async fn dispatch_skips_block_already_in_chain() {
     event_tx
         .send(NetworkEvent::BlockReceived {
             from: libp2p::PeerId::random(),
-            block: block1,
+            block: Box::new(block1),
         })
         .await
         .expect("send");

@@ -48,7 +48,7 @@ fn make_block(height: u64, parent_hash: Hash) -> Block {
         vec![],
     )
     .expect("header");
-    Block::new(h, vec![], vec![]).expect("block")
+    Block::new(h, vec![], vec![], None).expect("block")
 }
 
 /// Seed `n` blocks (heights 0..n) and return the hash of the last one.

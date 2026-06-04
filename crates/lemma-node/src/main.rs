@@ -66,6 +66,7 @@ use lemma_core::{
     validator::{ConsensusKey, VotingPower},
     validator_set::{Member, ValidatorSet},
 };
+use lemma_crypto::KeyPair;
 use lemma_mempool::pool::Mempool;
 use lemma_network::{service::NetworkHandle, service::NetworkService, NetworkConfig};
 use lemma_node::{
@@ -168,7 +169,11 @@ async fn main() -> anyhow::Result<()> {
     // Shared write-lock: producer commit + range-sync apply
     let write_lock = Arc::new(Mutex::new(()));
 
-    let proposer = Address::zero();
+    // Validator keypair for signing DagBlocks (D·15a — replaces Signature::Unsigned).
+    // Phase 2: ephemeral keypair generated at startup (same session = same identity).
+    // Phase 3+: load from a persisted keystore (lemma-cli wallet).
+    let validator_keypair = Arc::new(KeyPair::generate().context("generating validator keypair")?);
+    let proposer = *validator_keypair.address();
 
     // Read the current chain epoch from the tip block (set by genesis boot → epoch 0).
     // Using the chain's epoch ensures the DAG driver and the chain header are consistent.
@@ -240,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&db),
             Arc::clone(&mempool),
             dag_cfg,
+            Arc::clone(&validator_keypair),
             batch_store,
             Some(block_tx),
             Some(dag_block_tx),

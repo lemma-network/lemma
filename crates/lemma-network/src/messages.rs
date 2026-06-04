@@ -344,7 +344,7 @@ pub enum GossipMessage {
     /// Receivers verify the block's structural integrity before extending
     /// their chain — gossip is a *hint*, structural + QC verification is
     /// the *proof*.
-    NewBlock(Block),
+    NewBlock(Box<Block>),
 
     /// A pending transaction, broadcast on [`TOPIC_TX`].
     ///

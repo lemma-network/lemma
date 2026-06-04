@@ -58,7 +58,7 @@ fn make_block(height: u64, parent_hash: Hash) -> (Block, Hash) {
         vec![],
     )
     .expect("header");
-    let block = Block::new(h, vec![], vec![]).expect("block");
+    let block = Block::new(h, vec![], vec![], None).expect("block");
     let bytes = bincode::serialize(&block).expect("serialize");
     let hash = lemma_crypto::hash_bytes(&bytes);
     (block, hash)
@@ -158,7 +158,7 @@ async fn sync_rejects_tampered_parent_hash() {
         vec![],
     )
     .expect("header");
-    let tampered_block = Block::new(tampered_header, vec![], vec![]).expect("block");
+    let tampered_block = Block::new(tampered_header, vec![], vec![], None).expect("block");
 
     let err = apply_synced_block(&tampered_block, &db_b, &write_lock, &verifier)
         .await

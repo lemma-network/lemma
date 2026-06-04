@@ -81,7 +81,7 @@ pub enum NetworkCommand {
     ///
     /// The block is encoded as a `GossipMessage::NewBlock` and published
     /// on `lemma/blocks/1`. Gossip is a *hint* — receivers verify the QC.
-    BroadcastBlock(Block),
+    BroadcastBlock(Box<Block>),
 
     /// Broadcast a pending transaction to all gossip mesh peers.
     ///
@@ -150,7 +150,7 @@ pub enum NetworkEvent {
         /// The peer that propagated the block (not necessarily the proposer).
         from: PeerId,
         /// The decoded block.
-        block: Block,
+        block: Box<Block>,
     },
 
     /// A gossiped transaction was received.
@@ -231,7 +231,8 @@ impl NetworkHandle {
     /// Returns [`NetworkError::Transport`] if the command channel is closed
     /// (i.e. the service has stopped).
     pub async fn broadcast_block(&self, block: Block) -> Result<(), NetworkError> {
-        self.send(NetworkCommand::BroadcastBlock(block)).await
+        self.send(NetworkCommand::BroadcastBlock(Box::new(block)))
+            .await
     }
 
     /// Broadcast a pending transaction to the gossip mesh.
@@ -674,7 +675,10 @@ impl NetworkService {
 
                 // Emit blocks individually so the consensus layer processes them.
                 for block in response.blocks {
-                    self.emit(NetworkEvent::BlockReceived { from, block });
+                    self.emit(NetworkEvent::BlockReceived {
+                        from,
+                        block: Box::new(block),
+                    });
                 }
             }
         }

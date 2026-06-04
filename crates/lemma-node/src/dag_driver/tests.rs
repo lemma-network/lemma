@@ -38,6 +38,11 @@ fn addr(n: u8) -> Address {
     Address::from_public_key(&[n; 32])
 }
 
+/// Generate a fresh `KeyPair` for test use — panics on generation failure.
+fn test_kp() -> KeyPair {
+    KeyPair::generate().expect("test keypair generation")
+}
+
 fn dummy_key() -> ConsensusKey {
     ConsensusKey::from_bytes(vec![0u8; 32], vec![0u8; 32])
 }
@@ -121,32 +126,40 @@ fn make_commit(index: u64, leader_round: u64, leader_author: Address) -> Commit 
 
 #[test]
 fn build_dag_block_sets_round_and_author() {
-    let proposer = addr(1);
-    let block = build_dag_block(3, proposer, vec![], vec![], 1, 1_000);
+    let kp = test_kp();
+    let proposer = *kp.address();
+    let block =
+        build_dag_block(3, proposer, vec![], vec![], 1, 1_000, &kp).expect("build_dag_block");
     assert_eq!(block.round, 3);
     assert_eq!(block.author, proposer);
 }
 
 #[test]
 fn build_dag_block_sets_epoch_and_timestamp() {
-    let proposer = addr(1);
-    let block = build_dag_block(0, proposer, vec![], vec![], 42, 9_999);
+    let kp = test_kp();
+    let proposer = *kp.address();
+    let block =
+        build_dag_block(0, proposer, vec![], vec![], 42, 9_999, &kp).expect("build_dag_block");
     assert_eq!(block.epoch, 42);
     assert_eq!(block.timestamp_ms, 9_999);
 }
 
 #[test]
 fn build_dag_block_includes_ancestors() {
-    let proposer = addr(1);
+    let kp = test_kp();
+    let proposer = *kp.address();
     let ancestor = DagBlockRef::new(0, proposer, Hash::from_bytes([0xAB; 32]));
-    let block = build_dag_block(1, proposer, vec![ancestor], vec![], 1, 0);
+    let block =
+        build_dag_block(1, proposer, vec![ancestor], vec![], 1, 0, &kp).expect("build_dag_block");
     assert_eq!(block.ancestors.len(), 1);
     assert_eq!(block.ancestors[0], ancestor);
 }
 
 #[test]
 fn build_dag_block_has_empty_payload_and_commit_votes() {
-    let block = build_dag_block(0, addr(1), vec![], vec![], 1, 0);
+    let kp = test_kp();
+    let block =
+        build_dag_block(0, *kp.address(), vec![], vec![], 1, 0, &kp).expect("build_dag_block");
     assert!(
         block.payload.is_empty(),
         "Phase 2: empty payload when passed vec![]"
@@ -159,12 +172,54 @@ fn build_dag_block_has_empty_payload_and_commit_votes() {
 
 #[test]
 fn build_dag_block_reference_matches_block() {
-    let proposer = addr(2);
-    let block = build_dag_block(5, proposer, vec![], vec![], 1, 0);
+    let kp = test_kp();
+    let proposer = *kp.address();
+    let block = build_dag_block(5, proposer, vec![], vec![], 1, 0, &kp).expect("build_dag_block");
     let r = block.reference();
     assert_eq!(r.round, 5);
     assert_eq!(r.author, proposer);
     assert_eq!(r.digest, block.digest);
+}
+
+#[test]
+fn build_dag_block_rejects_author_keypair_mismatch() {
+    // author = addr(0xFF) but keypair is a fresh random keypair → addresses differ.
+    let kp = test_kp();
+    let mismatched_author = addr(0xFF); // addr derives from [0xFF;32], not from kp
+    let result = build_dag_block(1, mismatched_author, vec![], vec![], 0, 0, &kp);
+    assert!(
+        result.is_err(),
+        "mismatched author and keypair address must return Err"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("does not match author"),
+        "error message must name the mismatch: {err_msg}"
+    );
+}
+
+#[test]
+fn build_dag_block_signature_verifiable_by_public_key() {
+    use lemma_core::signature::Signature;
+    use lemma_crypto::{verify, HybridSignature};
+
+    // Arrange: keypair + block (author derived from keypair — guard requires match).
+    let kp = test_kp();
+    let pk = kp.public_key();
+    let proposer = *kp.address();
+    let block = build_dag_block(2, proposer, vec![], vec![], 1, 0, &kp).expect("build_dag_block");
+
+    // Assert: signature is Hybrid (not Unsigned).
+    let (classical, quantum) = match &block.signature {
+        Signature::Hybrid { classical, quantum } => (classical.clone(), quantum.clone()),
+        other => panic!("expected Hybrid signature, got {:?}", other),
+    };
+
+    // Reconstruct HybridSignature and verify against the block body digest.
+    // sign_to_lemma() signs `digest.as_bytes()`; we verify the same payload.
+    let hybrid = HybridSignature { classical, quantum };
+    verify(&pk, block.digest.as_bytes(), &hybrid)
+        .expect("DagBlock signature must verify against block digest");
 }
 
 // ── build_block_from_commit ───────────────────────────────────────────────────
@@ -280,7 +335,9 @@ fn build_block_from_commit_fails_on_uninitialised_chain() {
 #[tokio::test]
 async fn run_dag_driver_produces_chain_block_from_dag_consensus() {
     // Arrange: single-validator chain, dag driver runs until it produces ≥1 block.
-    let proposer = addr(1);
+    // Proposer derived from keypair — build_dag_block guard requires author == keypair.address().
+    let kp = Arc::new(KeyPair::generate().expect("test keypair"));
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let mempool = Arc::new(RwLock::new(Mempool::new(100)));
     let write_lock = Arc::new(Mutex::new(()));
@@ -299,11 +356,13 @@ async fn run_dag_driver_produces_chain_block_from_dag_consensus() {
     let db_clone = Arc::clone(&db);
     let mempool_clone = Arc::clone(&mempool);
     let write_lock_clone = Arc::clone(&write_lock);
+    let kp_clone = Arc::clone(&kp);
     let driver_handle = tokio::spawn(async move {
         crate::dag_driver::run_dag_driver(
             db_clone,
             mempool_clone,
             cfg,
+            kp_clone,
             new_batch_store(),
             Some(block_tx),
             None, // no dag_block_tx needed for this test
@@ -344,7 +403,8 @@ async fn run_dag_driver_produces_chain_block_from_dag_consensus() {
 #[tokio::test]
 async fn run_dag_driver_chain_block_height_matches_commit_index() {
     // The second chain block must be at height 2 (commit.index=2).
-    let proposer = addr(1);
+    let kp = Arc::new(KeyPair::generate().expect("test keypair"));
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let mempool = Arc::new(RwLock::new(Mempool::new(100)));
     let write_lock = Arc::new(Mutex::new(()));
@@ -361,11 +421,13 @@ async fn run_dag_driver_chain_block_height_matches_commit_index() {
     let db_clone = Arc::clone(&db);
     let mp_clone = Arc::clone(&mempool);
     let wl_clone = Arc::clone(&write_lock);
+    let kp_clone = Arc::clone(&kp);
     tokio::spawn(async move {
         let _ = crate::dag_driver::run_dag_driver(
             db_clone,
             mp_clone,
             cfg,
+            kp_clone,
             new_batch_store(),
             Some(block_tx),
             None,
@@ -458,7 +520,9 @@ fn build_block_from_commit_clamps_timestamp_below_parent_plus_one() {
 #[tokio::test]
 async fn run_dag_driver_executes_transfer_and_changes_state_root() {
     // Arrange: fund a sender via genesis, create a signed Transfer tx.
-    let proposer = addr(1);
+    // Proposer keypair generated first so proposer == keypair.address() (guard in build_dag_block).
+    let proposer_kp = Arc::new(KeyPair::generate().expect("proposer keypair"));
+    let proposer = *proposer_kp.address();
     let sender_kp = KeyPair::generate().expect("KeyPair::generate");
     let sender = *sender_kp.address();
     let recipient = addr(0xBB);
@@ -565,11 +629,13 @@ async fn run_dag_driver_executes_transfer_and_changes_state_root() {
     let db_clone = Arc::clone(&db);
     let mp_clone = Arc::clone(&mempool);
     let wl_clone = Arc::clone(&write_lock);
+    let kp_clone = Arc::clone(&proposer_kp);
     tokio::spawn(async move {
         let _ = crate::dag_driver::run_dag_driver(
             db_clone,
             mp_clone,
             cfg,
+            kp_clone,
             new_batch_store(),
             Some(block_tx),
             None,

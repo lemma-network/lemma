@@ -32,7 +32,7 @@ fn test_block(height: u64) -> Block {
         vec![],
     )
     .expect("test block header is always valid");
-    Block::new(header, vec![], vec![]).expect("test block is always valid")
+    Block::new(header, vec![], vec![], None).expect("test block is always valid")
 }
 
 /// A minimal `Transaction` for gossip tests (unsigned, Transfer type).
@@ -303,7 +303,7 @@ fn range_response_with_blocks_bincode_roundtrip() {
 
 #[test]
 fn gossip_new_block_routes_to_blocks_topic() {
-    let msg = GossipMessage::NewBlock(test_block(0));
+    let msg = GossipMessage::NewBlock(Box::new(test_block(0)));
     assert_eq!(msg.topic(), config::TOPIC_BLOCKS);
 }
 
@@ -316,7 +316,7 @@ fn gossip_new_transaction_routes_to_tx_topic() {
 #[test]
 fn gossip_message_topic_is_versioned() {
     // Each topic must carry a version suffix for forward-compat.
-    assert!(GossipMessage::NewBlock(test_block(0))
+    assert!(GossipMessage::NewBlock(Box::new(test_block(0)))
         .topic()
         .ends_with("/1"));
     assert!(GossipMessage::NewTransaction(test_tx())
@@ -328,7 +328,7 @@ fn gossip_message_topic_is_versioned() {
 
 #[test]
 fn gossip_new_block_encode_decode_roundtrip() {
-    let original = GossipMessage::NewBlock(test_block(42));
+    let original = GossipMessage::NewBlock(Box::new(test_block(42)));
     let bytes = original.encode().expect("encode must succeed");
     let decoded = GossipMessage::decode(&bytes).expect("decode must succeed");
     assert_eq!(decoded, original);
@@ -366,7 +366,7 @@ fn gossip_decode_returns_error_on_garbage_bytes() {
 #[test]
 fn gossip_decode_returns_error_on_truncated_bytes() {
     // A prefix of valid bytes is not valid — decode must fail gracefully.
-    let valid = GossipMessage::NewBlock(test_block(1))
+    let valid = GossipMessage::NewBlock(Box::new(test_block(1)))
         .encode()
         .expect("encode");
     let truncated = &valid[..valid.len() / 2];
@@ -381,7 +381,7 @@ fn gossip_decode_returns_error_on_truncated_bytes() {
 
 #[test]
 fn gossip_new_block_debug_contains_variant_name() {
-    let msg = GossipMessage::NewBlock(test_block(0));
+    let msg = GossipMessage::NewBlock(Box::new(test_block(0)));
     assert!(format!("{msg:?}").contains("NewBlock"));
 }
 

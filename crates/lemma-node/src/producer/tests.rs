@@ -50,7 +50,7 @@ fn make_genesis_block() -> (Block, Hash) {
     )
     .expect("genesis header must be valid");
 
-    let block = Block::new(header, vec![], vec![]).expect("genesis block must be valid");
+    let block = Block::new(header, vec![], vec![], None).expect("genesis block must be valid");
     let bytes = bincode::serialize(&block).expect("serialize must succeed");
     let hash = lemma_crypto::hash_bytes(&bytes);
     (block, hash)
