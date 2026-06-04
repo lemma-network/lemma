@@ -59,7 +59,8 @@ fn make_block(height: u64, parent_hash: Hash) -> (Block, Hash) {
     )
     .expect("header");
     let block = Block::new(h, vec![], vec![], None).expect("block");
-    let bytes = bincode::serialize(&block).expect("serialize");
+    // serde_json is used (not bincode) — see chain.rs serialization note.
+    let bytes = serde_json::to_vec(&block).expect("serialize");
     let hash = lemma_crypto::hash_bytes(&bytes);
     (block, hash)
 }

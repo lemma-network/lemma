@@ -20,7 +20,7 @@
 //! 7.  ValidatorSet::from_active_validators(0)  — validators_hash = vset.hash()
 //! 8.  BlockHeader::new(height=0, …)            — genesis header
 //! 9.  Block::new(header, [], [])               — no txs / receipts
-//! 10. hash_bytes(bincode(block))               — canonical Blake3 hash
+//! 10. hash_bytes(serde_json(block))            — canonical Blake3 hash
 //! 11. ChainStore::new(&db).put_block(…)        — atomic persist (§16.2)
 //! 12. return InitOutcome::Initialized
 //! ```
@@ -125,18 +125,22 @@ pub fn init_chain(db: LemmaDb, genesis: &GenesisConfig) -> Result<InitOutcome, N
     let block = Block::new(header, vec![], vec![], None)?;
 
     // Step 10: compute the genesis block hash (canonical Blake3, AGENTS §2.2).
-    // Serialize once; hash_bytes reuses those bytes for CF_BLOCK_HASH storage.
+    // serde_json is used (not bincode) because Block contains Signature with
+    // an internally-tagged serde format (#[serde(tag = "type")]) that bincode
+    // cannot deserialize. The genesis block has quorum_cert = None so bincode
+    // would technically work here, but using serde_json keeps the serializer
+    // consistent with ChainStore::put_block and compute_block_hash (sync.rs).
     let block_bytes =
-        bincode::serialize(&block).map_err(|e| NodeError::Serialization(e.to_string()))?;
+        serde_json::to_vec(&block).map_err(|e| NodeError::Serialization(e.to_string()))?;
     let genesis_hash = lemma_crypto::hash_bytes(&block_bytes);
 
     // Step 11: persist atomically via ChainStore (the canonical block-write path).
     // ChainStore::put_block handles CF_BLOCKS + CF_BLOCK_HASH + CF_METADATA in
     // one WriteBatch and advances tip metadata (AGENTS §16.2).
     //
-    // Note: genesis_boot pre-serializes the block to compute the hash, then
+    // Note: genesis_boot pre-serializes to compute the hash, then
     // ChainStore::put_block re-serializes internally. This is one extra
-    // bincode call for genesis only (cold path, called once per chain).
+    // serde_json call for genesis only (cold path, called once per chain).
     // If this ever matters: expose a put_block_raw(bytes, hash) on ChainStore.
     ChainStore::new(&db).put_block(&block, genesis_hash)?;
 

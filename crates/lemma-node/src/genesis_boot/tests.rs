@@ -180,8 +180,9 @@ fn init_chain_credits_genesis_balance_to_state_trie() {
         .get(lemma_storage::db::CF_BLOCKS, &0u64.to_be_bytes())
         .expect("get CF_BLOCKS must succeed")
         .expect("genesis block must exist");
+    // serde_json is used (not bincode) — see chain.rs serialization note.
     let block: lemma_core::block::Block =
-        bincode::deserialize(&block_bytes).expect("block deserialise must succeed");
+        serde_json::from_slice(&block_bytes).expect("block deserialise must succeed");
     let state_root = block.header.state_root;
 
     let ws =
@@ -267,8 +268,9 @@ fn init_chain_devnet_genesis_block_has_zero_state_root() {
         .get(lemma_storage::db::CF_BLOCKS, &0u64.to_be_bytes())
         .expect("get CF_BLOCKS must succeed")
         .expect("genesis block must exist");
+    // serde_json is used (not bincode) — see chain.rs serialization note.
     let block: lemma_core::block::Block =
-        bincode::deserialize(&block_bytes).expect("block deserialise must succeed");
+        serde_json::from_slice(&block_bytes).expect("block deserialise must succeed");
     assert!(
         block.header.state_root.is_zero(),
         "empty-balance genesis must have zero state_root",

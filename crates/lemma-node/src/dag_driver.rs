@@ -189,7 +189,8 @@ pub fn build_dag_block(
 }
 
 /// Map a [`Commit`] to a chain [`Block`] (spec §5.2), executing pending txs
-/// from the mempool against the parent state.
+/// from the mempool against the parent state, then assembling a commit-certificate
+/// (DB-A15b) signed by the proposer's keypair.
 ///
 /// ## Commit → BlockHeader mapping
 ///
@@ -202,6 +203,17 @@ pub fn build_dag_block(
 /// - `header.transactions_root` = Blake3 hash of serialized `txs`
 /// - `header.receipts_root`     = Blake3 hash of serialized receipts
 /// - `header.gas_used`          = total gas consumed by `txs`
+///
+/// ## QC assembly (DB-A15b)
+///
+/// After the `BlockHeader` is fully constructed (all roots set), the proposer
+/// signs `Blake3(serde_json::to_vec(header))` to produce the commit-certificate.
+/// `serde_json` is used (not bincode) because it is the same serializer used for
+/// gossip — keeping the digest deterministic across the stack without introducing
+/// a second serialization format for headers.
+///
+/// Phase 2: 1 signer (100% stake) → satisfies 2f+1 trivially.
+/// Phase 3+: accumulate 2f+1 signers via commit-ack gossip (not yet implemented).
 ///
 /// ## `txs` parameter
 ///
@@ -216,15 +228,19 @@ pub fn build_dag_block(
 /// - [`NodeError::Block`] — `BlockHeader` or `Block` construction failed.
 /// - [`NodeError::Core`] — base-fee arithmetic overflow.
 /// - [`NodeError::Storage`] — world-state write failed during execution.
-/// - [`NodeError::Serialization`] — block hash encoding failed.
+/// - [`NodeError::Serialization`] — header JSON encoding or block hash encoding failed.
 pub fn build_block_from_commit(
     commit: &Commit,
     chain: &ChainStore<'_>,
     proposer: Address,
     db: Arc<LemmaDb>,
     txs: Vec<Transaction>,
+    keypair: &KeyPair,
 ) -> Result<(Block, Hash), NodeError> {
+    use std::collections::BTreeMap;
+
     use lemma_consensus::calculate_base_fee;
+    use lemma_core::cert::QuorumCert;
 
     // Read chain tip — must exist (genesis must be initialised).
     let (parent_height, parent_hash) = chain.tip()?.ok_or_else(|| {
@@ -270,12 +286,39 @@ pub fn build_block_from_commit(
         vec![], // extra_data
     )?;
 
-    // quorum_cert is None here — D·15b will assemble the QC from the commit's
-    // leader signatures and pass Some(qc). For now, blocks are uncertified.
-    let block = Block::new(header, exec_out.txs, exec_out.receipts, None)?;
-    let hash = compute_block_hash(&block).map_err(|e| NodeError::Serialization(e.to_string()))?;
+    // ── Assemble commit-certificate (DB-A15b) ────────────────────────────────
+    //
+    // The QC is assembled AFTER the header is fully constructed (all roots set)
+    // so the digest covers the final, canonical header bytes.
+    //
+    // serde_json is used (not bincode) because it is the same serializer used
+    // for DagBlock gossip — keeping the digest deterministic across the stack
+    // without introducing a second serialization format for headers.
+    //
+    // Phase 2: single signer (100% stake in single-validator mode) satisfies
+    // 2f+1 trivially. Phase 3+: collect 2f+1 signers via commit-ack gossip.
+    let header_bytes = serde_json::to_vec(&header)
+        .map_err(|e| NodeError::Serialization(format!("header serialization: {e}")))?;
+    let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+    let header_sig = keypair.sign_to_lemma(header_digest.as_bytes());
 
-    Ok((block, hash))
+    let mut signers = BTreeMap::new();
+    signers.insert(proposer, header_sig);
+    let qc = QuorumCert::new(header.height, header_digest, signers);
+
+    // Rebuild Block with the QC attached via Block::new (moves header/txs/receipts — no clone).
+    // Deliberate: Block::new re-runs validate() (receipt-count + gas-accounting invariants)
+    // as a defense-in-depth check on the settlement path. The cost is one extra structural
+    // validation, which is worth it for a money-path block before it is persisted.
+    // NOTE: `quorum_cert` is a pub field — direct assignment would skip validation.
+    let block_with_qc = Block::new(header, exec_out.txs, exec_out.receipts, Some(qc))?;
+
+    // Recompute the block hash AFTER adding the QC — the hash covers the full
+    // block (including quorum_cert), so it changes when QC goes from None → Some.
+    let hash =
+        compute_block_hash(&block_with_qc).map_err(|e| NodeError::Serialization(e.to_string()))?;
+
+    Ok((block_with_qc, hash))
 }
 
 // ── Async DAG driver loop ─────────────────────────────────────────────────────
@@ -552,7 +595,7 @@ async fn process_surge_output(
             resolve_committed_txs(commit, driver.dag(), &store)
         };
 
-        match build_block_from_commit(commit, &chain, cfg.proposer, Arc::clone(db), txs) {
+        match build_block_from_commit(commit, &chain, cfg.proposer, Arc::clone(db), txs, keypair) {
             Ok((block, hash)) => {
                 let height = block.height();
                 let committed_hashes = collect_committed_hashes(&block.transactions);

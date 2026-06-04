@@ -219,6 +219,20 @@ impl From<bincode::Error> for StorageError {
     }
 }
 
+impl From<serde_json::Error> for StorageError {
+    /// Convert a `serde_json::Error` into [`StorageError::SerializationFailed`].
+    ///
+    /// `serde_json::Error` is not `Clone + PartialEq + Eq`, so the `Display`
+    /// string is stored. Used by `ChainStore` block storage (Block contains
+    /// `Signature` with internally-tagged serde format, which bincode cannot
+    /// deserialize — see `chain.rs` module doc).
+    fn from(e: serde_json::Error) -> Self {
+        Self::SerializationFailed {
+            reason: e.to_string(),
+        }
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

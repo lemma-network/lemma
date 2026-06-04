@@ -42,8 +42,8 @@
 //!
 //! | CF | Key | Value |
 //! |---|---|---|
-//! | `CF_BLOCKS` | `height: u64` big-endian | `bincode(Block)` |
-//! | `CF_BLOCK_HASH` | `hash: [u8; 32]` | `bincode(Block)` |
+//! | `CF_BLOCKS` | `height: u64` big-endian | `serde_json(Block)` |
+//! | `CF_BLOCK_HASH` | `hash: [u8; 32]` | `serde_json(Block)` |
 //! | `CF_METADATA` | `b"latest_height"` | `height: u64` big-endian |
 //! | `CF_METADATA` | `b"latest_hash"` | `hash: [u8; 32]` |
 //!
@@ -66,6 +66,25 @@ use crate::{
     db::{CF_BLOCKS, CF_BLOCK_HASH, CF_METADATA},
     LemmaDb, StorageError,
 };
+
+// ── Serialization note ────────────────────────────────────────────────────────
+//
+// `Block` is serialized with `serde_json` (NOT `bincode`) because it contains
+// `Signature` (`lemma_core::Signature`) which uses `#[serde(tag = "type")]`
+// (internally-tagged enum). Bincode does not support `deserialize_any`, which
+// internally-tagged serde formats require — attempting bincode deserialization
+// of a `Block` with a `Some(QuorumCert)` (whose `signers` map values are
+// `Signature`) panics with "Bincode does not support deserialize_any".
+//
+// `serde_json` handles internally-tagged enums correctly and is already a
+// workspace dependency of `lemma-storage`. The storage cost is higher (JSON
+// is more verbose than bincode), but correctness is non-negotiable.
+//
+// `compute_block_hash` (`lemma-node::sync`) uses the same `serde_json` path
+// so the canonical hash of a block with a QC remains consistent between
+// production and storage (AGENTS §2 — one canonical serializer per concern).
+//
+// See decisions-log for full rationale (Technical Debt D·15c-bincode-sig fix).
 
 // ── Metadata key constants ────────────────────────────────────────────────────
 
@@ -125,11 +144,11 @@ impl<'a> ChainStore<'a> {
     ///
     /// # Errors
     ///
-    /// - [`StorageError::SerializationFailed`] — `bincode` could not encode `block`.
+    /// - [`StorageError::SerializationFailed`] — `serde_json` could not encode `block`.
     /// - [`StorageError::BatchFailed`] — RocksDB commit failed.
     /// - [`StorageError::Database`] — underlying RocksDB I/O error.
     pub fn put_block(&self, block: &Block, hash: Hash) -> Result<(), StorageError> {
-        let block_bytes = bincode::serialize(block).map_err(StorageError::from)?;
+        let block_bytes = serde_json::to_vec(block).map_err(StorageError::from)?;
 
         let height = block.height();
         let height_key = height.to_be_bytes();
@@ -171,7 +190,7 @@ impl<'a> ChainStore<'a> {
             return Ok(None);
         };
         Ok(Some(
-            bincode::deserialize(&bytes).map_err(StorageError::from)?,
+            serde_json::from_slice(&bytes).map_err(StorageError::from)?,
         ))
     }
 
@@ -187,7 +206,7 @@ impl<'a> ChainStore<'a> {
             return Ok(None);
         };
         Ok(Some(
-            bincode::deserialize(&bytes).map_err(StorageError::from)?,
+            serde_json::from_slice(&bytes).map_err(StorageError::from)?,
         ))
     }
 

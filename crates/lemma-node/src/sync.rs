@@ -402,17 +402,20 @@ pub async fn apply_synced_block(
 
 /// Compute the canonical hash of `block`.
 ///
-/// Uses `bincode::serialize` + `lemma_crypto::hash_bytes` — the same
-/// convention as the block producer (`producer.rs:168`). This is the only
-/// canonical hash path; all block-hash derivations must use this function
-/// (AGENTS.md §2.2: one canonical hash function).
+/// Uses `serde_json::to_vec` + `lemma_crypto::hash_bytes` — the same
+/// convention as `ChainStore::put_block`. `serde_json` is used (not `bincode`)
+/// because `Block` contains `Signature` with an internally-tagged serde format
+/// (`#[serde(tag = "type")]`) that bincode cannot deserialize. Both the hash
+/// computation and the storage layer must use the same serializer so that hash
+/// lookups remain consistent (AGENTS.md §2.2: one canonical hash function;
+/// see `chain.rs` serialization note for full rationale).
 ///
 /// # Errors
 ///
-/// Returns [`VerifyError::Serialization`] if `bincode::serialize` fails. In
+/// Returns [`VerifyError::Serialization`] if `serde_json::to_vec` fails. In
 /// practice this should never happen for a well-formed `Block`.
 pub fn compute_block_hash(block: &Block) -> Result<Hash, VerifyError> {
-    bincode::serialize(block)
+    serde_json::to_vec(block)
         .map(|bytes| lemma_crypto::hash_bytes(&bytes))
         .map_err(|e| VerifyError::Serialization {
             reason: e.to_string(),

@@ -51,7 +51,8 @@ fn make_genesis_block() -> (Block, Hash) {
     .expect("genesis header must be valid");
 
     let block = Block::new(header, vec![], vec![], None).expect("genesis block must be valid");
-    let bytes = bincode::serialize(&block).expect("serialize must succeed");
+    // serde_json is used (not bincode) — see chain.rs serialization note.
+    let bytes = serde_json::to_vec(&block).expect("serialize must succeed");
     let hash = lemma_crypto::hash_bytes(&bytes);
     (block, hash)
 }

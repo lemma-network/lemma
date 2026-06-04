@@ -8,6 +8,11 @@
 //! D·15b-1: `run_dag_driver_processes_peer_block_via_channel` — peer DagBlock
 //! fed via `incoming_dag_block_rx` is accepted without fatal error.
 //!
+//! D·15b-3: `build_block_from_commit_sets_quorum_cert` — block has Some(qc)
+//! with correct height, header_digest, signer count.
+//! `build_block_from_commit_quorum_cert_signature_verifiable` — QC sig verifies
+//! against header_digest using keypair's public key.
+//!
 //! AGENTS §11: separate tests.rs, `{action}_{outcome}` naming, AAA pattern.
 
 use std::collections::BTreeMap;
@@ -250,25 +255,28 @@ fn build_dag_block_signature_verifiable_by_public_key() {
 
 #[test]
 fn build_block_from_commit_maps_height_to_commit_index() {
-    let proposer = addr(1);
+    // Proposer derived from keypair — build_block_from_commit signs with keypair.
+    let kp = test_kp();
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let chain = lemma_storage::ChainStore::new(&db);
     let commit = make_commit(1, 3, proposer);
 
     let (block, _hash) =
-        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
     assert_eq!(block.height(), 1, "height must equal commit.index");
 }
 
 #[test]
 fn build_block_from_commit_maps_dag_round_and_anchor() {
-    let proposer = addr(1);
+    let kp = test_kp();
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let chain = lemma_storage::ChainStore::new(&db);
     let commit = make_commit(1, 3, proposer);
 
     let (block, _hash) =
-        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
     assert_eq!(
         block.header.dag_round, 3,
         "dag_round must equal commit.leader.round"
@@ -281,7 +289,8 @@ fn build_block_from_commit_maps_dag_round_and_anchor() {
 
 #[test]
 fn build_block_from_commit_timestamp_is_seconds_not_millis() {
-    let proposer = addr(1);
+    let kp = test_kp();
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let chain = lemma_storage::ChainStore::new(&db);
 
@@ -290,7 +299,7 @@ fn build_block_from_commit_timestamp_is_seconds_not_millis() {
     commit.timestamp_ms = 5_000;
 
     let (block, _) =
-        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
     // Genesis timestamp is 1_000_000 (from minimal_genesis), so 5s < parent → clamped.
     // The clamped value must be > parent (1_000_000), which means >= 1_000_001.
     assert!(
@@ -302,7 +311,8 @@ fn build_block_from_commit_timestamp_is_seconds_not_millis() {
 #[test]
 fn build_block_from_commit_timestamp_is_monotonic_when_below_parent() {
     // commit timestamp of 0 ms → 0 s, which is < parent (genesis) → clamped to parent + 1.
-    let proposer = addr(1);
+    let kp = test_kp();
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let chain = lemma_storage::ChainStore::new(&db);
 
@@ -310,7 +320,7 @@ fn build_block_from_commit_timestamp_is_monotonic_when_below_parent() {
     commit.timestamp_ms = 0; // way before parent
 
     let (block, _) =
-        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
     let (_, parent_hash) = lemma_storage::ChainStore::new(&db).tip().unwrap().unwrap();
     let parent = lemma_storage::ChainStore::new(&db)
         .get_block_by_hash(&parent_hash)
@@ -325,13 +335,14 @@ fn build_block_from_commit_timestamp_is_monotonic_when_below_parent() {
 
 #[test]
 fn build_block_from_commit_produces_empty_block() {
-    let proposer = addr(1);
+    let kp = test_kp();
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let chain = lemma_storage::ChainStore::new(&db);
     let commit = make_commit(1, 3, proposer);
 
     let (block, _) =
-        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
     // Empty txs vec → no execution → empty block.
     assert!(block.transactions.is_empty(), "no txs passed → empty block");
     assert!(block.receipts.is_empty(), "no txs → no receipts");
@@ -340,18 +351,118 @@ fn build_block_from_commit_produces_empty_block() {
 
 #[test]
 fn build_block_from_commit_fails_on_uninitialised_chain() {
-    let proposer = addr(1);
+    let kp = test_kp();
+    let proposer = *kp.address();
     let dir = TempDir::new().unwrap();
     // Do NOT call init_chain — chain is empty.
     let db = Arc::new(LemmaDb::open(dir.path()).unwrap());
     let chain = lemma_storage::ChainStore::new(&db);
     let commit = make_commit(1, 3, proposer);
 
-    let result = build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]);
+    let result = build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp);
     assert!(
         result.is_err(),
         "uninitialised chain must return Err (no tip)"
     );
+}
+
+// ── D·15b-3: QC assembly at commit time ──────────────────────────────────────
+
+/// D·15b-3: `build_block_from_commit` returns a `Block` with `quorum_cert = Some(qc)`
+/// where `qc.height == block.height()`, `qc.header_digest` is the Blake3 of the
+/// serialized header, and `qc.signer_count() == 1` (Phase 2 single-validator).
+#[test]
+fn build_block_from_commit_sets_quorum_cert() {
+    // Arrange: keypair-derived proposer (QC signer must match proposer).
+    let kp = test_kp();
+    let proposer = *kp.address();
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+    let commit = make_commit(1, 3, proposer);
+
+    // Act.
+    let (block, _hash) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
+
+    // Assert: QC is present.
+    let qc = block
+        .quorum_cert
+        .as_ref()
+        .expect("block must have quorum_cert = Some(qc) after D·15b-3");
+
+    // height matches block height.
+    assert_eq!(
+        qc.height,
+        block.height(),
+        "qc.height must equal block.height()"
+    );
+
+    // header_digest = Blake3(serde_json::to_vec(header)).
+    let expected_digest = {
+        let header_bytes = serde_json::to_vec(&block.header).expect("header serialization");
+        lemma_crypto::hash_bytes(&header_bytes)
+    };
+    assert_eq!(
+        qc.header_digest, expected_digest,
+        "qc.header_digest must equal Blake3(serde_json(header))"
+    );
+
+    // Exactly one signer (Phase 2: 100% stake).
+    assert_eq!(
+        qc.signer_count(),
+        1,
+        "Phase 2 QC must have exactly 1 signer"
+    );
+
+    // Signer is the proposer.
+    assert!(
+        qc.signers.contains_key(&proposer),
+        "QC signers must contain the proposer address"
+    );
+}
+
+/// D·15b-3: The signature in the QC is verifiable against the proposer's public key.
+///
+/// Extracts `header_digest` and the `Signature::Hybrid` from the QC, reconstructs
+/// a `HybridSignature`, and calls `lemma_crypto::verify` over `header_digest.as_bytes()`.
+#[test]
+fn build_block_from_commit_quorum_cert_signature_verifiable() {
+    use lemma_core::signature::Signature;
+    use lemma_crypto::{verify, HybridSignature};
+
+    // Arrange.
+    let kp = test_kp();
+    let pk = kp.public_key();
+    let proposer = *kp.address();
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+    let commit = make_commit(1, 3, proposer);
+
+    // Act.
+    let (block, _hash) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
+
+    // Extract QC.
+    let qc = block
+        .quorum_cert
+        .as_ref()
+        .expect("block must have quorum_cert");
+
+    // Extract the signer's Signature::Hybrid from the QC.
+    let sig = qc
+        .signers
+        .get(&proposer)
+        .expect("proposer must be in QC signers");
+    let (classical, quantum) = match sig {
+        Signature::Hybrid { classical, quantum } => (classical.clone(), quantum.clone()),
+        other => panic!("expected Hybrid signature in QC, got {:?}", other),
+    };
+
+    // Reconstruct HybridSignature and verify against header_digest.
+    // sign_to_lemma() signs `header_digest.as_bytes()`; we verify the same payload.
+    let hybrid = HybridSignature { classical, quantum };
+    verify(&pk, qc.header_digest.as_bytes(), &hybrid)
+        .expect("QC signature must verify against header_digest using proposer's public key");
 }
 
 // ── Integration: run_dag_driver produces chain blocks ────────────────────────
@@ -423,6 +534,11 @@ async fn run_dag_driver_produces_chain_block_from_dag_consensus() {
         Hash::zero(),
         "dag_anchor must be non-zero (set to leader block digest)"
     );
+    // D·15b-3: DAG-produced blocks must carry a commit-certificate.
+    assert!(
+        committed_block.quorum_cert.is_some(),
+        "DAG-consensus block must have quorum_cert = Some(qc) (D·15b-3)"
+    );
 }
 
 #[tokio::test]
@@ -465,12 +581,15 @@ async fn run_dag_driver_chain_block_height_matches_commit_index() {
     });
 
     // Drain 2 committed blocks.
-    let b1 = tokio::time::timeout(std::time::Duration::from_secs(5), block_rx.recv())
+    // Timeout 30s each: in debug builds, ML-DSA-65 (pqcrypto-mldsa) signing is
+    // unoptimized and adds ~100–500 ms per DAG round. A second wave (6 more rounds)
+    // can take 10–20s in debug mode. 30s gives ample headroom without being flaky.
+    let b1 = tokio::time::timeout(std::time::Duration::from_secs(30), block_rx.recv())
         .await
         .expect("timed out waiting for block 1")
         .unwrap();
 
-    let b2 = tokio::time::timeout(std::time::Duration::from_secs(5), block_rx.recv())
+    let b2 = tokio::time::timeout(std::time::Duration::from_secs(30), block_rx.recv())
         .await
         .expect("timed out waiting for block 2")
         .unwrap();
@@ -494,7 +613,8 @@ fn build_block_from_commit_uses_commit_timestamp_when_above_parent() {
     // → header.timestamp == commit.timestamp_ms / 1000.
     // Genesis timestamp = 1_000_000 s; commit.timestamp_ms = 2_000_000_000 ms
     // → commit_secs = 2_000_000 > 1_000_000 → no clamp applied.
-    let proposer = addr(1);
+    let kp = test_kp();
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let chain = lemma_storage::ChainStore::new(&db);
 
@@ -502,7 +622,7 @@ fn build_block_from_commit_uses_commit_timestamp_when_above_parent() {
     commit.timestamp_ms = 2_000_000_000; // 2_000_000 seconds
 
     let (block, _) =
-        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
     assert_eq!(
         block.header.timestamp, 2_000_000,
         "when commit_secs > parent.timestamp, header.timestamp = commit.timestamp_ms / 1000"
@@ -513,7 +633,8 @@ fn build_block_from_commit_uses_commit_timestamp_when_above_parent() {
 fn build_block_from_commit_clamps_timestamp_below_parent_plus_one() {
     // Tests the CLAMPED path: commit.timestamp_ms/1000 < parent.timestamp
     // → header.timestamp == parent.timestamp + 1.
-    let proposer = addr(1);
+    let kp = test_kp();
+    let proposer = *kp.address();
     let (_dir, db) = fresh_chain(proposer);
     let chain = lemma_storage::ChainStore::new(&db);
 
@@ -521,7 +642,7 @@ fn build_block_from_commit_clamps_timestamp_below_parent_plus_one() {
     commit.timestamp_ms = 0; // 0 seconds << genesis 1_000_000
 
     let (block, _) =
-        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![]).unwrap();
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
 
     // Fetch genesis block to get its timestamp.
     let (_, genesis_hash) = lemma_storage::ChainStore::new(&db).tip().unwrap().unwrap();
