@@ -1,10 +1,31 @@
 //! Quorum certificate — the 2f+1 voting-power commit record.
 //!
-//! A [`QuorumCert`] is the signed artifact that makes a block final under
-//! Lemma's BFT consensus. It is the shared type consumed by both:
-//! - `lemma-consensus` — to build and verify epoch-change proofs (§4.4, B4).
-//! - `lemma-network` — to propagate finality evidence (closes TODO in
-//!   `lemma-network::error::NetworkError::InvalidQuorumCert`).
+//! A [`QuorumCert`] serves two roles in Lemma. Both use the same type and the
+//! same `verify_quorum_cert` function (signers all signed the same digest):
+//!
+//! ## Role 1 — Commit-certificate (DB-A15b, `docs/12-NETWORK_SYNC_SPEC §3`)
+//!
+//! After Pulse decides a leader and the chain [`Block`](crate::block::Block) is
+//! produced, ≥ 2f+1 validators sign the chain `BlockHeader.digest()` at commit
+//! time. This is the **commit-certificate** — a post-decision signing step,
+//! entirely separate from DAG block propagation (which is uncertified per
+//! `docs/07-CONSENSUS_SPEC §1`). The assembled cert is stored as
+//! `Block.quorum_cert: Option<QuorumCert>`.
+//!
+//! In Phase 2 (single-node), the QC has one signer (the local proposer with
+//! 100% stake — satisfies 2f+1 trivially). Phase 3+: accumulate 2f+1 signers
+//! from commit-acknowledgment gossip.
+//!
+//! ## Role 2 — Recovery authorization (`lemma-consensus::epoch::recovery`)
+//!
+//! `force_epoch_close` uses a `QuorumCert` to authorize a governance-driven
+//! epoch recovery. Signers explicitly sign a recovery message digest. The same
+//! `verify_quorum_cert` function applies (signers sign `recovery_cert_digest`).
+//!
+//! ## Shared infrastructure
+//!
+//! - `lemma-consensus` — verify epoch-change proofs (§4.4, B4) + recovery.
+//! - `lemma-network` — propagate finality evidence (`NetworkError::InvalidQuorumCert`).
 //!
 //! # Why in `lemma-core`
 //!

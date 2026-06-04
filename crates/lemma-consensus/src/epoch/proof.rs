@@ -186,6 +186,14 @@ pub struct EpochChangeProof {
 /// 2. `qc.header_digest == header_digest` — the cert covers this header.
 /// 3. The cert accumulates ≥ 2f+1 voting power in valid signatures.
 ///
+/// ## What signers signed (DB-A15b)
+///
+/// Each signer in `qc.signers` explicitly signed `BlockHeader.digest()` at
+/// commit time (post-Pulse decision). This is a separate signing step from
+/// DAG block signing — validators sign the chain header to produce a
+/// standalone-verifiable commit-certificate. See `lemma-core::cert` module doc
+/// and `docs/07-CONSENSUS_SPEC §7.2` for the two-step model.
+///
 /// ## Parameters
 ///
 /// - `vset` — the validator set for the block's epoch (trusted by the caller).
