@@ -16,7 +16,7 @@
 //! | `producer` | **Phase 1** — timer-based empty-block producer (superseded by `dag_driver` in Phase 2) |
 //! | `shield_orchestrator` | [`run_epoch_shield`], [`apply_withholding_slashes`] — Shield DKG/reshare + withholding slashes |
 //! | `state_view` | [`WorldStateView`] — read-only `ContractStateView` for Flux (C·Step 13) |
-//! | `sync` | [`BlockVerifier`] trait, [`StructuralVerifier`], [`SyncTracker`], [`apply_synced_block`] |
+//! | `sync` | [`BlockVerifier`] trait, [`StructuralVerifier`], [`CertifiedVerifier`], [`SyncTracker`], [`apply_synced_block`] |
 //!
 //! Phase 2 (C·Step 12–14): `dag_driver` drives the DAG, `batch` supplies the
 //! real tx source via Surge dissemination, and `block_exec` executes via Flux.
@@ -44,4 +44,7 @@ pub use shield_orchestrator::{
     apply_withholding_slashes, run_epoch_shield, EpochShieldOutcome, ShieldOrchestratorError,
     TransparentReason, WithholdingSlashOutcome,
 };
-pub use sync::{apply_synced_block, ApplyOutcome, BlockVerifier, StructuralVerifier, SyncTracker};
+pub use sync::{
+    apply_synced_block, ApplyOutcome, BlockVerifier, CertifiedVerifier, StructuralVerifier,
+    SyncTracker,
+};

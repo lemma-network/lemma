@@ -131,6 +131,19 @@ pub enum NetworkCommand {
 
     /// Dial an address (bootstrap or peer discovered out-of-band).
     Dial(Multiaddr),
+
+    /// Report a peer scoring event to the peer table (app-specific score,
+    /// 12-NETWORK_SYNC_SPEC §5).
+    ///
+    /// Used by the node layer to demote peers that serve invalid blocks or bad
+    /// QC certs. The network service applies the delta to the peer's
+    /// app-specific score.
+    ReportPeer {
+        /// The peer to report.
+        peer: PeerId,
+        /// The scoring event (see [`PeerEvent`]).
+        event: PeerEvent,
+    },
 }
 
 // ── NetworkEvent ──────────────────────────────────────────────────────────────
@@ -320,6 +333,19 @@ impl NetworkHandle {
     /// Returns [`NetworkError::Transport`] if the command channel is closed.
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), NetworkError> {
         self.send(NetworkCommand::Dial(addr)).await
+    }
+
+    /// Report a scoring event for `peer` to the peer table.
+    ///
+    /// Callers may safely ignore the returned `Err` — it only fires when the
+    /// command channel is closed (i.e. the network service is already shutting
+    /// down). Log at `debug` if the event matters for diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn report_peer(&self, peer: PeerId, event: PeerEvent) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::ReportPeer { peer, event }).await
     }
 
     /// Send a command to the service.
@@ -775,6 +801,12 @@ impl NetworkService {
                 if let Err(e) = self.swarm.dial(addr.clone()) {
                     tracing::warn!(addr = %addr, error = ?e, "Dial command failed (non-fatal)");
                 }
+            }
+
+            NetworkCommand::ReportPeer { peer, event } => {
+                self.peers.record_event(&peer, event);
+                self.apply_peer_score(&peer);
+                tracing::debug!(peer = %peer, event = ?event, "peer score event recorded");
             }
         }
     }

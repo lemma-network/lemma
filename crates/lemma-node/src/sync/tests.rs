@@ -3,18 +3,33 @@
 //! Covers:
 //! - [`StructuralVerifier`]: valid block, bad height, bad parent_hash,
 //!   bad hash (tampered bytes), intra-block invalid, height overflow guard.
+//! - [`CertifiedVerifier`]: valid QC passes, invalid sig rejected, empty
+//!   signers rejected, None QC accepted (Phase-1 compat), structural
+//!   failures still rejected.
 //! - [`SyncTracker`]: gap detection, chunked requests, watermark
 //!   idempotency, `on_tip_advanced`.
 //! - [`apply_synced_block`]: apply success, stale-tip double-check,
 //!   verify-error propagation, sequential apply of a range.
 //! - [`compute_block_hash`]: consistency with producer convention.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
-use lemma_core::{address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader};
+use lemma_core::{
+    address::Address,
+    amount::Amount,
+    block::Block,
+    hash::Hash,
+    header::BlockHeader,
+    signature::Signature,
+    validator::{ConsensusKey, VotingPower},
+    validator_set::{Member, ValidatorSet},
+    QuorumCert,
+};
+use lemma_crypto::KeyPair;
 use lemma_storage::{chain::ChainStore, db::LemmaDb};
 
 use super::*;
@@ -67,6 +82,70 @@ fn seed_n_blocks(db: &LemmaDb, n: u64) -> Hash {
 
 fn verifier() -> StructuralVerifier {
     StructuralVerifier
+}
+
+// ── CertifiedVerifier helpers ─────────────────────────────────────────────────
+
+/// Build a single-member `ValidatorSet` from a `KeyPair`.
+///
+/// The member has 100% stake (trivially satisfies 2f+1 for single-validator).
+fn make_single_vset(kp: &KeyPair) -> ValidatorSet {
+    let pk = kp.public_key();
+    let addr = *kp.address();
+    let power = VotingPower(Amount::from_drop(100));
+    let mut members = BTreeMap::new();
+    members.insert(
+        addr,
+        Member {
+            consensus_pubkey: ConsensusKey::from_bytes(pk.classical.clone(), pk.quantum.clone()),
+            power,
+        },
+    );
+    ValidatorSet {
+        epoch: 0,
+        members,
+        total_power: Amount::from_drop(100),
+    }
+}
+
+/// Build a block with a valid QuorumCert signed by `kp`.
+///
+/// The QC covers `serde_json::to_vec(header)` → `hash_bytes` — the same
+/// digest as `build_block_from_commit` (D·15b-3).
+fn make_block_with_valid_qc(height: u64, parent_hash: Hash, kp: &KeyPair) -> Block {
+    let vh = Hash::from_bytes([0xBB; 32]);
+    let header = BlockHeader::new(
+        height,
+        1_700_000_000 + height,
+        parent_hash,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        vh,
+        vh,
+        30_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
+    )
+    .expect("header");
+
+    // Compute header_digest the same way build_block_from_commit does.
+    let header_bytes = serde_json::to_vec(&header).expect("header json");
+    let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+
+    // Sign the digest with the keypair.
+    let sig = kp.sign_to_lemma(header_digest.as_bytes());
+
+    let mut signers = BTreeMap::new();
+    signers.insert(*kp.address(), sig);
+    let qc = QuorumCert::new(height, header_digest, signers);
+
+    Block::new(header, vec![], vec![], Some(qc)).expect("block")
 }
 
 // ── compute_block_hash ────────────────────────────────────────────────────────
@@ -154,6 +233,168 @@ fn verify_rejects_height_overflow() {
             }
         ),
         "got: {err}"
+    );
+}
+
+// ── CertifiedVerifier ─────────────────────────────────────────────────────────
+
+#[test]
+fn certified_verifier_accepts_block_with_valid_qc() {
+    // Build a block with a real QC signed by the keypair.
+    // CertifiedVerifier with matching vset must accept it.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = make_single_vset(&kp);
+    let cv = CertifiedVerifier::new(vset);
+
+    let genesis = make_block(0, Hash::zero());
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+    let block1 = make_block_with_valid_qc(1, g_hash, &kp);
+
+    let result = cv.verify(&block1, g_hash, 0);
+    assert!(result.is_ok(), "valid QC must pass: {result:?}");
+}
+
+#[test]
+fn certified_verifier_rejects_block_with_invalid_qc_sig() {
+    // Build a block with a valid QC, then tamper the signature bytes.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = make_single_vset(&kp);
+    let cv = CertifiedVerifier::new(vset);
+
+    let genesis = make_block(0, Hash::zero());
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+
+    // Build a valid block first, then tamper the QC signature.
+    let valid_block = make_block_with_valid_qc(1, g_hash, &kp);
+    let mut qc = valid_block.quorum_cert.clone().expect("qc must be Some");
+
+    // Tamper: replace the signer's signature with garbage bytes.
+    let addr = *kp.address();
+    qc.signers.insert(
+        addr,
+        Signature::Hybrid {
+            classical: vec![0xFF; 64],
+            quantum: vec![0xFF; 3309],
+        },
+    );
+
+    let vh = Hash::from_bytes([0xBB; 32]);
+    let header = BlockHeader::new(
+        1,
+        1_700_000_001,
+        g_hash,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        vh,
+        vh,
+        30_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
+    )
+    .expect("header");
+    let tampered_block = Block::new(header, vec![], vec![], Some(qc)).expect("block");
+
+    let err = cv
+        .verify(&tampered_block, g_hash, 0)
+        .expect_err("tampered sig must fail");
+    assert!(
+        matches!(err, VerifyError::QuorumCertInvalid { .. }),
+        "tampered sig must → QuorumCertInvalid, got: {err}"
+    );
+}
+
+#[test]
+fn certified_verifier_rejects_block_with_empty_signers() {
+    // A block with Some(QuorumCert) but zero signers → InsufficientQuorum.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = make_single_vset(&kp);
+    let cv = CertifiedVerifier::new(vset);
+
+    let genesis = make_block(0, Hash::zero());
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+
+    let vh = Hash::from_bytes([0xBB; 32]);
+    let header = BlockHeader::new(
+        1,
+        1_700_000_001,
+        g_hash,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        vh,
+        vh,
+        30_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
+    )
+    .expect("header");
+
+    // Compute the correct header_digest so the cert passes digest check.
+    let header_bytes = serde_json::to_vec(&header).expect("json");
+    let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+
+    // Empty signers — no stake accumulated.
+    let qc = QuorumCert::new(1, header_digest, BTreeMap::new());
+    let block = Block::new(header, vec![], vec![], Some(qc)).expect("block");
+
+    let err = cv
+        .verify(&block, g_hash, 0)
+        .expect_err("empty signers must fail");
+    assert!(
+        matches!(err, VerifyError::QuorumCertInvalid { .. }),
+        "empty signers must → QuorumCertInvalid (InsufficientQuorum), got: {err}"
+    );
+}
+
+#[test]
+fn certified_verifier_accepts_block_with_no_qc() {
+    // Phase-1 compat: block with quorum_cert: None must be accepted.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = make_single_vset(&kp);
+    let cv = CertifiedVerifier::new(vset);
+
+    let genesis = make_block(0, Hash::zero());
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+    // make_block produces quorum_cert: None.
+    let block1 = make_block(1, g_hash);
+
+    let result = cv.verify(&block1, g_hash, 0);
+    assert!(
+        result.is_ok(),
+        "None QC must be accepted (Phase-1 compat): {result:?}"
+    );
+}
+
+#[test]
+fn certified_verifier_still_rejects_structurally_invalid_block() {
+    // A block with a valid QC but wrong parent_hash must still fail structural check.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = make_single_vset(&kp);
+    let cv = CertifiedVerifier::new(vset);
+
+    let real_prev = Hash::from_bytes([0xAD; 32]);
+    let wrong_prev = Hash::from_bytes([0xDE; 32]);
+
+    // Build block with wrong parent_hash (structural failure).
+    let block1 = make_block_with_valid_qc(1, wrong_prev, &kp);
+
+    let err = cv
+        .verify(&block1, real_prev, 0)
+        .expect_err("wrong parent_hash must fail");
+    assert!(
+        matches!(err, VerifyError::ParentHashMismatch { expected, .. } if expected == real_prev),
+        "structural check must fire before QC check, got: {err}"
     );
 }
 
@@ -409,4 +650,55 @@ async fn apply_synced_block_sequential_range_syncs_correctly() {
         5,
         "destination must be fully synced"
     );
+}
+
+#[tokio::test]
+async fn apply_synced_block_returns_invalid_qc_on_bad_cert() {
+    // CertifiedVerifier: a block with an invalid QC must return NodeError::InvalidQC.
+    let (db, _dir) = open_temp_db();
+    seed_n_blocks(&db, 1); // genesis at height 0
+    let db = Arc::new(db);
+    let lock = Arc::new(Mutex::new(()));
+
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = make_single_vset(&kp);
+    let cv = CertifiedVerifier::new(vset);
+
+    let tip_hash = ChainStore::new(&db).tip().unwrap().unwrap().1;
+
+    // Build a block with a QC that has empty signers (InsufficientQuorum).
+    let vh = Hash::from_bytes([0xBB; 32]);
+    let header = BlockHeader::new(
+        1,
+        1_700_000_001,
+        tip_hash,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        0,
+        Hash::zero(),
+        vh,
+        vh,
+        30_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
+    )
+    .expect("header");
+    let header_bytes = serde_json::to_vec(&header).expect("json");
+    let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+    let qc = QuorumCert::new(1, header_digest, BTreeMap::new());
+    let block = Block::new(header, vec![], vec![], Some(qc)).expect("block");
+
+    let err = apply_synced_block(&block, &db, &lock, &cv)
+        .await
+        .expect_err("invalid QC must error");
+    assert!(
+        matches!(err, NodeError::InvalidQC(_)),
+        "must be NodeError::InvalidQC, got: {err}"
+    );
+    // Tip must not advance.
+    assert_eq!(ChainStore::new(&db).latest_height().unwrap().unwrap(), 0);
 }

@@ -51,8 +51,9 @@
 //! The `bool` injection pattern (B3-2) keeps `lemma-consensus` crypto-free:
 //! the consensus layer never calls `lemma-crypto` directly.
 //!
-//! **`BlockReceived` apply is structural-only** (no QC): the `BlockVerifier`
-//! trait seam is in `sync.rs`; Phase 2 adds `CertifiedVerifier`.
+//! **`BlockReceived` apply uses `CertifiedVerifier`** (D·15c): structural
+//! checks + QuorumCert 2f+1 verification. Peers serving invalid QC are
+//! demoted via `PeerEvent::InvalidQuorumCert` (spec 12 §5).
 //!
 //! ## Write-lock contract
 //!
@@ -79,7 +80,7 @@ use lemma_storage::db::LemmaDb;
 use crate::{
     batch::{Batch, BatchStore},
     error::NodeError,
-    sync::{apply_synced_block, ApplyOutcome, StructuralVerifier, SyncTracker},
+    sync::{apply_synced_block, ApplyOutcome, BlockVerifier, CertifiedVerifier, SyncTracker},
 };
 
 use lemma_crypto::compute_tx_hash;
@@ -141,7 +142,7 @@ pub async fn run_network_dispatch(
     vset: ValidatorSet,
     incoming_dag_block_tx: Option<mpsc::Sender<(DagBlock, bool)>>,
 ) -> Result<(), NodeError> {
-    let verifier = StructuralVerifier;
+    let verifier = CertifiedVerifier::new(vset.clone());
     let mut tracker = SyncTracker::new();
     let mut sync_tick =
         tokio::time::interval(std::time::Duration::from_millis(SYNC_RETRY_INTERVAL_MS));
@@ -240,7 +241,7 @@ async fn handle_network_event(
     batch_store: &BatchStore,
     handle: &NetworkHandle,
     write_lock: &Arc<Mutex<()>>,
-    verifier: &StructuralVerifier,
+    verifier: &dyn BlockVerifier,
     tracker: &mut SyncTracker,
     vset: &ValidatorSet,
     incoming_dag_block_tx: &Option<mpsc::Sender<(DagBlock, bool)>>,
@@ -334,18 +335,26 @@ async fn handle_network_event(
 /// Handle a `BlockReceived` event — the core of the N6 catch-up logic.
 ///
 /// 1. Update `tracker.highest_seen`.
-/// 2. If `height == local_tip + 1` → apply (structural verify + write).
+/// 2. If `height == local_tip + 1` → apply (structural + QC verify + write).
 /// 3. If `height > local_tip + 1` and gap not in flight → issue `RequestRange`.
 /// 4. If `height <= local_tip` → already have it, skip.
+///
+/// ## QC failure handling (D·15c)
+///
+/// If `apply_synced_block` returns `NodeError::InvalidQC`, the serving peer
+/// is demoted via `NetworkHandle::report_peer(PeerEvent::InvalidQuorumCert)`.
+/// This is non-fatal — the block is discarded and the node retries from
+/// another peer (spec 12 §5).
 async fn handle_block_received(
     from: libp2p::PeerId,
     block: Block,
     db: &Arc<LemmaDb>,
     handle: &NetworkHandle,
     write_lock: &Arc<Mutex<()>>,
-    verifier: &StructuralVerifier,
+    verifier: &dyn BlockVerifier,
     tracker: &mut SyncTracker,
 ) -> Result<(), NodeError> {
+    use lemma_network::peer::PeerEvent;
     use lemma_storage::chain::ChainStore;
 
     let height = block.height();
@@ -371,9 +380,17 @@ async fn handle_block_received(
                 Ok(ApplyOutcome::NoTip) => {
                     debug!(height, "no chain tip — genesis not yet written");
                 }
+                Err(NodeError::InvalidQC(_)) => {
+                    // QC verification failed — demote the serving peer.
+                    // Non-fatal: discard block, retry from another peer.
+                    warn!(height, peer = %from, "invalid QC from peer — demoting");
+                    if let Err(e) = handle.report_peer(from, PeerEvent::InvalidQuorumCert).await {
+                        debug!(error = %e, "report_peer failed (non-fatal — node shutting down)");
+                    }
+                }
                 Err(NodeError::Verify(_)) => {
                     // Structural verify failed — already logged in apply_synced_block.
-                    // Non-fatal: discard, potentially demote peer (Phase 2).
+                    // Non-fatal: discard, potentially demote peer.
                 }
                 Err(e) => {
                     // Storage error — fatal.

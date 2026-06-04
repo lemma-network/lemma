@@ -1,4 +1,4 @@
-//! Range-sync consumer primitives (Phase 1 — structural verification).
+//! Range-sync consumer primitives (Phase 1 + Phase 2 verification).
 //!
 //! ## Scope
 //!
@@ -9,6 +9,7 @@
 //! |-----------|------|
 //! | [`BlockVerifier`] | Trait — one impl per phase. Seam for Phase 2 QC verify. |
 //! | [`StructuralVerifier`] | Phase 1 impl — real structural integrity checks |
+//! | [`CertifiedVerifier`] | Phase 2 impl — structural + QuorumCert 2f+1 verification |
 //! | [`SyncTracker`] | Detects gaps; decides when/what to request |
 //! | [`apply_synced_block`] | Verify + write under shared write-lock |
 //! | [`compute_block_hash`] | Canonical hash convention (same as producer) |
@@ -23,20 +24,17 @@
 //! forks, no Byzantine proposer yet. Real structural integrity protects against
 //! a dishonest *transport*.
 //!
-//! ## Phase 2 hook (QC verification)
+//! ## Phase 2 QC verification (D·15c)
 //!
 //! In Phase 2 (DAG consensus), blocks carry a `QuorumCert` (2f+1 validator
-//! signatures). The QC check is added as a second impl of `BlockVerifier`
-//! (`CertifiedVerifier`) — the `apply_synced_block` call-site receives a
-//! different impl, no other code changes.
+//! signatures). [`CertifiedVerifier`] extends structural checks with QC
+//! verification: each signer's hybrid signature over `header_digest` is
+//! verified via `lemma-crypto`, and the stake-weighted 2f+1 threshold is
+//! checked via `lemma_consensus::cert::verify_quorum_cert` (B3-2 pattern).
 //!
-//! Per AGENTS.md §1.7: this is a deliberate, recorded gap — not dead code.
-//! See `living-notes.md` Technical Debt: "QC verification — blocked on
-//! Phase-2 certified blocks."
-//!
-//! **Why NOT a no-op QC stub**: a stub that returns `Ok(())` while claiming
-//! to "verify" is misleading code (AGENTS.md §17). The QC verifier is simply
-//! absent in Phase 1; the trait seam makes it additive in Phase 2.
+//! Blocks with `quorum_cert: None` are accepted (Phase-1 range-sync compat).
+//! Blocks with an invalid QC return [`VerifyError::QuorumCertInvalid`], which
+//! the caller maps to [`crate::error::NodeError::InvalidQC`] for peer demotion.
 //!
 //! ## Write-lock contract
 //!
@@ -45,12 +43,18 @@
 //! (per `chain.rs` §Tip race under concurrent writers).
 //! The lock is held only for the duration of one RocksDB write batch — fast.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use lemma_core::{block::Block, error::BlockError, hash::Hash};
+use lemma_consensus::cert::verify_quorum_cert;
+use lemma_core::{
+    address::Address, block::Block, error::BlockError, hash::Hash, signature::Signature,
+    validator_set::ValidatorSet,
+};
+use lemma_crypto::{verify as verify_hybrid, HybridSignature, PublicKey};
 use lemma_storage::{chain::ChainStore, db::LemmaDb};
 
 use crate::error::NodeError;
@@ -103,6 +107,14 @@ pub enum VerifyError {
     /// serialize). Logged as an internal error, not peer misbehaviour.
     #[error("block serialization failed during hash verification: {reason}")]
     Serialization { reason: String },
+
+    /// The block's QuorumCert failed 2f+1 verification (DB-A15b commit-cert model).
+    ///
+    /// Indicates the block is not properly finalized — either a forged cert,
+    /// insufficient stake, or invalid signatures. Triggers peer demotion via
+    /// `PeerEvent::InvalidQuorumCert` (spec 12 §5, AGENTS §15.2).
+    #[error("quorum certificate invalid: {reason}")]
+    QuorumCertInvalid { reason: String },
 }
 
 // ── BlockVerifier trait ───────────────────────────────────────────────────────
@@ -118,7 +130,7 @@ pub enum VerifyError {
 /// | Impl | Phase | Checks |
 /// |------|-------|--------|
 /// | [`StructuralVerifier`] | Phase 1 | intra-block, parent_hash, height, hash |
-/// | `CertifiedVerifier` (Phase 2) | Phase 2 | above + QuorumCert 2f+1 signatures |
+/// | [`CertifiedVerifier`] | Phase 2 | above + QuorumCert 2f+1 signatures |
 ///
 /// ## Contract
 ///
@@ -204,6 +216,106 @@ impl BlockVerifier for StructuralVerifier {
         // the identity of the block (content-addressed), so computing it IS
         // the check. The caller uses it as the key for put_block.
         Ok(computed)
+    }
+}
+
+// ── CertifiedVerifier ─────────────────────────────────────────────────────────
+
+/// Phase-2 block verifier — structural checks + QuorumCert 2f+1 verification.
+///
+/// Implements the DB-A15b commit-cert model: each signer in `qc.signers`
+/// explicitly signed `BlockHeader.digest()` at commit time. Verification:
+///
+/// 1. All structural checks (delegates to [`StructuralVerifier`]).
+/// 2. If `block.quorum_cert` is `Some(qc)`: verify 2f+1 stake signed `header_digest`.
+/// 3. If `block.quorum_cert` is `None`: accepted (Phase-1 range-sync blocks).
+///
+/// ## Signature injection (B3-2)
+///
+/// Hybrid Ed25519+ML-DSA-65 signatures are verified at the node layer
+/// (`lemma-crypto`). Results are passed as `BTreeMap<Address, bool>` to
+/// `lemma_consensus::cert::verify_quorum_cert` — consensus never calls
+/// `lemma-crypto` directly.
+///
+/// ## Phase-1 compatibility
+///
+/// Blocks with `quorum_cert: None` are accepted without QC verification.
+/// This allows Phase-1 range-sync blocks (which carry no QC) to be applied
+/// by a Phase-2 node during catch-up. Phase 3 can make `None` a hard reject.
+pub struct CertifiedVerifier {
+    vset: ValidatorSet,
+}
+
+impl CertifiedVerifier {
+    /// Create a new `CertifiedVerifier` for the given validator set.
+    pub fn new(vset: ValidatorSet) -> Self {
+        Self { vset }
+    }
+}
+
+impl BlockVerifier for CertifiedVerifier {
+    fn verify(
+        &self,
+        block: &Block,
+        prev_hash: Hash,
+        prev_height: u64,
+    ) -> Result<Hash, VerifyError> {
+        // ── Step 1: structural checks (cheap, early rejection) ────────────────
+        let hash = StructuralVerifier.verify(block, prev_hash, prev_height)?;
+
+        // ── Step 2: QC verification ───────────────────────────────────────────
+        // None = Phase-1 / pre-D·15b-3 blocks: accepted without QC.
+        // Phase 3 can make None a hard reject if desired.
+        let qc = match &block.quorum_cert {
+            Some(qc) => qc,
+            None => return Ok(hash),
+        };
+
+        // ── Step 3: Recompute header_digest ───────────────────────────────────
+        // Same as build_block_from_commit (D·15b-3): serde_json + hash_bytes.
+        // serde_json is used (not bincode) because it is the same serializer
+        // used for DagBlock gossip — keeping the digest deterministic across
+        // the stack without introducing a second serialization format.
+        let header_bytes =
+            serde_json::to_vec(&block.header).map_err(|e| VerifyError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+
+        // ── Step 4: Build sig_results via hybrid sig verification (B3-2) ──────
+        // Verify each signer's hybrid sig over header_digest.
+        // Unknown authors and non-Hybrid sigs yield false (not a crash).
+        let mut sig_results: BTreeMap<Address, bool> = BTreeMap::new();
+        for (addr, sig) in &qc.signers {
+            let sig_ok = match self.vset.members.get(addr) {
+                Some(member) => {
+                    let pk = PublicKey::from(member.consensus_pubkey.clone());
+                    match sig {
+                        Signature::Hybrid { classical, quantum } => {
+                            let hybrid = HybridSignature {
+                                classical: classical.clone(),
+                                quantum: quantum.clone(),
+                            };
+                            verify_hybrid(&pk, header_digest.as_bytes(), &hybrid).is_ok()
+                        }
+                        // Unsigned or Classical-only = invalid for consensus.
+                        _ => false,
+                    }
+                }
+                // Signer not in committee — invalid.
+                None => false,
+            };
+            sig_results.insert(*addr, sig_ok);
+        }
+
+        // ── Step 5: Stake-weighted 2f+1 check (lemma-consensus, crypto-free) ──
+        verify_quorum_cert(qc, &self.vset, header_digest, &sig_results).map_err(|e| {
+            VerifyError::QuorumCertInvalid {
+                reason: e.to_string(),
+            }
+        })?;
+
+        Ok(hash)
     }
 }
 
@@ -364,18 +476,31 @@ pub async fn apply_synced_block(
         None => return Ok(ApplyOutcome::NoTip),
     };
 
-    // ── Step 2: structural verify (outside lock — no writes) ─────────────────
+    // ── Step 2: verify (outside lock — no writes) ────────────────────────────
     let computed_hash = match verifier.verify(block, prev_hash, prev_height) {
         Ok(hash) => hash,
         Err(e) => {
-            // Structural failure — not a fatal node error; log at warn, let
-            // the caller discard and potentially demote the peer.
-            warn!(
-                height = block.height(),
-                error  = %e,
-                "structural verify failed — block discarded"
-            );
-            return Err(NodeError::Verify(e.to_string()));
+            match &e {
+                VerifyError::QuorumCertInvalid { .. } => {
+                    // QC-specific: caller will demote peer via PeerEvent::InvalidQuorumCert.
+                    warn!(
+                        height = block.height(),
+                        error  = %e,
+                        "apply_synced_block: QC verification failed"
+                    );
+                    return Err(NodeError::InvalidQC(e.to_string()));
+                }
+                _ => {
+                    // Structural failure — not a fatal node error; log at warn, let
+                    // the caller discard and potentially demote the peer.
+                    warn!(
+                        height = block.height(),
+                        error  = %e,
+                        "apply_synced_block: structural verify failed — block discarded"
+                    );
+                    return Err(NodeError::Verify(e.to_string()));
+                }
+            }
         }
     };
 

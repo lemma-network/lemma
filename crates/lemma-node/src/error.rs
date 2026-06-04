@@ -53,6 +53,13 @@ pub enum NodeError {
     #[error("verify: {0}")]
     Verify(String),
 
+    /// A synced block's QuorumCert failed 2f+1 verification.
+    ///
+    /// The serving peer is demoted via `PeerEvent::InvalidQuorumCert`.
+    /// Non-fatal for the node — discard the block, retry from another peer.
+    #[error("invalid quorum certificate: {0}")]
+    InvalidQC(String),
+
     /// Node configuration is invalid or could not be loaded from disk.
     #[error("config: {0}")]
     Config(String),
