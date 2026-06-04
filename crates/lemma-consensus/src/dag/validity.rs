@@ -32,6 +32,31 @@ use crate::{
     stake::StakeAggregator,
 };
 
+// ── Rule 1.5: digest integrity ────────────────────────────────────────────────
+
+/// Rule 1.5: `block.digest == compute_digest(body)`.
+///
+/// Checked **before** author/signature (Rule 2) because a forged digest makes
+/// the sig-verification result meaningless — `sig_ok = true` would mean
+/// "the author signed *this forged digest*", not "the block body is authentic".
+///
+/// This is a consensus-layer check (pure computation, no lemma-crypto dep) so it
+/// applies to ALL block ingestion paths (self-authored, peer gossip, sync replay).
+///
+/// # Errors
+///
+/// [`ConsensusError::DigestMismatch`] if `block.verify_digest()` returns false.
+pub(crate) fn check_digest_integrity(block: &DagBlock) -> Result<(), ConsensusError> {
+    if block.verify_digest() {
+        Ok(())
+    } else {
+        Err(ConsensusError::DigestMismatch {
+            author: block.author,
+            round: block.round,
+        })
+    }
+}
+
 // ── Rule 2: author membership + signature ────────────────────────────────────
 
 /// Rule 2: `author` is in the active validator set; signature is valid.

@@ -313,6 +313,12 @@ impl Dag {
             }
         }
 
+        // ── Rule 1.5: digest integrity (pre-sig check) ──────────────────────
+        // Verify block.digest == compute_digest(body) BEFORE sig check.
+        // A forged digest makes sig_ok meaningless: "signed this forged hash"
+        // ≠ "block body is authentic". Closes peer content-integrity gap (D·15b-1).
+        validity::check_digest_integrity(&block)?;
+
         // ── Rule 2: author + sig (spec §3 rule 2) ───────────────────────────
         validity::check_author_and_signature(&block, vset, sig_ok)?;
 

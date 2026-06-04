@@ -11,13 +11,18 @@
 //!   tip+2 triggers a range request.
 //! - `handle_batch_received`: valid batch pinned; malformed JSON dropped; duplicate
 //!   idempotent; forged `tx.hash` rejected (per-tx hash integrity, C·Step 14).
+//! - `handle_dag_proposal_received` (D·15b-1): valid sig forwarded with sig_ok=true;
+//!   invalid sig forwarded with sig_ok=false; unknown author sig_ok=false;
+//!   Signature::Unsigned sig_ok=false.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 
+use lemma_consensus::dag::block::{DagBlock, DagBlockBody};
 use lemma_core::{
     address::Address,
     amount::Amount,
@@ -26,6 +31,8 @@ use lemma_core::{
     header::BlockHeader,
     signature::Signature,
     transaction::{Transaction, TxType},
+    validator::{ConsensusKey, VotingPower},
+    validator_set::{Member, ValidatorSet},
 };
 use lemma_mempool::pool::Mempool;
 use lemma_network::service::NetworkEvent;
@@ -36,6 +43,7 @@ use lemma_crypto::{compute_tx_hash, sign_transaction, KeyPair};
 use super::*;
 use crate::{
     batch::{new_batch_store, Batch},
+    dag_driver::build_dag_block,
     sync::compute_block_hash,
 };
 
@@ -96,6 +104,35 @@ fn spawn_test_network() -> (NetworkHandle, mpsc::Receiver<NetworkEvent>) {
 
 fn write_lock() -> Arc<Mutex<()>> {
     Arc::new(Mutex::new(()))
+}
+
+/// Build an empty `ValidatorSet` for tests that don't need real validators.
+fn empty_vset() -> ValidatorSet {
+    ValidatorSet {
+        epoch: 0,
+        members: BTreeMap::new(),
+        total_power: Amount::zero(),
+    }
+}
+
+/// Build a single-member `ValidatorSet` with the given keypair's address and public key.
+fn single_member_vset(kp: &KeyPair) -> ValidatorSet {
+    let pk = kp.public_key();
+    let consensus_pubkey = ConsensusKey::from_bytes(pk.classical.clone(), pk.quantum.clone());
+    let power = VotingPower(Amount::from_drop(1_000_000));
+    let mut members = BTreeMap::new();
+    members.insert(
+        *kp.address(),
+        Member {
+            consensus_pubkey,
+            power,
+        },
+    );
+    ValidatorSet {
+        epoch: 0,
+        members,
+        total_power: Amount::from_drop(1_000_000),
+    }
 }
 
 // ── fetch_range ───────────────────────────────────────────────────────────────
@@ -205,6 +242,8 @@ async fn dispatch_exits_when_event_channel_closes() {
             write_lock(),
             closed_rx,
             shutdown_rx,
+            empty_vset(),
+            None,
         ),
     )
     .await;
@@ -233,6 +272,8 @@ async fn dispatch_exits_on_shutdown_signal() {
             write_lock(),
             event_rx,
             shutdown_rx,
+            empty_vset(),
+            None,
         ),
     )
     .await;
@@ -278,6 +319,8 @@ async fn dispatch_applies_block_at_tip_plus_one() {
         lock,
         event_rx,
         shutdown_rx,
+        empty_vset(),
+        None,
     ));
 
     // Poll until height 1 is applied (or deadline).
@@ -341,6 +384,8 @@ async fn dispatch_skips_block_already_in_chain() {
             write_lock(),
             event_rx,
             shutdown_rx,
+            empty_vset(),
+            None,
         ),
     )
     .await;
@@ -378,6 +423,8 @@ async fn dispatch_handles_peer_connected_without_error() {
             write_lock(),
             event_rx,
             shutdown_rx,
+            empty_vset(),
+            None,
         ),
     )
     .await;
@@ -426,6 +473,8 @@ async fn dispatch_handles_transaction_received_without_error() {
             write_lock(),
             event_rx,
             shutdown_rx,
+            empty_vset(),
+            None,
         ),
     )
     .await;
@@ -524,4 +573,128 @@ async fn handle_batch_received_forged_tx_hash_is_rejected_store_unchanged() {
         store.read().await.is_empty(),
         "forged tx.hash must cause batch rejection, store stays empty"
     );
+}
+
+// ── handle_dag_proposal_received (D·15b-1) ───────────────────────────────────
+
+/// Build a signed DagBlock at round 0 using the given keypair.
+fn make_signed_dag_block(kp: &KeyPair) -> DagBlock {
+    build_dag_block(0, *kp.address(), vec![], vec![], 0, 0, kp)
+        .expect("build_dag_block must succeed")
+}
+
+/// Build an unsigned DagBlock (Signature::Unsigned) at round 0.
+fn make_unsigned_dag_block(author: Address) -> DagBlock {
+    let body = DagBlockBody {
+        epoch: 0,
+        round: 0,
+        author,
+        timestamp_ms: 0,
+        ancestors: vec![],
+        payload: vec![],
+        commit_votes: vec![],
+    };
+    DagBlock::new(body, Signature::Unsigned)
+}
+
+#[tokio::test]
+async fn dag_proposal_received_valid_sig_is_forwarded_to_channel() {
+    // Arrange: keypair + vset with that keypair's pubkey.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = single_member_vset(&kp);
+    let block = make_signed_dag_block(&kp);
+    let bytes = serde_json::to_vec(&block).expect("encode");
+
+    let (tx, mut rx) = mpsc::channel::<(DagBlock, bool)>(8);
+
+    // Act: handle the proposal.
+    handle_dag_proposal_received(libp2p::PeerId::random(), bytes, &vset, &Some(tx)).await;
+
+    // Assert: channel receives (block, true).
+    let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+    assert_eq!(result.0.author, *kp.address(), "author must match");
+    assert_eq!(result.0.round, 0, "round must match");
+    assert!(result.1, "sig_ok must be true for a valid signature");
+}
+
+#[tokio::test]
+async fn dag_proposal_received_invalid_sig_forwarded_with_sig_ok_false() {
+    // Arrange: keypair + vset; tamper the signature bytes after building.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = single_member_vset(&kp);
+    let mut block = make_signed_dag_block(&kp);
+
+    // Tamper: replace the hybrid signature with garbage bytes.
+    block.signature = Signature::Hybrid {
+        classical: vec![0xDE; 64],
+        quantum: vec![0xAD; 3309],
+    };
+    let bytes = serde_json::to_vec(&block).expect("encode");
+
+    let (tx, mut rx) = mpsc::channel::<(DagBlock, bool)>(8);
+
+    // Act.
+    handle_dag_proposal_received(libp2p::PeerId::random(), bytes, &vset, &Some(tx)).await;
+
+    // Assert: channel receives (block, false).
+    let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+    assert!(!result.1, "sig_ok must be false for a tampered signature");
+}
+
+#[tokio::test]
+async fn dag_proposal_received_unknown_author_forwarded_with_sig_ok_false() {
+    // Arrange: block author is NOT in the vset.
+    let kp = KeyPair::generate().expect("keygen");
+    let block = make_signed_dag_block(&kp);
+    let bytes = serde_json::to_vec(&block).expect("encode");
+
+    // vset is empty — author not found.
+    let vset = ValidatorSet {
+        epoch: 0,
+        members: BTreeMap::new(),
+        total_power: Amount::zero(),
+    };
+
+    let (tx, mut rx) = mpsc::channel::<(DagBlock, bool)>(8);
+
+    // Act.
+    handle_dag_proposal_received(libp2p::PeerId::random(), bytes, &vset, &Some(tx)).await;
+
+    // Assert: channel receives (block, false).
+    let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+    assert!(!result.1, "sig_ok must be false for unknown author");
+}
+
+#[tokio::test]
+async fn dag_proposal_received_unsigned_block_forwarded_with_sig_ok_false() {
+    // Arrange: block has Signature::Unsigned — invalid for consensus.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = single_member_vset(&kp);
+    let block = make_unsigned_dag_block(*kp.address());
+    let bytes = serde_json::to_vec(&block).expect("encode");
+
+    let (tx, mut rx) = mpsc::channel::<(DagBlock, bool)>(8);
+
+    // Act.
+    handle_dag_proposal_received(libp2p::PeerId::random(), bytes, &vset, &Some(tx)).await;
+
+    // Assert: channel receives (block, false).
+    let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+    assert!(!result.1, "sig_ok must be false for Signature::Unsigned");
 }

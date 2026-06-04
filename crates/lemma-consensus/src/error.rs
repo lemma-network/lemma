@@ -92,6 +92,15 @@ pub enum ConsensusError {
     /// Either the local view is stale or the block is Byzantine. The block is
     /// rejected — the author's key cannot be found for signature verification
     /// (`docs/07-CONSENSUS_SPEC.md §3 rule 2`).
+    /// The block's `digest` field does not match `compute_digest(body)`.
+    ///
+    /// A peer can forge the `digest` field and sign it with their real key —
+    /// producing a `sig_ok = true` block whose content-address is detached from
+    /// its body. This check closes the gap (Rule 1.5, applied before author/sig).
+    /// Always a hard reject — no buffering.
+    #[error("block digest mismatch: author={author} round={round} (forged content-address)")]
+    DigestMismatch { author: Address, round: u64 },
+
     #[error("block author {author} not in validator set for epoch {epoch}")]
     UnknownAuthor { author: Address, epoch: u64 },
 

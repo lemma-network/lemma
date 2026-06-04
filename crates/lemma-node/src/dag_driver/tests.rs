@@ -5,6 +5,9 @@
 //! single-node DAG driver producing committed chain blocks with VM execution
 //! (C·Step 13: Transfer tx → real state_root change).
 //!
+//! D·15b-1: `run_dag_driver_processes_peer_block_via_channel` — peer DagBlock
+//! fed via `incoming_dag_block_rx` is accepted without fatal error.
+//!
 //! AGENTS §11: separate tests.rs, `{action}_{outcome}` naming, AAA pattern.
 
 use std::collections::BTreeMap;
@@ -60,6 +63,27 @@ fn single_vset(proposer: Address) -> ValidatorSet {
     );
     ValidatorSet {
         epoch: 0, // genesis epoch (matches genesis_boot epoch 0)
+        members,
+        total_power: Amount::from_drop(1_000_000),
+    }
+}
+
+/// Build a ValidatorSet with a real consensus pubkey from the given keypair.
+fn single_vset_with_real_key(kp: &KeyPair) -> ValidatorSet {
+    let pk = kp.public_key();
+    let consensus_pubkey =
+        lemma_core::validator::ConsensusKey::from_bytes(pk.classical.clone(), pk.quantum.clone());
+    let power = VotingPower(Amount::from_drop(1_000_000));
+    let mut members = BTreeMap::new();
+    members.insert(
+        *kp.address(),
+        Member {
+            consensus_pubkey,
+            power,
+        },
+    );
+    ValidatorSet {
+        epoch: 0,
         members,
         total_power: Amount::from_drop(1_000_000),
     }
@@ -369,6 +393,7 @@ async fn run_dag_driver_produces_chain_block_from_dag_consensus() {
             None, // no batch_tx needed for this test
             write_lock_clone,
             shutdown_rx,
+            None, // no incoming_dag_block_rx in single-node mode
         )
         .await
     });
@@ -434,6 +459,7 @@ async fn run_dag_driver_chain_block_height_matches_commit_index() {
             None,
             wl_clone,
             shutdown_rx,
+            None,
         )
         .await;
     });
@@ -642,6 +668,7 @@ async fn run_dag_driver_executes_transfer_and_changes_state_root() {
             None,
             wl_clone,
             shutdown_rx,
+            None,
         )
         .await;
     });
@@ -686,5 +713,100 @@ async fn run_dag_driver_executes_transfer_and_changes_state_root() {
         recipient_balance,
         Amount::from_drop(1_000),
         "recipient must receive exactly 1_000 Drop"
+    );
+}
+
+// ── D·15b-1: run_dag_driver processes peer block via incoming channel ─────────
+
+/// D·15b-1 integration test: a peer DagBlock sent via `incoming_dag_block_rx`
+/// is accepted by the running DAG driver without a fatal error.
+///
+/// With a single-validator vset for the local node, the peer block won't cross
+/// 2f+1 quorum alone, but it must be accepted into the DAG without panicking.
+/// The test verifies the channel path is wired and the driver stays alive.
+#[tokio::test]
+async fn run_dag_driver_processes_peer_block_via_channel() {
+    // Arrange: local keypair (proposer) + peer keypair.
+    let local_kp = Arc::new(KeyPair::generate().expect("local keypair"));
+    let peer_kp = KeyPair::generate().expect("peer keypair");
+    let proposer = *local_kp.address();
+
+    let (_dir, db) = fresh_chain(proposer);
+    let mempool = Arc::new(RwLock::new(Mempool::new(100)));
+    let write_lock = Arc::new(Mutex::new(()));
+    let (block_tx, mut block_rx) = tokio::sync::mpsc::channel(16);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // ValidatorSet: only the local proposer (single-node mode).
+    // The peer block won't cross quorum alone — that's expected.
+    let vset = single_vset_with_real_key(&local_kp);
+    let cfg = DagConfig {
+        epoch: 0,
+        proposer,
+        validator_set: vset,
+    };
+
+    // Build a peer DagBlock at round 0 signed by the peer keypair.
+    // sig_ok = false because peer is not in the local vset — but the driver
+    // must still accept it without crashing (non-fatal path).
+    let peer_block = build_dag_block(0, *peer_kp.address(), vec![], vec![], 0, 0, &peer_kp)
+        .expect("build peer DagBlock");
+
+    // Create the incoming channel and send the peer block.
+    let (incoming_tx, incoming_rx) =
+        tokio::sync::mpsc::channel::<(lemma_consensus::dag::block::DagBlock, bool)>(8);
+
+    // Send the peer block with sig_ok=false (unknown validator).
+    incoming_tx
+        .send((peer_block, false))
+        .await
+        .expect("send peer block");
+
+    // Spawn the driver.
+    let db_clone = Arc::clone(&db);
+    let mp_clone = Arc::clone(&mempool);
+    let wl_clone = Arc::clone(&write_lock);
+    let kp_clone = Arc::clone(&local_kp);
+    let driver_handle = tokio::spawn(async move {
+        crate::dag_driver::run_dag_driver(
+            db_clone,
+            mp_clone,
+            cfg,
+            kp_clone,
+            new_batch_store(),
+            Some(block_tx),
+            None,
+            None,
+            wl_clone,
+            shutdown_rx,
+            Some(incoming_rx),
+        )
+        .await
+    });
+
+    // Wait for the local node to produce its own first committed block
+    // (the peer block alone won't trigger a commit in single-validator mode,
+    // but the driver must continue running and eventually commit via its own blocks).
+    let committed = tokio::time::timeout(std::time::Duration::from_secs(10), block_rx.recv())
+        .await
+        .expect("timed out — driver stalled after receiving peer block")
+        .expect("block_tx closed before first block");
+
+    // Signal shutdown.
+    let _ = shutdown_tx.send(true);
+    let result = driver_handle.await.expect("driver task panicked");
+
+    // Assert: driver completed without fatal error.
+    assert!(
+        result.is_ok(),
+        "driver must not return fatal error after processing peer block: {:?}",
+        result
+    );
+
+    // Assert: the local node still produced a valid chain block.
+    assert_eq!(
+        committed.height(),
+        1,
+        "first committed block must be at height 1"
     );
 }

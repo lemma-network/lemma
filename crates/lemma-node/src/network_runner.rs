@@ -5,11 +5,13 @@
 //! [`run_network_dispatch`] bridges [`NetworkEvent`]s emitted by the P2P
 //! swarm to the node's local state (chain store + mempool):
 //!
-//! | Event | Phase 1 action |
-//! |-------|---------------|
+//! | Event | Action |
+//! |-------|--------|
 //! | `BlockReceived` | Update highest-seen; apply if next height; issue range request if gap |
 //! | `RangeRequest` | Serve blocks from `ChainStore::get_range` → `SendRangeResponse` |
 //! | `TransactionReceived` | Log only — C·Step 13-residual (gossip must carry sender_pubkey) |
+//! | `DagProposalReceived` | Decode → DagBlock; verify hybrid sig; forward `(block, sig_ok)` to dag_driver |
+//! | `BatchReceived` | Decode → Batch; verify per-tx hash; pin in BatchStore |
 //! | `PeerConnected` / `PeerDisconnected` | Log peer lifecycle |
 //! | `ListeningOn` | Log local listen address |
 //!
@@ -37,6 +39,18 @@
 //! (Ed25519/ML-DSA-65 do not support key recovery). Fix: extend
 //! `GossipMessage::NewTransaction` to carry the sender pubkey — C·Step 13-residual.
 //!
+//! ## DAG proposal dispatch (D·15b-1)
+//!
+//! `DagProposalReceived` is now fully handled:
+//! 1. Decode JSON bytes → `DagBlock`.
+//! 2. Look up the block's `author` in `vset` (the current epoch's `ValidatorSet`).
+//! 3. Verify the hybrid signature (Ed25519 + ML-DSA-65) via `lemma_crypto::verify`.
+//!    Unknown authors and `Signature::Unsigned` blocks yield `sig_ok = false`.
+//! 4. Forward `(block, sig_ok)` to `incoming_dag_block_tx` for the DAG driver.
+//!
+//! The `bool` injection pattern (B3-2) keeps `lemma-consensus` crypto-free:
+//! the consensus layer never calls `lemma-crypto` directly.
+//!
 //! **`BlockReceived` apply is structural-only** (no QC): the `BlockVerifier`
 //! trait seam is in `sync.rs`; Phase 2 adds `CertifiedVerifier`.
 //!
@@ -51,7 +65,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-use lemma_core::block::Block;
+use lemma_consensus::dag::block::DagBlock;
+use lemma_core::{block::Block, signature::Signature, validator_set::ValidatorSet};
+use lemma_crypto::{verify as verify_hybrid, HybridSignature, PublicKey};
 use lemma_mempool::pool::Mempool;
 use lemma_network::{
     config::DEFAULT_MAX_RANGE,
@@ -92,6 +108,16 @@ const SYNC_RETRY_INTERVAL_MS: u64 = 5_000;
 /// The design mirrors Aptos `continuous_syncer::drive_progress` and Sui's
 /// `maybe_start_checkpoint_summary_sync_task` periodic re-triggers.
 ///
+/// ## DAG proposal dispatch (D·15b-1)
+///
+/// `vset` is the current epoch's `ValidatorSet`. It is used to look up the
+/// author's `ConsensusKey` for hybrid signature verification. Unknown authors
+/// yield `sig_ok = false` (not a crash — AGENTS §7.2).
+///
+/// `incoming_dag_block_tx` carries `(DagBlock, sig_ok)` to the DAG driver.
+/// Pass `None` to disable DAG proposal forwarding (single-node mode or tests
+/// that don't need it).
+///
 /// # Parameters
 ///
 /// - `write_lock` — shared with the producer; serializes `put_block` writes.
@@ -103,6 +129,7 @@ const SYNC_RETRY_INTERVAL_MS: u64 = 5_000;
 ///
 /// Returns [`NodeError`] if a `SendRangeResponse` command dispatch fails.
 /// Apply errors from structural verify failure are logged and non-fatal.
+#[allow(clippy::too_many_arguments)] // 9 params: db + mempool + batch_store + handle + write_lock + event_rx + shutdown + vset + dag_block_tx; no natural grouping without a dedicated context struct (deferred to Phase 3 refactor)
 pub async fn run_network_dispatch(
     db: Arc<LemmaDb>,
     mempool: Arc<RwLock<Mempool>>,
@@ -111,6 +138,8 @@ pub async fn run_network_dispatch(
     write_lock: Arc<Mutex<()>>,
     mut event_rx: mpsc::Receiver<NetworkEvent>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    vset: ValidatorSet,
+    incoming_dag_block_tx: Option<mpsc::Sender<(DagBlock, bool)>>,
 ) -> Result<(), NodeError> {
     let verifier = StructuralVerifier;
     let mut tracker = SyncTracker::new();
@@ -127,6 +156,7 @@ pub async fn run_network_dispatch(
                         handle_network_event(
                             e, &db, &mempool, &batch_store, &handle,
                             &write_lock, &verifier, &mut tracker,
+                            &vset, &incoming_dag_block_tx,
                         ).await?;
                     }
                     None => {
@@ -202,7 +232,7 @@ pub async fn run_block_broadcaster(
 
 // ── Event handlers ────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)] // 8 params: event + 5 shared-state refs + 2 mutable; no natural grouping
+#[allow(clippy::too_many_arguments)] // 10 params: event + shared-state refs + DAG dispatch; no natural grouping
 async fn handle_network_event(
     event: NetworkEvent,
     db: &Arc<LemmaDb>,
@@ -212,6 +242,8 @@ async fn handle_network_event(
     write_lock: &Arc<Mutex<()>>,
     verifier: &StructuralVerifier,
     tracker: &mut SyncTracker,
+    vset: &ValidatorSet,
+    incoming_dag_block_tx: &Option<mpsc::Sender<(DagBlock, bool)>>,
 ) -> Result<(), NodeError> {
     match event {
         // ── Block received (gossip or range-response fan-out) ─────────────────
@@ -253,18 +285,19 @@ async fn handle_network_event(
             );
         }
 
-        // ── Inbound DAG proposal — Phase 2: log only ─────────────────────────
+        // ── Inbound DAG proposal — decode + sig-verify + forward (D·15b-1) ───
         //
-        // Phase 3 forward hook: decode JSON bytes → DagBlock, verify hybrid
-        // signature (`sig_ok: bool`), call `SurgeDriver::on_block(block, sig_ok)`.
-        // The DAG driver will be extended to accept incoming proposals from peers
-        // and process them through the same Surge loop (multi-validator gossip).
+        // 1. Decode JSON bytes → DagBlock.
+        // 2. Look up author in vset → ConsensusKey → PublicKey.
+        // 3. Verify hybrid signature (Ed25519 + ML-DSA-65).
+        //    Unknown author or Signature::Unsigned → sig_ok = false.
+        // 4. Forward (block, sig_ok) to dag_driver via incoming_dag_block_tx.
+        //
+        // B3-2 pattern: consensus never calls lemma-crypto directly.
+        // All failure paths log + continue — no crash on malformed peer input
+        // (AGENTS §7.2 / spec 12 §1.2).
         NetworkEvent::DagProposalReceived { from, bytes } => {
-            debug!(
-                peer  = %from,
-                bytes = bytes.len(),
-                "DAG proposal received — Phase 3 hook (multi-validator gossip)"
-            );
+            handle_dag_proposal_received(from, bytes, vset, incoming_dag_block_tx).await;
         }
 
         // ── Inbound batch — verify + pin in BatchStore (C·Step 14) ──────────
@@ -456,6 +489,108 @@ pub(crate) fn fetch_range(
                 "get_range failed — sending empty response"
             );
             vec![]
+        }
+    }
+}
+
+// ── DAG-proposal handler (D·15b-1) ───────────────────────────────────────────
+
+/// Decode, sig-verify, and forward an inbound DAG proposal (D·15b-1).
+///
+/// ## Verification
+///
+/// 1. **Decode**: JSON bytes → `DagBlock`. Malformed bytes → drop + warn.
+/// 2. **Author lookup**: `vset.members.get(&block.author)` → `ConsensusKey`.
+///    Unknown author → `sig_ok = false` (not a crash).
+/// 3. **Signature check**: only `Signature::Hybrid` is valid for consensus.
+///    `Signature::Unsigned` or `Signature::Classical` → `sig_ok = false`.
+///    Hybrid sig verified via `lemma_crypto::verify` (Ed25519 + ML-DSA-65).
+/// 4. **Forward**: `(block, sig_ok)` sent to `incoming_dag_block_tx`.
+///    Channel full → warn + drop (non-fatal; peer can re-gossip).
+///    No channel wired → log only (single-node mode).
+///
+/// ## No panics
+///
+/// All failure paths return `()` after logging. A crafted payload must never
+/// crash the node (AGENTS §7.2).
+async fn handle_dag_proposal_received(
+    from: libp2p::PeerId,
+    bytes: Vec<u8>,
+    vset: &ValidatorSet,
+    incoming_dag_block_tx: &Option<mpsc::Sender<(DagBlock, bool)>>,
+) {
+    // ── 1. Decode JSON → DagBlock ─────────────────────────────────────────────
+    let block: DagBlock = match serde_json::from_slice(&bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                peer  = %from,
+                error = %e,
+                "DagProposalReceived: JSON decode failed — block dropped"
+            );
+            return;
+        }
+    };
+
+    // ── 2. Author lookup + sig verification ───────────────────────────────────
+    // Unknown author → sig_ok = false (not in current epoch's committee).
+    // Signature::Unsigned or non-Hybrid → sig_ok = false (invalid for consensus).
+    let sig_ok = match vset.members.get(&block.author) {
+        None => {
+            debug!(
+                peer   = %from,
+                author = %block.author,
+                round  = block.round,
+                "DagProposalReceived: author not in validator set — sig_ok=false"
+            );
+            false
+        }
+        Some(member) => {
+            // Convert ConsensusKey → PublicKey for crypto verification.
+            let pk = PublicKey::from(member.consensus_pubkey.clone());
+            match &block.signature {
+                Signature::Hybrid { classical, quantum } => {
+                    let hybrid = HybridSignature {
+                        classical: classical.clone(),
+                        quantum: quantum.clone(),
+                    };
+                    verify_hybrid(&pk, block.digest.as_bytes(), &hybrid).is_ok()
+                }
+                // Unsigned or Classical-only = invalid for consensus.
+                _ => {
+                    debug!(
+                        peer   = %from,
+                        author = %block.author,
+                        round  = block.round,
+                        "DagProposalReceived: non-Hybrid signature — sig_ok=false"
+                    );
+                    false
+                }
+            }
+        }
+    };
+
+    debug!(
+        peer    = %from,
+        round   = block.round,
+        author  = %block.author,
+        sig_ok,
+        "DAG proposal received from peer"
+    );
+
+    // ── 3. Forward to dag_driver ──────────────────────────────────────────────
+    if let Some(ref tx) = incoming_dag_block_tx {
+        match tx.try_send((block, sig_ok)) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    peer  = %from,
+                    "DagProposalReceived: incoming_dag_block channel full — block dropped (non-fatal)"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                debug!(peer = %from, "DagProposalReceived: dag_driver channel closed — block dropped");
+            }
         }
     }
 }

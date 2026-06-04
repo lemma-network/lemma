@@ -15,13 +15,14 @@
 //! 9.  Wire committed-block channel (dag_driver → broadcaster)
 //! 10. Wire dag_block channel (dag_driver → broadcaster for DAG gossip)
 //! 11. Wire batch channel (dag_driver → broadcaster for batch gossip, C·Step 14)
-//! 12. Create shared write-lock (dag_driver + range-sync consumer)
-//! 13. Build ValidatorSet from genesis config (single-validator, Phase 2)
-//! 14. Spawn six tasks and join: network_service, block_broadcaster,
+//! 12. Wire incoming_dag_block channel (network_dispatch → dag_driver, D·15b-1)
+//! 13. Create shared write-lock (dag_driver + range-sync consumer)
+//! 14. Build ValidatorSet from genesis config (single-validator, Phase 2)
+//! 15. Spawn six tasks and join: network_service, block_broadcaster,
 //!     dag_block_broadcaster, batch_broadcaster, network_dispatch, dag_driver
 //! ```
 //!
-//! ## Task topology (Phase 2 + C·Step 14)
+//! ## Task topology (Phase 2 + C·Step 14 + D·15b-1)
 //!
 //! ```text
 //!                   ┌─────────────────────────┐
@@ -33,14 +34,18 @@
 //!                   │  run_network_dispatch    │ ← serves RangeRequests
 //!                   │  (network_runner)        │   applies synced blocks
 //!                   │  + BatchReceived → pin   │   pins inbound batches
+//!                   │  + DagProposal → verify  │   verifies + forwards DagBlocks
 //!                   └────────────┬────────────┘
-//!                           write_lock │
+//!                           write_lock │  incoming_dag_block (mpsc)
 //!         block_tx (mpsc)             │ write_lock
 //! dag_driver ──────────────► run_block_broadcaster → broadcast_block
 //!    │ dag_block_tx                                   (separate task)
 //!    ├─────────────────────► run_dag_block_broadcaster → broadcast_dag_proposal
 //!    │ batch_tx                                        (separate task)
 //!    └─────────────────────► run_batch_broadcaster → broadcast_batch
+//!    ▲                                                 (separate task)
+//!    │ incoming_dag_block_rx
+//!    └──────────────────────── run_network_dispatch (peer DagBlocks, D·15b-1)
 //!              ▲
 //!     BatchStore (shared with network_dispatch for inbound batch pinning)
 //! ```
@@ -59,6 +64,7 @@ use clap::Parser;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::info;
 
+use lemma_consensus::dag::block::DagBlock;
 use lemma_core::{
     address::Address,
     amount::Amount,
@@ -81,6 +87,8 @@ const BLOCK_CHANNEL_CAPACITY: usize = 32;
 const DAG_BLOCK_CHANNEL_CAPACITY: usize = 256;
 /// Capacity for the raw Batch bytes channel (dag_driver → broadcaster, C·Step 14).
 const BATCH_CHANNEL_CAPACITY: usize = 256;
+/// Capacity for the incoming DagBlock channel (network_dispatch → dag_driver, D·15b-1).
+const INCOMING_DAG_BLOCK_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -197,7 +205,7 @@ async fn main() -> anyhow::Result<()> {
     let dag_cfg = DagConfig {
         epoch: chain_epoch,
         proposer,
-        validator_set,
+        validator_set: validator_set.clone(),
     };
 
     // DAG block gossip channel: raw JSON-encoded DagBlock bytes.
@@ -205,6 +213,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Batch gossip channel: raw JSON-encoded Batch bytes (C·Step 14).
     let (batch_tx, batch_rx) = mpsc::channel::<Vec<u8>>(BATCH_CHANNEL_CAPACITY);
+
+    // Incoming DagBlock channel: (DagBlock, sig_ok) from network_dispatch → dag_driver (D·15b-1).
+    // network_dispatch decodes + sig-verifies peer DagBlocks and forwards them here.
+    let (incoming_dag_block_tx, incoming_dag_block_rx) =
+        mpsc::channel::<(DagBlock, bool)>(INCOMING_DAG_BLOCK_CHANNEL_CAPACITY);
 
     info!(
         epoch    = dag_cfg.epoch,
@@ -240,6 +253,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&write_lock),
             event_rx,
             shutdown_rx.clone(),
+            validator_set,
+            Some(incoming_dag_block_tx),
         )),
         tokio::spawn(run_dag_driver(
             Arc::clone(&db),
@@ -252,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
             Some(batch_tx),
             Arc::clone(&write_lock),
             shutdown_rx,
+            Some(incoming_dag_block_rx),
         )),
     );
 

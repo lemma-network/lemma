@@ -16,8 +16,8 @@ use lemma_core::{
 use crate::{
     dag::block::{DagBlock, DagBlockBody, DagBlockRef},
     dag::validity::{
-        check_author_and_signature, check_gc_boundary, check_no_equivocation,
-        check_strong_link_quorum, collect_missing_ancestors,
+        check_author_and_signature, check_digest_integrity, check_gc_boundary,
+        check_no_equivocation, check_strong_link_quorum, collect_missing_ancestors,
     },
     error::ConsensusError,
 };
@@ -73,6 +73,28 @@ fn make_block(round: u64, author_n: u8, ancestors: Vec<DagBlockRef>) -> DagBlock
         },
         Signature::Unsigned,
     )
+}
+
+// ── check_digest_integrity ────────────────────────────────────────────────────
+
+#[test]
+fn check_digest_integrity_honest_block_passes() {
+    // DagBlock::new computes digest from body — always matches.
+    let block = make_block(1, 1, vec![]);
+    assert!(check_digest_integrity(&block).is_ok());
+}
+
+#[test]
+fn check_digest_integrity_forged_digest_rejected() {
+    // Build honest block, then overwrite digest with a forged value.
+    // DagBlock.digest is pub so we can mutate it directly for this test.
+    let mut block = make_block(1, 1, vec![]);
+    block.digest = Hash::from_bytes([0xDE; 32]); // forged — does not match body
+    let err = check_digest_integrity(&block).unwrap_err();
+    assert!(
+        matches!(err, ConsensusError::DigestMismatch { .. }),
+        "expected DigestMismatch, got {err:?}"
+    );
 }
 
 // ── check_author_and_signature ────────────────────────────────────────────────

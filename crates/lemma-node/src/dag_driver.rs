@@ -305,12 +305,13 @@ pub fn build_block_from_commit(
 /// skipped (logged as WARN). The block is still produced with the available
 /// txs. A dedicated fetch-on-miss path is deferred to D·Step 15.
 ///
-/// ## Phase 3 hook
+/// ## Incoming peer DagBlocks (D·15b-1)
 ///
-/// Incoming DagBlocks from peers arrive via `NetworkEvent::DagProposalReceived`
-/// in `network_runner.rs`. The dispatch loop decodes them and calls
-/// `on_dag_proposal(bytes, from_peer)` — to be added in Phase 3 alongside real
-/// signature verification.
+/// Incoming DagBlocks from peers arrive via `incoming_dag_block_rx: Receiver<(DagBlock, bool)>`.
+/// The `bool` is the sig-verification result injected by `run_network_dispatch`
+/// (B3-2 pattern: consensus never calls lemma-crypto directly).
+/// When `next_block` is `None` (idle), the driver selects on both shutdown and
+/// the incoming channel, feeding peer blocks into `SurgeDriver::on_block`.
 ///
 /// ## Error policy
 ///
@@ -335,6 +336,7 @@ pub async fn run_dag_driver(
     batch_tx: Option<mpsc::Sender<Vec<u8>>>,
     write_lock: Arc<Mutex<()>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    mut incoming_dag_block_rx: Option<mpsc::Receiver<(DagBlock, bool)>>,
 ) -> Result<(), NodeError> {
     // Construct the per-epoch SurgeDriver. With a single-validator committee,
     // every DagBlock immediately crosses the >2/3 quorum threshold.
@@ -378,15 +380,62 @@ pub async fn run_dag_driver(
             break;
         }
 
-        // Process ONE DagBlock per iteration, then yield to the tokio scheduler
-        // so other tasks (network, mempool, block_rx receivers in tests) get CPU.
-        // This prevents the busy loop from starving the runtime.
+        // ── Drain peer blocks (non-blocking, every iteration) ───────────────
+        //
+        // `try_recv()` is non-blocking: drains one peer DagBlock if available,
+        // then returns immediately. This runs BEFORE the self-authored block so
+        // peer blocks are serviced even while the node self-drives (single-node
+        // mode always has `next_block = Some(...)` — the idle branch below would
+        // never be reached without this). CodeReviewer CR-1 fix (D·15b-1).
+        if let Some(ref mut rx) = incoming_dag_block_rx {
+            match rx.try_recv() {
+                Ok((peer_block, peer_sig_ok)) => {
+                    let peer_round = peer_block.round;
+                    match driver.on_block(peer_block, peer_sig_ok) {
+                        Ok(out) => {
+                            process_surge_output(
+                                out,
+                                &mut next_block,
+                                &db,
+                                &mempool,
+                                &batch_store,
+                                &batch_tx,
+                                &block_tx,
+                                &write_lock,
+                                &cfg,
+                                &keypair,
+                                &mut driver,
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            if e.is_fatal() {
+                                return Err(NodeError::Config(format!(
+                                    "SurgeDriver fatal error on peer block round {peer_round}: {e}"
+                                )));
+                            }
+                            warn!(error = %e, round = peer_round,
+                                  "dag_driver: peer block on_block error (non-fatal)");
+                        }
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    // No peer block available right now — continue to self-authored path.
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    info!("dag_driver: incoming_dag_block channel closed — stopping");
+                    break;
+                }
+            }
+        }
+
+        // Process ONE self-authored DagBlock per iteration, then yield to the
+        // tokio scheduler so other tasks get CPU.
         let dag_block = match next_block.take() {
             Some(b) => b,
             None => {
-                // No block to propose — idle; wait for shutdown or external input.
-                // Phase 3: this branch receives incoming DagBlocks from peers via
-                // a channel passed into this function.
+                // No self-authored block to propose — idle.
+                // Peer blocks (if any) are still drained above on next iteration.
                 tokio::select! {
                     _ = shutdown.changed() => {
                         if *shutdown.borrow() {
@@ -416,7 +465,7 @@ pub async fn run_dag_driver(
             }
         }
 
-        // Feed into SurgeDriver. sig_ok = true (Phase 2: self-authored, trusted).
+        // Feed into SurgeDriver. sig_ok = true (self-authored, trusted).
         let output = match driver.on_block(dag_block, true) {
             Ok(out) => out,
             Err(e) => {
@@ -430,106 +479,159 @@ pub async fn run_dag_driver(
             }
         };
 
-        // Log equivocations. Evidence construction deferred to Phase 3.
-        for equiv in &output.equivocations {
-            warn!(equivocation = ?equiv, "dag_driver: equivocation detected — evidence deferred to Phase 3");
-        }
-
-        // Process commits: resolve txs from sub-DAG, execute, build chain blocks.
-        let chain = ChainStore::new(&db);
-        for commit in &output.commits {
-            // Resolve txs from the committed sub-DAG (C·Step 14).
-            // Takes a read-lock snapshot of the store (non-blocking).
-            let txs: Vec<Transaction> = {
-                let store = batch_store.read().await;
-                resolve_committed_txs(commit, driver.dag(), &store)
-            };
-
-            match build_block_from_commit(commit, &chain, cfg.proposer, Arc::clone(&db), txs) {
-                Ok((block, hash)) => {
-                    let height = block.height();
-                    let committed_hashes = collect_committed_hashes(&block.transactions);
-
-                    {
-                        let _guard = write_lock.lock().await;
-                        commit_block(&chain, &block, hash)?;
-                    }
-
-                    if let Some(ref tx) = block_tx {
-                        match tx.try_send(block) {
-                            Ok(()) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                debug!(height, "block_tx closed — broadcaster gone");
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                warn!(height, "block_tx full — committed block NOT gossiped");
-                            }
-                        }
-                    }
-
-                    // Remove committed txs from pool + tick maintenance.
-                    mempool_post_commit(
-                        &mut *mempool.write().await,
-                        &committed_hashes,
-                        Instant::now(),
-                    );
-
-                    info!(
-                        height,
-                        dag_round = commit.leader.round,
-                        commit_idx = commit.index,
-                        tx_count = committed_hashes.len(),
-                        "dag_driver: chain block committed from DAG consensus"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        commit_index = commit.index,
-                        error = %e,
-                        "dag_driver: build_block_from_commit failed — skipping"
-                    );
-                }
-            }
-        }
-
-        // If this block triggered a clock advance, build the next round's batch
-        // + DagBlock. We store it in `next_block` and YIELD first so other
-        // tasks (block_rx receiver, network dispatch, mempool writes) can run.
-        if let Some(new_round) = output.new_round {
-            let ancestors: Vec<DagBlockRef> = driver
-                .dag()
-                .blocks_at_round(new_round - 1)
-                .map(|b| b.reference())
-                .collect();
-            let ts = current_unix_millis();
-
-            // Build + gossip batch for the new round, then embed its ref.
-            let payload =
-                build_and_gossip_batch(&mempool, cfg.proposer, &batch_store, &batch_tx, new_round)
-                    .await;
-
-            match build_dag_block(
-                new_round,
-                cfg.proposer,
-                ancestors,
-                payload,
-                cfg.epoch,
-                ts,
-                &keypair,
-            ) {
-                Ok(b) => next_block = Some(b),
-                Err(e) => {
-                    warn!(
-                        round = new_round,
-                        error = %e,
-                        "dag_driver: build_dag_block failed — skipping round"
-                    );
-                }
-            }
-        }
+        // Process commits + new_round from self-authored block output.
+        process_surge_output(
+            output,
+            &mut next_block,
+            &db,
+            &mempool,
+            &batch_store,
+            &batch_tx,
+            &block_tx,
+            &write_lock,
+            &cfg,
+            &keypair,
+            &mut driver,
+        )
+        .await?;
 
         // Yield to the tokio scheduler so other tasks can run between DAG rounds.
         tokio::task::yield_now().await;
+    }
+
+    Ok(())
+}
+
+// ── process_surge_output ──────────────────────────────────────────────────────
+
+/// Process the output of a `SurgeDriver::on_block` call.
+///
+/// Handles:
+/// 1. **Equivocations** — logged; evidence deferred to Phase 3.
+/// 2. **Commits** — for each commit: resolve txs → execute → build chain block
+///    → persist → gossip → mempool post-commit.
+/// 3. **New round** — build ancestors, gossip batch, build DagBlock → set `next_block`.
+///
+/// Called from BOTH the self-authored path AND the peer-block path (DRY — AGENTS §2.1).
+///
+/// ## Error policy
+///
+/// - Persist errors (`commit_block`) → `Err` (fatal — Sui-stall lesson).
+/// - Build errors (`build_block_from_commit`) → `WARN` + skip (transient).
+/// - `build_dag_block` errors → `WARN` + skip (non-fatal for round advancement).
+///
+/// # Errors
+///
+/// Returns [`NodeError`] only for fatal persist errors.
+#[allow(clippy::too_many_arguments)]
+async fn process_surge_output(
+    output: lemma_consensus::SurgeOutput,
+    next_block: &mut Option<DagBlock>,
+    db: &Arc<LemmaDb>,
+    mempool: &Arc<RwLock<Mempool>>,
+    batch_store: &BatchStore,
+    batch_tx: &Option<mpsc::Sender<Vec<u8>>>,
+    block_tx: &Option<mpsc::Sender<Block>>,
+    write_lock: &Arc<Mutex<()>>,
+    cfg: &DagConfig,
+    keypair: &Arc<KeyPair>,
+    driver: &mut SurgeDriver,
+) -> Result<(), NodeError> {
+    // Log equivocations. Evidence construction deferred to Phase 3.
+    for equiv in &output.equivocations {
+        warn!(equivocation = ?equiv, "dag_driver: equivocation detected — evidence deferred to Phase 3");
+    }
+
+    // Process commits: resolve txs from sub-DAG, execute, build chain blocks.
+    let chain = ChainStore::new(db);
+    for commit in &output.commits {
+        // Resolve txs from the committed sub-DAG (C·Step 14).
+        // Takes a read-lock snapshot of the store (non-blocking).
+        let txs: Vec<Transaction> = {
+            let store = batch_store.read().await;
+            resolve_committed_txs(commit, driver.dag(), &store)
+        };
+
+        match build_block_from_commit(commit, &chain, cfg.proposer, Arc::clone(db), txs) {
+            Ok((block, hash)) => {
+                let height = block.height();
+                let committed_hashes = collect_committed_hashes(&block.transactions);
+
+                {
+                    let _guard = write_lock.lock().await;
+                    commit_block(&chain, &block, hash)?;
+                }
+
+                if let Some(ref tx) = block_tx {
+                    match tx.try_send(block) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            debug!(height, "block_tx closed — broadcaster gone");
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            warn!(height, "block_tx full — committed block NOT gossiped");
+                        }
+                    }
+                }
+
+                // Remove committed txs from pool + tick maintenance.
+                mempool_post_commit(
+                    &mut *mempool.write().await,
+                    &committed_hashes,
+                    Instant::now(),
+                );
+
+                info!(
+                    height,
+                    dag_round = commit.leader.round,
+                    commit_idx = commit.index,
+                    tx_count = committed_hashes.len(),
+                    "dag_driver: chain block committed from DAG consensus"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    commit_index = commit.index,
+                    error = %e,
+                    "dag_driver: build_block_from_commit failed — skipping"
+                );
+            }
+        }
+    }
+
+    // If this block triggered a clock advance, build the next round's batch
+    // + DagBlock. We store it in `next_block` and YIELD first so other
+    // tasks (block_rx receiver, network dispatch, mempool writes) can run.
+    if let Some(new_round) = output.new_round {
+        let ancestors: Vec<DagBlockRef> = driver
+            .dag()
+            .blocks_at_round(new_round - 1)
+            .map(|b| b.reference())
+            .collect();
+        let ts = current_unix_millis();
+
+        // Build + gossip batch for the new round, then embed its ref.
+        let payload =
+            build_and_gossip_batch(mempool, cfg.proposer, batch_store, batch_tx, new_round).await;
+
+        match build_dag_block(
+            new_round,
+            cfg.proposer,
+            ancestors,
+            payload,
+            cfg.epoch,
+            ts,
+            keypair,
+        ) {
+            Ok(b) => *next_block = Some(b),
+            Err(e) => {
+                warn!(
+                    round = new_round,
+                    error = %e,
+                    "dag_driver: build_dag_block failed — skipping round"
+                );
+            }
+        }
     }
 
     Ok(())
@@ -622,5 +724,6 @@ fn current_unix_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Receive from the optional incoming DagBlock channel.
 #[cfg(test)]
 mod tests;
