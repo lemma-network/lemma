@@ -346,12 +346,32 @@ pub enum GossipMessage {
     /// the *proof*.
     NewBlock(Box<Block>),
 
-    /// A pending transaction, broadcast on [`TOPIC_TX`].
+    /// A pending transaction + sender's public key, broadcast on [`TOPIC_TX`].
     ///
     /// Published by the submitting client or relaying node. Encrypted
     /// (Shield) transactions appear here in ciphertext form and are
     /// decrypted only after ordering (`11-MEMPOOL_SHIELD_SPEC`).
-    NewTransaction(Transaction),
+    ///
+    /// # Why carry `sender_pubkey`?
+    ///
+    /// Ed25519 and ML-DSA-65 do **not** support key recovery from signatures —
+    /// the public key cannot be derived from the signature bytes alone. The
+    /// receiver needs the public key to call `Mempool::admit` (which calls
+    /// `verify_transaction`). Carrying it on the wire is the only correct
+    /// approach (C·Step 13-residual-2, closed in D·15d).
+    ///
+    /// `sender_pubkey` is the hybrid Ed25519 + ML-DSA-65 key of `tx.sender`.
+    /// It is stored as [`lemma_core::validator::ConsensusKey`] (raw bytes) so
+    /// `lemma-network` (build layer 4) does not depend on `lemma-crypto`
+    /// (build layer 5). The node layer converts `ConsensusKey → PublicKey`
+    /// before calling `verify_transaction` (AGENTS §8 build-order constraint).
+    NewTransaction {
+        /// The pending transaction.
+        tx: Transaction,
+        /// Hybrid Ed25519 + ML-DSA-65 public key of `tx.sender`.
+        /// Boxed to avoid large_enum_variant (ConsensusKey is ~1984 bytes).
+        sender_pubkey: Box<lemma_core::validator::ConsensusKey>,
+    },
 
     /// A DAG block proposal from a validator, broadcast on [`TOPIC_DAG`].
     ///
@@ -399,7 +419,7 @@ impl GossipMessage {
     pub fn topic(&self) -> &str {
         match self {
             GossipMessage::NewBlock(_) => config::TOPIC_BLOCKS,
-            GossipMessage::NewTransaction(_) => config::TOPIC_TX,
+            GossipMessage::NewTransaction { .. } => config::TOPIC_TX,
             GossipMessage::DagProposal(_) => config::TOPIC_DAG,
             GossipMessage::TxBatch(_) => config::TOPIC_BATCH,
         }

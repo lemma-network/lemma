@@ -8,6 +8,7 @@ use lemma_core::{
     header::BlockHeader,
     signature::Signature,
     transaction::{Transaction, TxType},
+    validator::ConsensusKey,
 };
 
 use crate::{config, error::NetworkError, messages::GossipMessage};
@@ -79,6 +80,11 @@ fn test_tx() -> Transaction {
         Signature::Unsigned,
     )
     .expect("test transaction is always valid")
+}
+
+/// A minimal `ConsensusKey` for gossip tests (zero bytes — not cryptographically valid).
+fn test_consensus_key() -> ConsensusKey {
+    ConsensusKey::from_bytes(vec![0u8; 32], vec![0u8; 1952])
 }
 
 // ── GossipTopics — construction ───────────────────────────────────────────────
@@ -156,7 +162,10 @@ fn for_message_routes_new_block_to_blocks_topic() {
 #[test]
 fn for_message_routes_new_transaction_to_tx_topic() {
     let topics = GossipTopics::new();
-    let msg = GossipMessage::NewTransaction(test_tx());
+    let msg = GossipMessage::NewTransaction {
+        tx: test_tx(),
+        sender_pubkey: Box::new(test_consensus_key()),
+    };
 
     let routed = topics.for_message(&msg);
     assert_eq!(
@@ -178,7 +187,10 @@ fn for_message_routing_is_consistent_with_gossip_message_topic_string() {
     let expected_block_hash = gossipsub::IdentTopic::new(block_topic_str).hash();
     assert_eq!(topics.for_message(&block_msg).hash(), expected_block_hash);
 
-    let tx_msg = GossipMessage::NewTransaction(test_tx());
+    let tx_msg = GossipMessage::NewTransaction {
+        tx: test_tx(),
+        sender_pubkey: Box::new(test_consensus_key()),
+    };
     let tx_topic_str = tx_msg.topic();
     let expected_tx_hash = gossipsub::IdentTopic::new(tx_topic_str).hash();
     assert_eq!(topics.for_message(&tx_msg).hash(), expected_tx_hash);
@@ -282,7 +294,10 @@ fn publish_transaction_error_contains_tx_topic_name() {
     let topics = GossipTopics::new();
     subscribe_all(&mut gs, &topics).expect("subscribe must succeed");
 
-    let msg = GossipMessage::NewTransaction(test_tx());
+    let msg = GossipMessage::NewTransaction {
+        tx: test_tx(),
+        sender_pubkey: Box::new(test_consensus_key()),
+    };
     let Err(NetworkError::Publish { topic, .. }) = publish(&mut gs, &topics, &msg) else {
         panic!("expected Publish error");
     };
@@ -304,7 +319,10 @@ fn decode_incoming_valid_block_bytes_returns_correct_message() {
 
 #[test]
 fn decode_incoming_valid_tx_bytes_returns_correct_message() {
-    let original = GossipMessage::NewTransaction(test_tx());
+    let original = GossipMessage::NewTransaction {
+        tx: test_tx(),
+        sender_pubkey: Box::new(test_consensus_key()),
+    };
     let bytes = original.encode().expect("encode must succeed");
     let peer = test_peer();
 

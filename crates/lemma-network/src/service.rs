@@ -85,8 +85,19 @@ pub enum NetworkCommand {
 
     /// Broadcast a pending transaction to all gossip mesh peers.
     ///
-    /// Published on `lemma/tx/1`.
-    BroadcastTransaction(Transaction),
+    /// Published on `lemma/tx/1`. Carries `sender_pubkey` so receivers can
+    /// call `Mempool::admit` (Ed25519/ML-DSA-65 have no key recovery —
+    /// the public key must travel with the transaction, C·Step 13-residual-2,
+    /// closed in D·15d). `sender_pubkey` is stored as
+    /// [`lemma_core::validator::ConsensusKey`] (raw bytes) to avoid a
+    /// build-order dependency on `lemma-crypto` (AGENTS §8).
+    BroadcastTransaction {
+        /// The pending transaction.
+        tx: Transaction,
+        /// Hybrid Ed25519 + ML-DSA-65 public key of `tx.sender`.
+        /// Boxed to avoid large_enum_variant (ConsensusKey is ~1984 bytes).
+        sender_pubkey: Box<lemma_core::validator::ConsensusKey>,
+    },
 
     /// Broadcast a DAG block proposal to all gossip mesh peers.
     ///
@@ -167,11 +178,19 @@ pub enum NetworkEvent {
     },
 
     /// A gossiped transaction was received.
+    ///
+    /// Carries `sender_pubkey` so the node layer can call `Mempool::admit`
+    /// without key recovery (Ed25519/ML-DSA-65 do not support it).
+    /// `sender_pubkey` is [`lemma_core::validator::ConsensusKey`] (raw bytes)
+    /// to avoid a build-order dependency on `lemma-crypto` (AGENTS §8).
     TransactionReceived {
         /// The peer that forwarded the transaction.
         from: PeerId,
         /// The decoded transaction.
         tx: Transaction,
+        /// Hybrid Ed25519 + ML-DSA-65 public key of `tx.sender`.
+        /// Boxed to avoid large_enum_variant (ConsensusKey is ~1984 bytes).
+        sender_pubkey: Box<lemma_core::validator::ConsensusKey>,
     },
 
     /// An inbound range request arrived from a peer.
@@ -250,11 +269,24 @@ impl NetworkHandle {
 
     /// Broadcast a pending transaction to the gossip mesh.
     ///
+    /// `sender_pubkey` must be the hybrid Ed25519 + ML-DSA-65 public key of
+    /// `tx.sender`. Receivers use it to call `Mempool::admit` — Ed25519 and
+    /// ML-DSA-65 have no key recovery, so the key must travel with the tx
+    /// (C·Step 13-residual-2, closed in D·15d).
+    ///
     /// # Errors
     ///
     /// Returns [`NetworkError::Transport`] if the command channel is closed.
-    pub async fn broadcast_transaction(&self, tx: Transaction) -> Result<(), NetworkError> {
-        self.send(NetworkCommand::BroadcastTransaction(tx)).await
+    pub async fn broadcast_transaction(
+        &self,
+        tx: Transaction,
+        sender_pubkey: lemma_core::validator::ConsensusKey,
+    ) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::BroadcastTransaction {
+            tx,
+            sender_pubkey: Box::new(sender_pubkey),
+        })
+        .await
     }
 
     /// Broadcast a DAG block proposal to the gossip mesh.
@@ -625,8 +657,13 @@ impl NetworkService {
                 self.emit(NetworkEvent::BlockReceived { from, block });
             }
 
-            Ok(GossipMessage::NewTransaction(tx)) => {
-                self.emit(NetworkEvent::TransactionReceived { from, tx });
+            Ok(GossipMessage::NewTransaction { tx, sender_pubkey }) => {
+                // sender_pubkey is Box<ConsensusKey> from GossipMessage, flows into NetworkEvent.
+                self.emit(NetworkEvent::TransactionReceived {
+                    from,
+                    tx,
+                    sender_pubkey,
+                });
             }
 
             Ok(GossipMessage::DagProposal(bytes)) => {
@@ -726,8 +763,8 @@ impl NetworkService {
                 }
             }
 
-            NetworkCommand::BroadcastTransaction(tx) => {
-                let msg = GossipMessage::NewTransaction(tx);
+            NetworkCommand::BroadcastTransaction { tx, sender_pubkey } => {
+                let msg = GossipMessage::NewTransaction { tx, sender_pubkey };
                 if let Err(e) = gossip::publish(
                     self.swarm.behaviour_mut().gossipsub_mut(),
                     &self.topics,

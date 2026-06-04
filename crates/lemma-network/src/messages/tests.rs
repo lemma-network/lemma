@@ -1,6 +1,6 @@
 use lemma_core::{
     address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader,
-    transaction::Transaction,
+    transaction::Transaction, validator::ConsensusKey,
 };
 
 use super::{MAX_GOSSIP_DECODE_BYTES, *};
@@ -56,6 +56,13 @@ fn test_tx() -> Transaction {
         Signature::Unsigned,
     )
     .expect("test transaction is always valid")
+}
+
+/// A minimal `ConsensusKey` for gossip tests (zero bytes — not cryptographically valid).
+///
+/// Used only for wire-format tests where the key is not verified.
+fn test_consensus_key() -> ConsensusKey {
+    ConsensusKey::from_bytes(vec![0u8; 32], vec![0u8; 1952])
 }
 
 // ── MessageError — display ────────────────────────────────────────────────────
@@ -309,7 +316,10 @@ fn gossip_new_block_routes_to_blocks_topic() {
 
 #[test]
 fn gossip_new_transaction_routes_to_tx_topic() {
-    let msg = GossipMessage::NewTransaction(test_tx());
+    let msg = GossipMessage::NewTransaction {
+        tx: test_tx(),
+        sender_pubkey: Box::new(test_consensus_key()),
+    };
     assert_eq!(msg.topic(), config::TOPIC_TX);
 }
 
@@ -319,9 +329,12 @@ fn gossip_message_topic_is_versioned() {
     assert!(GossipMessage::NewBlock(Box::new(test_block(0)))
         .topic()
         .ends_with("/1"));
-    assert!(GossipMessage::NewTransaction(test_tx())
-        .topic()
-        .ends_with("/1"));
+    assert!(GossipMessage::NewTransaction {
+        tx: test_tx(),
+        sender_pubkey: Box::new(test_consensus_key()),
+    }
+    .topic()
+    .ends_with("/1"));
 }
 
 // ── GossipMessage — encode / decode roundtrip ─────────────────────────────────
@@ -336,7 +349,10 @@ fn gossip_new_block_encode_decode_roundtrip() {
 
 #[test]
 fn gossip_new_transaction_encode_decode_roundtrip() {
-    let original = GossipMessage::NewTransaction(test_tx());
+    let original = GossipMessage::NewTransaction {
+        tx: test_tx(),
+        sender_pubkey: Box::new(test_consensus_key()),
+    };
     let bytes = original.encode().expect("encode must succeed");
     let decoded = GossipMessage::decode(&bytes).expect("decode must succeed");
     assert_eq!(decoded, original);
@@ -387,7 +403,10 @@ fn gossip_new_block_debug_contains_variant_name() {
 
 #[test]
 fn gossip_new_transaction_debug_contains_variant_name() {
-    let msg = GossipMessage::NewTransaction(test_tx());
+    let msg = GossipMessage::NewTransaction {
+        tx: test_tx(),
+        sender_pubkey: Box::new(test_consensus_key()),
+    };
     assert!(format!("{msg:?}").contains("NewTransaction"));
 }
 

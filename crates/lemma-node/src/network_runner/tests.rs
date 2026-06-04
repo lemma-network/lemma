@@ -5,12 +5,13 @@
 //!   storage-error → empty-vec policy, and inverted range.
 //! - `run_block_broadcaster`: exits on channel close, exits on shutdown signal.
 //! - `run_network_dispatch` lifecycle: exits on channel close, exits on shutdown.
-//! - Phase 1 log-only events (`TransactionReceived`, peer lifecycle) pass
-//!   through without error.
+//! - `TransactionReceived` (D·15d): valid sig admitted; wrong pubkey rejected;
+//!   dispatch handles event without error.
 //! - `BlockReceived` gap detection: block at tip+1 is applied; block at
 //!   tip+2 triggers a range request.
 //! - `handle_batch_received`: valid batch pinned; malformed JSON dropped; duplicate
-//!   idempotent; forged `tx.hash` rejected (per-tx hash integrity, C·Step 14).
+//!   idempotent; forged `tx.hash` rejected (per-tx hash integrity, C·Step 14);
+//!   unsigned tx dropped (D·15d SECURITY GATE); vset sender tampered sig dropped.
 //! - `handle_dag_proposal_received` (D·15b-1): valid sig forwarded with sig_ok=true;
 //!   invalid sig forwarded with sig_ok=false; unknown author sig_ok=false;
 //!   Signature::Unsigned sig_ok=false.
@@ -22,11 +23,19 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 
+use super::*;
+use crate::{
+    batch::{new_batch_store, Batch},
+    dag_driver::build_dag_block,
+    genesis_boot::init_chain,
+    sync::compute_block_hash,
+};
 use lemma_consensus::dag::block::{DagBlock, DagBlockBody};
 use lemma_core::{
     address::Address,
     amount::Amount,
     block::Block,
+    genesis::GenesisConfig,
     hash::Hash,
     header::BlockHeader,
     signature::Signature,
@@ -34,18 +43,7 @@ use lemma_core::{
     validator::{ConsensusKey, VotingPower},
     validator_set::{Member, ValidatorSet},
 };
-use lemma_mempool::pool::Mempool;
-use lemma_network::service::NetworkEvent;
-use lemma_storage::{chain::ChainStore, db::LemmaDb};
-
-use lemma_crypto::{compute_tx_hash, sign_transaction, KeyPair};
-
-use super::*;
-use crate::{
-    batch::{new_batch_store, Batch},
-    dag_driver::build_dag_block,
-    sync::compute_block_hash,
-};
+use lemma_crypto::{sign_transaction, KeyPair};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -454,10 +452,14 @@ async fn dispatch_handles_transaction_received_without_error() {
         signature: Signature::Unsigned,
         tx_type: TxType::Transfer,
     };
+    // D·15d: TransactionReceived now carries sender_pubkey.
+    // Zero-bytes key — admission will fail sig verify (non-fatal, just logged).
+    let sender_pubkey = Box::new(ConsensusKey::from_bytes(vec![0u8; 32], vec![0u8; 1952]));
     event_tx
         .send(NetworkEvent::TransactionReceived {
             from: libp2p::PeerId::random(),
             tx,
+            sender_pubkey,
         })
         .await
         .expect("send");
@@ -513,7 +515,7 @@ async fn handle_batch_received_valid_batch_is_pinned_under_correct_digest() {
     let bytes = serde_json::to_vec(&batch).expect("encode");
     let store = new_batch_store();
 
-    handle_batch_received(libp2p::PeerId::random(), bytes, &store).await;
+    handle_batch_received(libp2p::PeerId::random(), bytes, &store, &empty_vset()).await;
 
     let guard = store.read().await;
     assert!(guard.contains_key(&digest), "valid batch must be pinned");
@@ -525,7 +527,7 @@ async fn handle_batch_received_malformed_json_is_dropped_store_unchanged() {
     let store = new_batch_store();
     let garbage = b"not valid json {{{{".to_vec();
 
-    handle_batch_received(libp2p::PeerId::random(), garbage, &store).await;
+    handle_batch_received(libp2p::PeerId::random(), garbage, &store, &empty_vset()).await;
 
     assert!(
         store.read().await.is_empty(),
@@ -543,8 +545,8 @@ async fn handle_batch_received_duplicate_batch_is_idempotent() {
     let store = new_batch_store();
     let peer = libp2p::PeerId::random();
 
-    handle_batch_received(peer, bytes.clone(), &store).await;
-    handle_batch_received(peer, bytes, &store).await;
+    handle_batch_received(peer, bytes.clone(), &store, &empty_vset()).await;
+    handle_batch_received(peer, bytes, &store, &empty_vset()).await;
 
     let guard = store.read().await;
     assert_eq!(guard.len(), 1, "duplicate must result in exactly one entry");
@@ -567,7 +569,7 @@ async fn handle_batch_received_forged_tx_hash_is_rejected_store_unchanged() {
     let bytes = serde_json::to_vec(&batch).expect("encode");
     let store = new_batch_store();
 
-    handle_batch_received(libp2p::PeerId::random(), bytes, &store).await;
+    handle_batch_received(libp2p::PeerId::random(), bytes, &store, &empty_vset()).await;
 
     assert!(
         store.read().await.is_empty(),
@@ -697,4 +699,203 @@ async fn dag_proposal_received_unsigned_block_forwarded_with_sig_ok_false() {
         .expect("channel closed");
 
     assert!(!result.1, "sig_ok must be false for Signature::Unsigned");
+}
+
+// ── handle_transaction_received (D·15d) ──────────────────────────────────────
+
+/// Build a genesis block and write it to the db so `handle_transaction_received`
+/// can read the tip state root.
+fn seed_genesis(db: &LemmaDb) -> Hash {
+    let block = make_block_at(0, Hash::zero());
+    let hash = compute_block_hash(&block).expect("hash");
+    ChainStore::new(db)
+        .put_block(&block, hash)
+        .expect("put_block");
+    hash
+}
+
+#[tokio::test]
+async fn transaction_received_admitted_to_mempool_with_valid_sig() {
+    // Arrange: genesis initialized via init_chain so the WorldState has real
+    // trie nodes. The sender is funded with 1 LEM so balance check passes.
+    let kp = KeyPair::generate().expect("keygen");
+    let sender = *kp.address();
+    let recipient = Address::from_public_key(&[99u8; 32]);
+
+    let mut initial_balances = std::collections::BTreeMap::new();
+    initial_balances.insert(sender, Amount::from_drop(1_000_000_000_000_000_000)); // 1 LEM
+
+    let dir = tempfile::TempDir::new().unwrap();
+    // init_chain requires at least one genesis validator.
+    // Use a dummy validator (sender acts as sole validator for test setup).
+    use lemma_core::validator::{Stake, Validator, ValidatorStatus};
+    let dummy_ck = ConsensusKey::from_bytes(vec![0u8; 32], vec![0u8; 1952]);
+    let validator = Validator {
+        address: sender,
+        consensus_pubkey: dummy_ck,
+        status: ValidatorStatus::Bonded,
+        tombstoned: false,
+        self_stake: Stake {
+            active: Amount::from_drop(1_000_000),
+            pending_active: Amount::from_drop(0),
+            pending_inactive: vec![],
+            inactive: Amount::from_drop(0),
+        },
+        delegated: Amount::from_drop(0),
+        commission_bps: 0,
+        jailed_until: None,
+    };
+    let mut genesis_validators = std::collections::BTreeMap::new();
+    genesis_validators.insert(sender, validator);
+    let genesis = GenesisConfig {
+        chain_id: 1,
+        genesis_timestamp: 1_000_000,
+        initial_gas_limit: 30_000_000,
+        initial_base_fee: Amount::from_drop(1_000_000_000),
+        initial_balances,
+        genesis_validators,
+    };
+    init_chain(LemmaDb::open(dir.path()).unwrap(), &genesis).unwrap();
+    let db = Arc::new(LemmaDb::open(dir.path()).unwrap());
+
+    // Build and sign a Transfer tx (value=0, gas_price=0 → zero gas cost).
+    let mut tx = Transaction::new(
+        Hash::zero(),
+        sender,
+        Some(recipient),
+        0,
+        1, // chain_id = 1
+        Amount::from_drop(0),
+        21_000,
+        Amount::from_drop(0),
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("Transaction::new");
+    sign_transaction(&mut tx, &kp).expect("sign");
+
+    let mempool = Arc::new(RwLock::new(Mempool::new(100)));
+    let pk = kp.public_key();
+    let sender_pubkey = ConsensusKey::from_bytes(pk.classical.clone(), pk.quantum.clone());
+
+    // Act.
+    handle_transaction_received(libp2p::PeerId::random(), tx, sender_pubkey, &db, &mempool).await;
+
+    // Assert: tx was admitted.
+    assert_eq!(
+        mempool.read().await.len(),
+        1,
+        "valid signed tx must be admitted to mempool"
+    );
+}
+
+#[tokio::test]
+async fn transaction_received_invalid_pubkey_rejected_by_mempool() {
+    // Arrange: signed tx but wrong pubkey (different keypair).
+    // The pubkey-to-address derivation check fires before sig verify,
+    // so the tx is rejected at step 4 (pubkey mismatch) — no balance needed.
+    let kp = KeyPair::generate().expect("keygen");
+    let wrong_kp = KeyPair::generate().expect("keygen");
+    let mut tx = Transaction::new(
+        Hash::zero(),
+        *kp.address(),
+        Some(Address::from_public_key(&[99u8; 32])),
+        0,
+        1,
+        Amount::from_drop(0),
+        21_000,
+        Amount::from_drop(0), // zero gas_price — balance check irrelevant (fails at step 4)
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("Transaction::new");
+    lemma_crypto::sign_transaction(&mut tx, &kp).expect("sign");
+
+    let (db, _dir) = open_temp_db();
+    seed_genesis(&db);
+    let db = Arc::new(db);
+
+    let mempool = Arc::new(RwLock::new(Mempool::new(100)));
+    // Use the WRONG keypair's pubkey — pubkey→address derivation mismatch fires first.
+    let wrong_pk = wrong_kp.public_key();
+    let sender_pubkey =
+        ConsensusKey::from_bytes(wrong_pk.classical.clone(), wrong_pk.quantum.clone());
+
+    // Act.
+    handle_transaction_received(libp2p::PeerId::random(), tx, sender_pubkey, &db, &mempool).await;
+
+    // Assert: mempool stays empty (pubkey mismatch → rejected at step 4).
+    assert_eq!(
+        mempool.read().await.len(),
+        0,
+        "tx with wrong pubkey must be rejected by mempool"
+    );
+}
+
+#[tokio::test]
+async fn batch_received_unsigned_tx_dropped_by_security_gate() {
+    // Arrange: batch containing an unsigned tx — must be rejected by D·15d gate.
+    let kp = KeyPair::generate().expect("keygen");
+    let unsigned_tx = Transaction::new(
+        Hash::zero(),
+        *kp.address(),
+        Some(Address::from_public_key(&[99u8; 32])),
+        0,
+        1,
+        Amount::from_drop(0),
+        21_000,
+        Amount::from_drop(1_000_000_000),
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("Transaction::new");
+
+    // Compute the correct hash so the per-tx hash check passes.
+    let mut tx_with_hash = unsigned_tx;
+    tx_with_hash.hash = lemma_crypto::compute_tx_hash(&tx_with_hash).expect("hash");
+
+    let batch = crate::batch::Batch::new(Address::from_public_key(&[1u8; 32]), vec![tx_with_hash]);
+    let bytes = serde_json::to_vec(&batch).expect("encode");
+    let store = crate::batch::new_batch_store();
+
+    // Act: use empty vset (no validator-set sig verify needed — unsigned check fires first).
+    handle_batch_received(libp2p::PeerId::random(), bytes, &store, &empty_vset()).await;
+
+    // Assert: store stays empty — unsigned tx caused batch rejection.
+    assert!(
+        store.read().await.is_empty(),
+        "batch with unsigned tx must be dropped by D·15d security gate"
+    );
+}
+
+#[tokio::test]
+async fn batch_received_vset_sender_invalid_sig_dropped_by_security_gate() {
+    // Arrange: batch with a tx whose sender IS in vset but sig is tampered.
+    let kp = KeyPair::generate().expect("keygen");
+    let vset = single_member_vset(&kp);
+
+    let mut tx = make_signed_tx_for_batch(&kp, 0);
+    // Tamper the signature after signing.
+    tx.signature = Signature::Hybrid {
+        classical: vec![0xDE; 64],
+        quantum: vec![0xAD; 3309],
+    };
+    // Recompute hash so per-tx hash check passes (hash covers body, not sig).
+    tx.hash = lemma_crypto::compute_tx_hash(&tx).expect("hash");
+
+    let batch = crate::batch::Batch::new(Address::from_public_key(&[1u8; 32]), vec![tx]);
+    let bytes = serde_json::to_vec(&batch).expect("encode");
+    let store = crate::batch::new_batch_store();
+
+    // Act.
+    handle_batch_received(libp2p::PeerId::random(), bytes, &store, &vset).await;
+
+    // Assert: store stays empty — tampered sig rejected for vset sender.
+    assert!(
+        store.read().await.is_empty(),
+        "batch with tampered sig from vset sender must be dropped by D·15d security gate"
+    );
 }
