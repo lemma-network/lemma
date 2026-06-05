@@ -9,8 +9,6 @@ use super::super::ast::{Expr, Literal, UnitKind};
 use super::super::Parser;
 use super::span::MergeSpan;
 
-// TODO(2d): remove allow when decl.rs wires these methods (2c landed).
-#[allow(dead_code)]
 impl Parser {
     // ── Primary dispatch ──────────────────────────────────────────────────────
 

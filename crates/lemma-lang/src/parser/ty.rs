@@ -27,8 +27,6 @@ use crate::lexer::token::{Span, Token};
 use super::ast::Type;
 use super::Parser;
 
-// TODO(2d): remove allow when decl.rs wires these type-parser methods.
-#[allow(dead_code)]
 impl Parser {
     /// Parse a Lem type expression.
     ///
@@ -323,7 +321,8 @@ impl Parser {
     ///
     /// Needed for nested generic disambiguation: `Map<K, Array<V>>` — the
     /// lexer emits `>>` as `Token::Shr`, but the type parser needs two `>`.
-    fn check_gt(&self) -> bool {
+    /// Also used by `functions.rs` for generic parameter closing `>`.
+    pub(crate) fn check_gt(&self) -> bool {
         matches!(self.peek(), Token::Gt | Token::Shr)
     }
 
@@ -337,13 +336,16 @@ impl Parser {
     /// replaces the `>>` token with `>` in the stream WITHOUT advancing.
     /// The outer parser's next `expect_gt` call will then consume that `>`.
     ///
+    /// Also used by `functions.rs` for generic parameter closing `>` — the canonical
+    /// implementation lives here; `functions.rs` delegates to this method.
+    ///
     /// # INVARIANT
     /// This mutates `self.tokens[self.pos]` from `Shr` to `Gt` without advancing.
     /// The parser is strictly forward-moving — it NEVER rewinds `pos` across a position
     /// where this mutation may have occurred. Any future backtracking helper in expr.rs
     /// MUST NOT rewind past a position returned by `expect_gt`. See Technical Debt in
     /// living-notes.md: "P3-parser-1: `expect_gt` buffer mutation → `pending_gt` flag refactor".
-    fn expect_gt(&mut self, ctx: &str) -> Result<Span, LangError> {
+    pub(crate) fn expect_gt(&mut self, ctx: &str) -> Result<Span, LangError> {
         match self.peek().clone() {
             Token::Gt => Ok(self.advance().1),
             Token::Shr => {

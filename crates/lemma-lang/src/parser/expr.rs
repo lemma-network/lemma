@@ -47,8 +47,6 @@ use super::Parser;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-// TODO(2d): remove allow when decl.rs wires these methods (2c landed).
-#[allow(dead_code)]
 impl Parser {
     /// Parse a single expression (entry point for stmt.rs and decl.rs).
     ///

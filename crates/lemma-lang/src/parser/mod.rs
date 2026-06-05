@@ -28,6 +28,7 @@
 //! - `item`  — struct/enum/interface/trait/library (2e–2f)
 
 pub mod ast;
+mod decl;
 pub mod error;
 mod expr;
 mod stmt;
@@ -233,39 +234,12 @@ impl Parser {
     }
 
     // ── Program entry point ───────────────────────────────────────────────────
-
-    /// Parse the full program (top-level item list).
-    ///
-    /// This is a skeleton implementation for subtask 2a. The real
-    /// top-level item parsing is implemented in subtask 2d (`decl.rs`).
-    /// For now, the parser advances past all tokens so the skeleton compiles
-    /// and the type/AST tests can run without panicking.
-    pub(crate) fn parse_program(&mut self) -> Result<Ast, LangError> {
-        let start = self.peek_span();
-        let items = Vec::new();
-
-        // Skip leading newlines/whitespace tokens
-        self.skip_newlines();
-
-        // TODO(2d): Real top-level declaration parsing implemented in subtask 2d.
-        // For now, advance past all tokens to reach EOF without panicking.
-        while !self.at_end() {
-            self.advance();
-            self.skip_newlines();
-        }
-
-        let end_span = self.peek_span();
-        let span = Span {
-            line: start.line,
-            col: start.col,
-            offset: start.offset,
-            len: end_span.offset.saturating_sub(start.offset),
-        };
-        Ok(Ast { items, span })
-    }
+    //
+    // NOTE: `parse_program` is implemented in `decl.rs` (subtask 2d).
+    // The method is declared there as `pub(crate) fn parse_program(...)`.
 
     /// Skip past any `Token::Newline` tokens at the current position.
-    fn skip_newlines(&mut self) {
+    pub(crate) fn skip_newlines(&mut self) {
         while matches!(self.peek(), Token::Newline) {
             self.advance();
         }

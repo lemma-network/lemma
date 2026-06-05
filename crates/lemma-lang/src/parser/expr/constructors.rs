@@ -9,7 +9,6 @@ use super::super::ast::{Expr, Param, Type};
 use super::super::Parser;
 use super::span::MergeSpan;
 
-#[allow(dead_code)] // TODO(2c-2d): wired from stmt/decl parsers
 impl Parser {
     /// Parse an identifier that may be:
     /// - A single-param lambda: `x => x * 2`

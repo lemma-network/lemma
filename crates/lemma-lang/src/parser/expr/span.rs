@@ -13,7 +13,8 @@ use super::super::ast::Expr;
 /// The `#[allow(unreachable_patterns)]` is required because `Expr` is
 /// `#[non_exhaustive]` — the wildcard arm is needed for forward compatibility
 /// even though all current variants are covered above it.
-#[allow(unreachable_patterns, dead_code)]
+// `#[allow(unreachable_patterns)]` is required because `Expr` is `#[non_exhaustive]`.
+#[allow(unreachable_patterns)]
 pub(crate) fn expr_span(e: &Expr) -> Span {
     match e {
         Expr::Literal(_, s)
@@ -43,8 +44,6 @@ pub(crate) fn expr_span(e: &Expr) -> Span {
 // ─── Span merge ───────────────────────────────────────────────────────────────
 
 /// Extension trait to merge two spans into one covering both.
-// TODO(2d): remove allow when decl.rs wires these methods (2c landed).
-#[allow(dead_code)]
 pub(crate) trait MergeSpan {
     fn merge_with(self, other: Span) -> Span;
 }

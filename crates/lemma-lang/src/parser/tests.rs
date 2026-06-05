@@ -23,12 +23,11 @@ fn parse_whitespace_only_returns_empty_ast() {
 }
 
 #[test]
-fn parse_does_not_panic_on_arbitrary_tokens() {
-    // The placeholder parse_program skips all tokens — must not panic.
+fn parse_contract_foo_produces_one_item() {
+    // parse_program is now real (subtask 2d) — must parse a contract correctly.
     let tokens = tokenize("contract Foo {}").expect("tokenize failed");
-    let result = parse(tokens);
-    // Either Ok or Err is acceptable — must not panic.
-    let _ = result;
+    let ast = parse(tokens).expect("parse failed");
+    assert_eq!(ast.items.len(), 1);
 }
 
 #[test]
