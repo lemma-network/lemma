@@ -101,6 +101,10 @@ impl Parser {
             Token::Struct => Ok(Item::Struct(self.parse_struct_decl()?)),
             Token::Enum => Ok(Item::Enum(self.parse_enum_decl()?)),
             Token::Error => Ok(Item::ErrorDecl(self.parse_error_decl()?)),
+            // Advanced declarations at top level (subtask 2f)
+            Token::Interface => Ok(Item::Interface(self.parse_interface()?)),
+            Token::Trait => Ok(Item::Trait(self.parse_trait()?)),
+            Token::Library => Ok(Item::Library(self.parse_library()?)),
             tok => Err(self.error_expected(
                 vec!["declaration".into()],
                 format!("expected top-level declaration, got {tok:?}"),

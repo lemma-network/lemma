@@ -1,11 +1,13 @@
-//! Tests for the user-type declaration parsers (subtask 2e).
+//! Tests for the user-type declaration parsers (subtasks 2e and 2f).
 //!
 //! Covers: struct, enum, event, error — both as top-level items and as
-//! contract members. Also verifies fuzz-safety (no panics on malformed input).
+//! contract members. Also covers interface, trait, library, generic bounds,
+//! using-for, and contract composition (subtask 2f).
+//! Verifies fuzz-safety (no panics on malformed input).
 
 use crate::error::LangError;
 use crate::lexer::tokenize;
-use crate::parser::ast::{ContractMember, Item, StructMember};
+use crate::parser::ast::{ContractMember, InterfaceMember, Item, StructMember, TraitMember, Type};
 use crate::parser::Parser;
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -416,6 +418,342 @@ fn parse_item_malformed_event_enum_never_panics() {
         "event E { name?: }",   // optional field with no type
         "enum E {}",            // empty enum (valid — should parse ok)
         "struct S { fn }",      // fn keyword with no name
+    ];
+    for src in malformed {
+        // Must not panic — Ok or Err are both acceptable outcomes.
+        let _ = tokenize(src).and_then(|tokens| {
+            let mut p = Parser::new(tokens);
+            p.parse_top_level_item()
+        });
+    }
+}
+
+// ── Interface tests (subtask 2f) ──────────────────────────────────────────────
+
+#[test]
+fn parse_item_interface_function_signatures() {
+    // Interface with body-less function signatures (body = None).
+    let item = parse_item_from_str(
+        "interface IToken {
+            fn totalSupply() -> u128
+            fn balanceOf(addr: Address) -> u128
+            fn transfer(to: Address, amount: u128) -> bool
+        }",
+    )
+    .expect("should parse");
+    let Item::Interface(iface) = item else {
+        panic!("expected Interface, got {item:?}");
+    };
+    assert_eq!(iface.name, "IToken");
+    assert_eq!(iface.members.len(), 3);
+    // Each member is a function with body = None (signature-only)
+    for m in &iface.members {
+        let InterfaceMember::Function(f) = m else {
+            panic!("expected Function member, got {m:?}");
+        };
+        assert!(f.body.is_none(), "interface fn should have no body");
+    }
+}
+
+#[test]
+fn parse_item_interface_with_event() {
+    let item = parse_item_from_str(
+        "interface IToken {
+            fn transfer(to: Address, amount: u128) -> bool
+            event Transfer { sender: Address\n recipient: Address\n amount: u128 }
+        }",
+    )
+    .expect("should parse");
+    let Item::Interface(iface) = item else {
+        panic!("expected Interface, got {item:?}");
+    };
+    assert_eq!(iface.members.len(), 2);
+    assert!(
+        matches!(iface.members[0], InterfaceMember::Function(_)),
+        "first member should be Function"
+    );
+    assert!(
+        matches!(iface.members[1], InterfaceMember::Event(_)),
+        "second member should be Event"
+    );
+}
+
+#[test]
+fn parse_item_interface_with_annotations() {
+    let item = parse_item_from_str(
+        "interface IVault {
+            @payable fn deposit(amount: u128)
+            view fn balanceOf(addr: Address) -> u128
+        }",
+    )
+    .expect("should parse");
+    let Item::Interface(iface) = item else {
+        panic!("expected Interface, got {item:?}");
+    };
+    assert_eq!(iface.members.len(), 2);
+    let InterfaceMember::Function(f) = &iface.members[0] else {
+        panic!("expected Function");
+    };
+    assert_eq!(f.annotations.len(), 1);
+    assert_eq!(f.annotations[0].name, "payable");
+}
+
+#[test]
+fn parse_item_interface_empty_body() {
+    let item = parse_item_from_str("interface IEmpty {}").expect("should parse");
+    let Item::Interface(iface) = item else {
+        panic!("expected Interface");
+    };
+    assert_eq!(iface.name, "IEmpty");
+    assert!(iface.members.is_empty());
+}
+
+// ── Trait tests (subtask 2f) ──────────────────────────────────────────────────
+
+#[test]
+fn parse_item_trait_required_functions() {
+    // Functions without body = required (abstract)
+    let item = parse_item_from_str(
+        "trait Ownable {
+            state { owner: Address }
+            fn onlyOwner()
+            pub fn transferOwnership(newOwner: Address)
+        }",
+    )
+    .expect("should parse");
+    let Item::Trait(t) = item else {
+        panic!("expected Trait, got {item:?}");
+    };
+    assert_eq!(t.name, "Ownable");
+    assert_eq!(t.members.len(), 3);
+    // First member is State
+    assert!(
+        matches!(t.members[0], TraitMember::State(_)),
+        "first member should be State"
+    );
+    // Remaining are Functions (required, body=None)
+    for m in &t.members[1..] {
+        let TraitMember::Function(f) = m else {
+            panic!("expected Function member");
+        };
+        assert!(f.body.is_none(), "required trait fn has no body");
+    }
+}
+
+#[test]
+fn parse_item_trait_default_implementations() {
+    // Functions WITH body = default implementation
+    let item = parse_item_from_str(
+        "trait Vault {
+            fn asset() -> Address
+            view fn totalAssets() -> u128 { return 0 }
+        }",
+    )
+    .expect("should parse");
+    let Item::Trait(t) = item else {
+        panic!("expected Trait, got {item:?}");
+    };
+    assert_eq!(t.members.len(), 2);
+    let TraitMember::Function(f0) = &t.members[0] else {
+        panic!("expected Function");
+    };
+    assert!(f0.body.is_none(), "required fn has no body");
+    let TraitMember::Function(f1) = &t.members[1] else {
+        panic!("expected Function");
+    };
+    assert!(f1.body.is_some(), "default impl fn has a body");
+}
+
+#[test]
+fn parse_item_trait_empty_body() {
+    let item = parse_item_from_str("trait Empty {}").expect("should parse");
+    let Item::Trait(t) = item else {
+        panic!("expected Trait");
+    };
+    assert_eq!(t.name, "Empty");
+    assert!(t.members.is_empty());
+}
+
+// ── Library tests (subtask 2f) ────────────────────────────────────────────────
+
+#[test]
+fn parse_item_library_with_functions() {
+    let item = parse_item_from_str(
+        "library SafeMath {
+            fn add(a: u128, b: u128) -> u128 { return a + b }
+            fn sub(a: u128, b: u128) -> u128 { return a - b }
+            fn mul(a: u128, b: u128) -> u128 { return a * b }
+        }",
+    )
+    .expect("should parse");
+    let Item::Library(lib) = item else {
+        panic!("expected Library, got {item:?}");
+    };
+    assert_eq!(lib.name, "SafeMath");
+    assert_eq!(lib.functions.len(), 3);
+    assert_eq!(lib.functions[0].name, "add");
+    assert_eq!(lib.functions[1].name, "sub");
+    assert_eq!(lib.functions[2].name, "mul");
+}
+
+#[test]
+fn parse_item_library_empty_body() {
+    let item = parse_item_from_str("library Empty {}").expect("should parse");
+    let Item::Library(lib) = item else {
+        panic!("expected Library");
+    };
+    assert_eq!(lib.name, "Empty");
+    assert!(lib.functions.is_empty());
+}
+
+#[test]
+fn parse_item_library_rejects_state() {
+    // Libraries cannot have state — must return Err
+    let result = parse_item_from_str("library Bad { state { x: u128 } }");
+    assert!(result.is_err(), "library with state should error");
+}
+
+// ── Generic bounds tests (subtask 2f) ─────────────────────────────────────────
+
+#[test]
+fn parse_decl_generic_bound_simple() {
+    // `<T: Comparable>` — single bound on struct
+    let item = parse_item_from_str("struct Sorted<T: Comparable> { items: Array<T> }")
+        .expect("should parse");
+    let Item::Struct(s) = item else {
+        panic!("expected Struct, got {item:?}");
+    };
+    assert_eq!(s.generic_params.len(), 1);
+    assert_eq!(s.generic_params[0].name, "T");
+    assert!(
+        s.generic_params[0].bound.is_some(),
+        "T should have Comparable bound"
+    );
+    // Bound is represented as Type::Named("Comparable", [])
+    assert_eq!(
+        s.generic_params[0].bound,
+        Some(Type::Named("Comparable".into(), vec![]))
+    );
+}
+
+#[test]
+fn parse_decl_generic_bound_multiple() {
+    // `<K: Hashable, V: Default>` — multiple bounds
+    let item = parse_item_from_str("struct Cache<K: Hashable, V: Default> { entries: Map<K, V> }")
+        .expect("should parse");
+    let Item::Struct(s) = item else {
+        panic!("expected Struct, got {item:?}");
+    };
+    assert_eq!(s.generic_params.len(), 2);
+    assert_eq!(s.generic_params[0].name, "K");
+    assert!(
+        s.generic_params[0].bound.is_some(),
+        "K should have Hashable bound"
+    );
+    assert_eq!(s.generic_params[1].name, "V");
+    assert!(
+        s.generic_params[1].bound.is_some(),
+        "V should have Default bound"
+    );
+}
+
+#[test]
+fn parse_decl_generic_no_bound() {
+    // `<T>` — no bound
+    let item = parse_item_from_str("struct Box<T> { value: T }").expect("should parse");
+    let Item::Struct(s) = item else {
+        panic!("expected Struct");
+    };
+    assert_eq!(s.generic_params.len(), 1);
+    assert_eq!(s.generic_params[0].name, "T");
+    assert!(s.generic_params[0].bound.is_none(), "T has no bound");
+}
+
+#[test]
+fn parse_decl_function_generic_bound() {
+    // `fn max<T: Comparable>(a: T, b: T) -> T { ... }`
+    let item = parse_item_from_str("fn max<T: Comparable>(a: T, b: T) -> T { return a }")
+        .expect("should parse");
+    let Item::Function(f) = item else {
+        panic!("expected Function, got {item:?}");
+    };
+    assert_eq!(f.generic_params.len(), 1);
+    assert_eq!(f.generic_params[0].name, "T");
+    assert!(f.generic_params[0].bound.is_some());
+    assert_eq!(
+        f.generic_params[0].bound,
+        Some(Type::Named("Comparable".into(), vec![]))
+    );
+}
+
+// ── using-for tests (subtask 2f) ──────────────────────────────────────────────
+
+#[test]
+fn parse_item_using_for_top_level() {
+    let item = parse_item_from_str("using SafeMath for u128").expect("should parse");
+    let Item::Using(u) = item else {
+        panic!("expected Using, got {item:?}");
+    };
+    assert_eq!(u.library, "SafeMath");
+    assert_eq!(u.for_type, Type::U128);
+}
+
+// ── Contract composition tests (subtask 2f) ───────────────────────────────────
+
+#[test]
+fn parse_decl_contract_implements_and_uses() {
+    let item = parse_item_from_str(
+        "contract DEX implements IDEX, ISwap uses Ownable, ReentrancyGuard {
+            state { fee: u128 }
+        }",
+    )
+    .expect("should parse");
+    let Item::Contract(c) = item else {
+        panic!("expected Contract, got {item:?}");
+    };
+    assert_eq!(c.implements, vec!["IDEX", "ISwap"]);
+    assert_eq!(c.uses, vec!["Ownable", "ReentrancyGuard"]);
+}
+
+#[test]
+fn parse_decl_contract_implements_only() {
+    let item = parse_item_from_str("contract Token implements IToken { state { supply: u128 } }")
+        .expect("should parse");
+    let Item::Contract(c) = item else {
+        panic!("expected Contract");
+    };
+    assert_eq!(c.implements, vec!["IToken"]);
+    assert!(c.uses.is_empty());
+}
+
+#[test]
+fn parse_decl_contract_uses_only() {
+    let item = parse_item_from_str("contract Safe uses Ownable { state { owner: Address } }")
+        .expect("should parse");
+    let Item::Contract(c) = item else {
+        panic!("expected Contract");
+    };
+    assert!(c.implements.is_empty());
+    assert_eq!(c.uses, vec!["Ownable"]);
+}
+
+// ── Fuzz safety — interface/trait/library (subtask 2f) ────────────────────────
+
+#[test]
+fn parse_item_interface_trait_library_malformed_never_panic() {
+    // Malformed inputs must return Err, never panic.
+    let malformed = [
+        "interface I {",
+        "interface I { fn",
+        "interface I { @onlyOwner }",
+        "trait T { state",
+        "library L { state { x: u128 } }",
+        "interface",
+        "trait",
+        "library",
+        "interface I",
+        "trait T",
+        "library L",
     ];
     for src in malformed {
         // Must not panic — Ok or Err are both acceptable outcomes.
