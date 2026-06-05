@@ -29,6 +29,8 @@
 
 pub mod ast;
 pub mod error;
+mod expr;
+mod stmt;
 mod ty;
 
 pub use ast::*;
@@ -73,7 +75,6 @@ pub(crate) struct Parser {
 
 // Cursor helpers are forward-declared here and wired into the sub-parsers
 // (expr.rs, stmt.rs, decl.rs, item.rs) in subtasks 2b-2f.
-#[allow(dead_code)]
 impl Parser {
     /// Create a new parser from a token stream.
     ///
@@ -104,6 +105,26 @@ impl Parser {
     pub(crate) fn peek_nth(&self, n: usize) -> &Token {
         let idx = (self.pos + n).min(self.tokens.len().saturating_sub(1));
         &self.tokens[idx].0
+    }
+
+    /// Peek at the Nth non-newline token from the current position.
+    ///
+    /// Used by expression-parser lookahead helpers where newlines are insignificant
+    /// (Go/JS rule: inside expression context, newlines do not terminate expressions).
+    pub(crate) fn peek_nth_non_newline(&self, n: usize) -> &Token {
+        let mut count = 0;
+        let mut idx = self.pos;
+        while idx < self.tokens.len() {
+            if !matches!(self.tokens[idx].0, Token::Newline) {
+                if count == n {
+                    return &self.tokens[idx].0;
+                }
+                count += 1;
+            }
+            idx += 1;
+        }
+        // Past end — return last token (Eof)
+        &self.tokens[self.tokens.len().saturating_sub(1)].0
     }
 
     /// Advance past the current token and return it with its span.
@@ -176,6 +197,7 @@ impl Parser {
     ///
     /// Stops at the next statement or declaration boundary keyword, or at EOF.
     /// Used after a parse error to continue parsing the rest of the file.
+    #[allow(dead_code)] // used in subtask 2c (stmt.rs) error recovery
     pub(crate) fn synchronize(&mut self) {
         while !self.at_end() {
             match self.peek() {
