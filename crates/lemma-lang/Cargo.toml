@@ -7,4 +7,5 @@ description = "Lem language: lexer, parser, type checker, safety analyzer (12 ru
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+bech32 = { workspace = true }
 lemma-core = { path = "../lemma-core" }
