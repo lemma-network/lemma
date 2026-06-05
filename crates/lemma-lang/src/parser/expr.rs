@@ -42,12 +42,12 @@ pub(crate) use span::{expr_span, MergeSpan};
 use crate::error::LangError;
 use crate::lexer::token::{Span, Token};
 
-use super::ast::{AssignOp, BinaryOp, Expr, Stmt};
+use super::ast::{AssignOp, BinaryOp, Expr};
 use super::Parser;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-// Methods are used by stmt.rs (2c) and decl.rs (2d); dead_code until those subtasks land.
+// TODO(2d): remove allow when decl.rs wires these methods (2c landed).
 #[allow(dead_code)]
 impl Parser {
     /// Parse a single expression (entry point for stmt.rs and decl.rs).
@@ -252,22 +252,8 @@ impl Parser {
             .min(self.tokens.len().saturating_sub(1));
         self.tokens[idx].1
     }
-
-    // ── parse_block stub ──────────────────────────────────────────────────────
-
-    /// Parse a `{ stmts }` block.
-    ///
-    /// This stub is replaced by the full implementation in subtask 2c (stmt.rs).
-    /// It is here so expr.rs compiles in isolation (lambda bodies, if-expr, match arms).
-    #[allow(dead_code)]
-    pub(crate) fn parse_block(&mut self) -> Result<Vec<Stmt>, LangError> {
-        self.expect(&Token::LBrace, "\"{\"")?;
-        self.skip_newlines();
-        // TODO(2c): parse statements here
-        self.expect(&Token::RBrace, "\"}\"")?;
-        Ok(Vec::new())
-    }
 }
+// parse_block is implemented in stmt.rs (subtask 2c).
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

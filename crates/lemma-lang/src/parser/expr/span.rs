@@ -43,7 +43,7 @@ pub(crate) fn expr_span(e: &Expr) -> Span {
 // ─── Span merge ───────────────────────────────────────────────────────────────
 
 /// Extension trait to merge two spans into one covering both.
-// Used by expr.rs internally and by tests; dead_code until stmt.rs/decl.rs land.
+// TODO(2d): remove allow when decl.rs wires these methods (2c landed).
 #[allow(dead_code)]
 pub(crate) trait MergeSpan {
     fn merge_with(self, other: Span) -> Span;

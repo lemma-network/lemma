@@ -10,7 +10,7 @@ use super::super::ast::{BinaryOp, CallArg, CallOpts, Expr, UnaryOp};
 use super::super::Parser;
 use super::span::{expr_span, MergeSpan};
 
-// Methods used by expr.rs; dead_code until stmt.rs (2c) and decl.rs (2d) land.
+// TODO(2d): remove allow when decl.rs wires these methods (2c landed).
 #[allow(dead_code)]
 impl Parser {
     // ── Precedence level: shift (left-associative) ────────────────────────────

@@ -9,7 +9,7 @@ use super::super::ast::{Expr, Literal, UnitKind};
 use super::super::Parser;
 use super::span::MergeSpan;
 
-// Methods used by expr.rs; dead_code until stmt.rs (2c) and decl.rs (2d) land.
+// TODO(2d): remove allow when decl.rs wires these methods (2c landed).
 #[allow(dead_code)]
 impl Parser {
     // ── Primary dispatch ──────────────────────────────────────────────────────

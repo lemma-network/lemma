@@ -12,8 +12,6 @@ use super::super::ast::{
 use super::super::Parser;
 use super::span::MergeSpan;
 
-// Methods used by expr.rs; dead_code until stmt.rs (2c) and decl.rs (2d) land.
-#[allow(dead_code)]
 impl Parser {
     // ── Match expression ──────────────────────────────────────────────────────
 
@@ -37,7 +35,9 @@ impl Parser {
     }
 
     /// Parse a single match arm: `pattern (if guard)? => body`.
-    fn parse_match_arm(&mut self) -> Result<MatchArm, LangError> {
+    ///
+    /// `pub(crate)` so `stmt/control.rs` can call it for `Stmt::Match`.
+    pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, LangError> {
         let start = self.peek_span();
         let pattern = self.parse_pattern()?;
         // Optional guard: `if expr`
@@ -73,10 +73,9 @@ impl Parser {
         self.skip_newlines();
         let start = self.peek_span();
         match self.peek().clone() {
-            Token::Underscore => {
-                self.advance();
-                Ok(Pattern::Wildcard(start))
-            }
+            // Anonymous struct destructure: `{ field, ... }` or `{ field: pat, ... }`.
+            // No type name prefix — used in `let { x, y } = point`.
+            Token::LBrace => self.parse_struct_pattern(String::new(), start),
             Token::DotDot => {
                 self.advance();
                 Ok(Pattern::Rest(start))
@@ -96,6 +95,13 @@ impl Parser {
             Token::LParen => self.parse_tuple_pattern(start),
             Token::Identifier(name) => {
                 self.advance();
+                // `_` is lexed as Identifier("_") — canonical wildcard path.
+                // Token::Underscore is never produced for a bare `_` because
+                // `is_ident_start('_')` is true and the scanner dispatches to
+                // `scan_identifier` before the operator scanner.
+                if name == "_" {
+                    return Ok(Pattern::Wildcard(start));
+                }
                 // Struct pattern: Name { fields }
                 if self.check(&Token::LBrace) {
                     return self.parse_struct_pattern(name, start);
@@ -128,16 +134,37 @@ impl Parser {
         Ok(Pattern::Tuple(pats, start.merge_with(end)))
     }
 
-    /// Parse `Name { field: pat, ... }` struct pattern.
+    /// Parse `Name { field: pat, ... }` or shorthand `Name { field, ... }` struct pattern.
+    ///
+    /// Supports two field forms:
+    /// - Long form: `{ field: pattern }` — explicit binding pattern
+    /// - Shorthand: `{ field }` — binds to same-name identifier (spec §6)
+    ///
+    /// Also supports inner rest `..` as the last field: `Point { x, .. }`.
     fn parse_struct_pattern(&mut self, name: String, start: Span) -> Result<Pattern, LangError> {
         self.expect(&Token::LBrace, "\"{\"")?;
         let mut fields = Vec::new();
         while !self.check(&Token::RBrace) && !self.at_end() {
-            let field_name = self.expect_identifier("field name")?;
-            self.expect(&Token::Colon, "\":\" in struct pattern")?;
-            let pat = self.parse_pattern()?;
+            self.skip_newlines();
+            // Rest pattern `..` inside struct: `Point { x, .. }` — must be last field.
+            if self.check(&Token::DotDot) {
+                self.advance(); // consume `..`
+                self.skip_newlines();
+                break;
+            }
+            let field_name = self.expect_identifier("field name in struct pattern")?;
+            let field_span = self.prev_span();
+            let pat = if self.advance_if(&Token::Colon) {
+                // Long form: { field: pattern }
+                self.parse_pattern()?
+            } else {
+                // Shorthand: { field } — binds to same-name identifier
+                Pattern::Ident(field_name.clone(), field_span)
+            };
             fields.push((field_name, pat));
+            self.skip_newlines();
             if !self.advance_if(&Token::Comma) {
+                self.skip_newlines();
                 break;
             }
         }

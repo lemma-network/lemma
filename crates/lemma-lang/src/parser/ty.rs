@@ -27,7 +27,7 @@ use crate::lexer::token::{Span, Token};
 use super::ast::Type;
 use super::Parser;
 
-// Type-parser methods are used by decl.rs/expr.rs in subtasks 2b-2d.
+// TODO(2d): remove allow when decl.rs wires these type-parser methods.
 #[allow(dead_code)]
 impl Parser {
     /// Parse a Lem type expression.

@@ -197,7 +197,6 @@ impl Parser {
     ///
     /// Stops at the next statement or declaration boundary keyword, or at EOF.
     /// Used after a parse error to continue parsing the rest of the file.
-    #[allow(dead_code)] // used in subtask 2c (stmt.rs) error recovery
     pub(crate) fn synchronize(&mut self) {
         while !self.at_end() {
             match self.peek() {
