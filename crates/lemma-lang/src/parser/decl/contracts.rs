@@ -16,6 +16,22 @@ use super::super::ast::{
 use super::super::expr::MergeSpan;
 use super::super::Parser;
 
+// Tokens that are valid after a collected annotation set inside a contract body.
+// Functions and events both accept leading annotations.
+fn is_annotatable_member(tok: &Token) -> bool {
+    matches!(
+        tok,
+        Token::Fn
+            | Token::Pub
+            | Token::View
+            | Token::Pure
+            | Token::Payable
+            | Token::External
+            | Token::Init
+            | Token::Event
+    )
+}
+
 impl Parser {
     // ── Contract ──────────────────────────────────────────────────────────────
 
@@ -93,22 +109,13 @@ impl Parser {
         let annotations = self.parse_annotations()?;
         self.skip_newlines();
 
-        // Annotations are only valid before function-producing members (fn, init).
-        // Error early if annotations were collected but the next token is not a function.
-        let next_is_fn = matches!(
-            self.peek(),
-            Token::Fn
-                | Token::Pub
-                | Token::View
-                | Token::Pure
-                | Token::Payable
-                | Token::External
-                | Token::Init
-        );
-        if !annotations.is_empty() && !next_is_fn {
+        // Annotations are only valid before function-producing members (fn, init)
+        // and event declarations (which accept @anonymous).
+        // Error early if annotations were collected but the next token is not annotatable.
+        if !annotations.is_empty() && !is_annotatable_member(self.peek()) {
             return Err(self.error(format!(
                 "annotations are not permitted before {:?}; \
-                 annotations are only valid before function declarations",
+                 annotations are only valid before function or event declarations",
                 self.peek()
             )));
         }
@@ -127,7 +134,11 @@ impl Parser {
             Token::Receive => Ok(ContractMember::Receive(self.parse_receive()?)),
             Token::Fallback => Ok(ContractMember::Fallback(self.parse_fallback()?)),
             Token::Modifier => Ok(ContractMember::Modifier(self.parse_modifier_def()?)),
-            // Struct/Enum/Event/Error inside contract — handled in 2e
+            // User-type declarations inside contract body (subtask 2e)
+            Token::Struct => Ok(ContractMember::Struct(self.parse_struct_decl()?)),
+            Token::Enum => Ok(ContractMember::Enum(self.parse_enum_decl()?)),
+            Token::Event => Ok(ContractMember::Event(self.parse_event_decl(annotations)?)),
+            Token::Error => Ok(ContractMember::ErrorDecl(self.parse_error_decl()?)),
             tok => Err(self.error_expected(
                 vec!["contract member".into()],
                 format!("unexpected contract member token: {tok:?}"),

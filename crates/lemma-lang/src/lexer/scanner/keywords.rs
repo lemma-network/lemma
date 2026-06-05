@@ -182,6 +182,7 @@ fn map_keyword(word: &str) -> Token {
         "receive" => Token::Receive,
         "fallback" => Token::Fallback,
         "immutable" => Token::Immutable,
+        "event" => Token::Event,
         // Type keywords
         "u8" => Token::U8,
         "u16" => Token::U16,

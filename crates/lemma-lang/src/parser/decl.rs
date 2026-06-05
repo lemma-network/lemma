@@ -97,6 +97,10 @@ impl Parser {
                 let f = self.parse_function(annotations)?;
                 Ok(Item::Function(f))
             }
+            // User-type declarations at top level (subtask 2e)
+            Token::Struct => Ok(Item::Struct(self.parse_struct_decl()?)),
+            Token::Enum => Ok(Item::Enum(self.parse_enum_decl()?)),
+            Token::Error => Ok(Item::ErrorDecl(self.parse_error_decl()?)),
             tok => Err(self.error_expected(
                 vec!["declaration".into()],
                 format!("expected top-level declaration, got {tok:?}"),

@@ -77,6 +77,11 @@ pub struct Enum {
     pub generic_params: Vec<GenericParam>,
     /// Enum variants.
     pub variants: Vec<EnumVariant>,
+    /// Methods defined at the enum body level (not per-variant).
+    ///
+    /// Per spec §10, methods appear inside the enum body alongside variants,
+    /// not nested inside individual variants.
+    pub methods: Vec<Function>,
     /// Source location.
     pub span: Span,
 }
@@ -87,11 +92,12 @@ pub struct EnumVariant {
     /// Variant name.
     pub name: String,
     /// Tuple-style fields (e.g. `Variant(u128, Address)`).
+    ///
+    /// Named-field variants use the declared name; positional variants use
+    /// synthetic names `"_0"`, `"_1"`, … (assigned by the parser).
     pub fields: Vec<FieldDecl>,
     /// Optional discriminant value (e.g. `= 42`).
     pub discriminant: Option<Expr>,
-    /// Optional methods defined on this variant.
-    pub methods: Vec<Function>,
     /// Source location.
     pub span: Span,
 }
@@ -107,6 +113,12 @@ pub struct Event {
     pub anonymous: bool,
     /// Event fields.
     pub fields: Vec<EventField>,
+    /// Computed event fields (methods) — e.g. `fn priceImpact() -> decimal(4) { ... }`.
+    ///
+    /// Per spec §15, an event body may contain inline `fn` declarations alongside
+    /// regular fields. These are "computed fields" that derive a value from the
+    /// event's data at query time.
+    pub methods: Vec<Function>,
     /// Source location.
     pub span: Span,
 }

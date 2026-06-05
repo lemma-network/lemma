@@ -165,6 +165,8 @@ pub enum Token {
     Fallback,
     /// `immutable` (for `immutable NAME: T`)
     Immutable,
+    /// `event` (for `event Foo { ... }`)
+    Event,
 
     // ── Type keywords ─────────────────────────────────────────────────────────
     /// `u8`

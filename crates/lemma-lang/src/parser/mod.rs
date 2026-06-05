@@ -31,6 +31,7 @@ pub mod ast;
 mod decl;
 pub mod error;
 mod expr;
+mod item;
 mod stmt;
 mod ty;
 

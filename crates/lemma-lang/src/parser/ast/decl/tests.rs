@@ -161,7 +161,6 @@ fn enum_variant_constructs() {
         name: "Open".to_string(),
         fields: vec![],
         discriminant: None,
-        methods: vec![],
         span: span(),
     };
     assert_eq!(v.name, "Open");
@@ -275,6 +274,7 @@ fn contract_member_all_variants_construct() {
             name: "Ev".to_string(),
             anonymous: false,
             fields: vec![],
+            methods: vec![],
             span: span(),
         }),
         ContractMember::Modifier(ModifierDef {
@@ -303,6 +303,7 @@ fn contract_member_all_variants_construct() {
             name: "E".to_string(),
             generic_params: vec![],
             variants: vec![],
+            methods: vec![],
             span: span(),
         }),
         ContractMember::ErrorDecl(ErrorDecl {
@@ -330,6 +331,7 @@ fn interface_member_variants_construct() {
             name: "Transfer".to_string(),
             anonymous: false,
             fields: vec![],
+            methods: vec![],
             span: span(),
         }),
     ];

@@ -773,24 +773,22 @@ fn enum_constructs() {
                 name: "Open".to_string(),
                 fields: vec![],
                 discriminant: None,
-                methods: vec![],
                 span: span(),
             },
             EnumVariant {
                 name: "Filled".to_string(),
                 fields: vec![],
                 discriminant: None,
-                methods: vec![],
                 span: span(),
             },
             EnumVariant {
                 name: "Cancelled".to_string(),
                 fields: vec![],
                 discriminant: None,
-                methods: vec![],
                 span: span(),
             },
         ],
+        methods: vec![],
         span: span(),
     };
     assert_eq!(e.variants.len(), 3);
@@ -826,6 +824,7 @@ fn event_constructs() {
                 span: span(),
             },
         ],
+        methods: vec![],
         span: span(),
     };
     assert_eq!(ev.fields.len(), 3);
