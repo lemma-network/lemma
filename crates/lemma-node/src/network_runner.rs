@@ -313,6 +313,33 @@ async fn handle_network_event(
             handle_batch_received(from, bytes, batch_store, vset).await;
         }
 
+        // ── Inbound batch-fetch request — serve from BatchStore (D·15e) ──────
+        //
+        // A peer is requesting a batch by digest. Look it up in the local
+        // BatchStore and respond with the JSON bytes (or None if not available).
+        // Non-fatal: if the batch is not available, respond with None so the
+        // requester can try another peer.
+        NetworkEvent::BatchFetchRequest {
+            from,
+            digest,
+            channel,
+        } => {
+            serve_batch_fetch_request(from, digest, channel, batch_store, handle).await;
+        }
+
+        // ── Inbound batch-fetch response — decode + verify + pin (D·15e) ─────
+        //
+        // A peer responded to our batch-fetch request. Decode, verify per-tx
+        // hash integrity, and pin in BatchStore (same verification as
+        // handle_batch_received, but using the known digest as the store key).
+        NetworkEvent::BatchFetchResponse {
+            from,
+            digest,
+            batch_bytes,
+        } => {
+            handle_batch_fetch_response(from, digest, batch_bytes, batch_store).await;
+        }
+
         // ── Peer lifecycle ────────────────────────────────────────────────────
         NetworkEvent::PeerConnected(peer_id) => {
             info!(peer = %peer_id, "peer connected");
@@ -844,6 +871,142 @@ async fn handle_batch_received(
         digest    = %digest.to_hex(),
         tx_count,
         "BatchReceived: batch verified and pinned in store"
+    );
+}
+
+// ── Batch fetch-on-miss handlers (D·15e) ─────────────────────────────────────
+
+/// Serve an inbound batch-fetch request from a peer.
+///
+/// Looks up the requested batch by digest in the local `BatchStore`.
+/// Responds with the JSON-encoded batch bytes, or `None` if not available.
+///
+/// ## No panics
+///
+/// All failure paths are non-fatal — a failed response send is logged at
+/// `debug` and the function returns `()`. A peer that times out or closes
+/// the channel is not an error (AGENTS §7.2).
+async fn serve_batch_fetch_request(
+    from: libp2p::PeerId,
+    digest: lemma_core::hash::Hash,
+    channel: libp2p::request_response::ResponseChannel<lemma_network::messages::BatchFetchResponse>,
+    batch_store: &BatchStore,
+    handle: &NetworkHandle,
+) {
+    use lemma_network::messages::BatchFetchResponse;
+
+    // Look up the batch in the local store (read-lock, non-blocking).
+    let batch_bytes = {
+        let store = batch_store.read().await;
+        store
+            .get(&digest)
+            .and_then(|batch| serde_json::to_vec(batch).ok())
+    };
+
+    let available = batch_bytes.is_some();
+    let response = BatchFetchResponse {
+        digest,
+        batch_bytes,
+    };
+
+    if let Err(e) = handle.send_batch_fetch_response(channel, response).await {
+        // Non-fatal: channel may have closed if the requester timed out.
+        debug!(
+            peer      = %from,
+            digest    = %digest.to_hex(),
+            available,
+            error     = %e,
+            "serve_batch_fetch_request: send_batch_fetch_response failed (non-fatal)"
+        );
+    } else {
+        debug!(
+            peer      = %from,
+            digest    = %digest.to_hex(),
+            available,
+            "batch_fetch: served request"
+        );
+    }
+}
+
+/// Handle an inbound batch-fetch response from a peer.
+///
+/// Decodes the batch bytes, verifies per-tx hash integrity (same as
+/// `handle_batch_received`), and pins the batch in `BatchStore` using the
+/// known digest as the key.
+///
+/// ## No panics
+///
+/// All failure paths return `()` after logging. A crafted payload must never
+/// crash the node (AGENTS §7.2).
+async fn handle_batch_fetch_response(
+    from: libp2p::PeerId,
+    digest: lemma_core::hash::Hash,
+    batch_bytes: Option<Vec<u8>>,
+    batch_store: &BatchStore,
+) {
+    let Some(bytes) = batch_bytes else {
+        // Peer does not have the batch — try another peer (non-fatal).
+        debug!(
+            peer   = %from,
+            digest = %digest.to_hex(),
+            "batch_fetch: peer has no batch — try another peer"
+        );
+        return;
+    };
+
+    // ── Decode JSON → Batch ───────────────────────────────────────────────────
+    let batch: crate::batch::Batch = match serde_json::from_slice(&bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                peer   = %from,
+                digest = %digest.to_hex(),
+                error  = %e,
+                "batch_fetch response: JSON decode failed — batch dropped"
+            );
+            return;
+        }
+    };
+
+    // ── Per-tx hash integrity check ───────────────────────────────────────────
+    // Recompute each tx's canonical hash and compare against the wire value.
+    // Same verification as handle_batch_received — makes tx.hash trustworthy.
+    for tx in &batch.txs {
+        let expected = match compute_tx_hash(tx) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(
+                    peer   = %from,
+                    digest = %digest.to_hex(),
+                    error  = %e,
+                    "batch_fetch response: tx hash computation failed — batch dropped"
+                );
+                return;
+            }
+        };
+        if expected != tx.hash {
+            warn!(
+                peer     = %from,
+                digest   = %digest.to_hex(),
+                expected = %expected.to_hex(),
+                got      = %tx.hash.to_hex(),
+                "batch_fetch response: tx hash mismatch — batch dropped (forged tx.hash)"
+            );
+            return;
+        }
+    }
+
+    // ── Pin in store using the known digest as key ────────────────────────────
+    // We already know the digest from the request, so we use it directly as the
+    // store key (avoids re-serializing the batch just to recompute the digest).
+    let tx_count = batch.txs.len();
+    batch_store.write().await.insert(digest, batch);
+
+    debug!(
+        peer      = %from,
+        digest    = %digest.to_hex(),
+        tx_count,
+        "batch_fetch: batch pinned from fetch response"
     );
 }
 

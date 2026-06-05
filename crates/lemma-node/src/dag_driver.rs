@@ -588,12 +588,27 @@ async fn process_surge_output(
     // Process commits: resolve txs from sub-DAG, execute, build chain blocks.
     let chain = ChainStore::new(db);
     for commit in &output.commits {
-        // Resolve txs from the committed sub-DAG (C·Step 14).
+        // Resolve txs from the committed sub-DAG (C·Step 14 + D·15e).
         // Takes a read-lock snapshot of the store (non-blocking).
-        let txs: Vec<Transaction> = {
+        // `missing` carries (digest, author) pairs for batches not in the local
+        // store — logged here; fetch-on-miss via request-response is best-effort
+        // (peer selection requires validator-address mapping, deferred to Phase 3).
+        let (txs, missing): (Vec<Transaction>, Vec<_>) = {
             let store = batch_store.read().await;
             resolve_committed_txs(commit, driver.dag(), &store)
         };
+
+        // Log availability misses. The block is produced with available txs.
+        // Phase 3 will add peer-selection + request_batch_fetch trigger here.
+        for (digest, author) in &missing {
+            warn!(
+                commit_index = commit.index,
+                digest       = %digest.to_hex(),
+                author       = %author,
+                "dag_driver: batch availability miss at commit time \
+                 (fetch-on-miss infrastructure ready; peer selection deferred to Phase 3)"
+            );
+        }
 
         match build_block_from_commit(commit, &chain, cfg.proposer, Arc::clone(db), txs, keypair) {
             Ok((block, hash)) => {

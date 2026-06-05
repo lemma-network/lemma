@@ -81,6 +81,16 @@ pub const TOPIC_BATCH: &str = "lemma/batch/1";
 /// This is the partition-heal path (12-NETWORK_SYNC_SPEC §2.2, 07 §8).
 pub const PROTOCOL_SYNC: &str = "/lemma/sync/1";
 
+/// request-response protocol — batch fetch-on-miss pull (`/lemma/batch-fetch/1`).
+///
+/// Leading slash: libp2p multistream-select convention (see module-level doc).
+///
+/// Used when a validator's `resolve_block_payload` detects a `TxBatchRef` not
+/// pinned locally (availability miss). The requesting node pulls the batch bytes
+/// from a peer that has it (D·Step 15e). The responding peer serves the batch
+/// bytes or `None` if not available (e.g. GC'd or never stored).
+pub const PROTOCOL_BATCH_FETCH: &str = "/lemma/batch-fetch/1";
+
 /// request-response protocol — fast state-sync (v2, trie chunking).
 ///
 /// Leading slash: libp2p multistream-select convention (see module-level doc).

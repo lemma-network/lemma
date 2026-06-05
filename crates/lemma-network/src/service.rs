@@ -53,7 +53,7 @@ use crate::{
     discovery,
     error::NetworkError,
     gossip::{self, GossipTopics},
-    messages::{GossipMessage, RangeRequest, RangeResponse},
+    messages::{BatchFetchRequest, BatchFetchResponse, GossipMessage, RangeRequest, RangeResponse},
     peer::{PeerEvent, PeerTable},
 };
 
@@ -138,6 +138,28 @@ pub enum NetworkCommand {
         channel: request_response::ResponseChannel<RangeResponse>,
         /// The blocks to send (already validated against the request bounds).
         response: RangeResponse,
+    },
+
+    /// Request a specific batch from a peer (availability pull, D·Step 15e).
+    ///
+    /// Sent when `resolve_block_payload` detects a `TxBatchRef` not pinned
+    /// locally. The response arrives as [`NetworkEvent::BatchFetchResponse`].
+    RequestBatchFetch {
+        /// Target peer to request the batch from.
+        peer: PeerId,
+        /// Blake3 digest of the requested batch.
+        digest: lemma_core::hash::Hash,
+    },
+
+    /// Serve a batch-fetch response through an open request-response channel.
+    ///
+    /// The channel comes from a [`NetworkEvent::BatchFetchRequest`]; the node
+    /// layer looks up the batch in `BatchStore` and sends the response here.
+    SendBatchFetchResponse {
+        /// The response channel from the inbound request.
+        channel: request_response::ResponseChannel<BatchFetchResponse>,
+        /// The response to send (batch bytes or None if not available).
+        response: BatchFetchResponse,
     },
 
     /// Dial an address (bootstrap or peer discovered out-of-band).
@@ -231,6 +253,33 @@ pub enum NetworkEvent {
         from: PeerId,
         /// Raw JSON-serialized `Batch` bytes.
         bytes: Vec<u8>,
+    },
+
+    /// An inbound batch-fetch request arrived — node layer must serve it.
+    ///
+    /// The node layer looks up the batch in `BatchStore` and calls
+    /// [`NetworkCommand::SendBatchFetchResponse`] to reply. Non-fatal if the
+    /// batch is not available — respond with `batch_bytes: None`.
+    BatchFetchRequest {
+        /// The peer that sent the request.
+        from: PeerId,
+        /// Blake3 digest of the requested batch.
+        digest: lemma_core::hash::Hash,
+        /// The response channel — must be consumed via `SendBatchFetchResponse`.
+        channel: request_response::ResponseChannel<BatchFetchResponse>,
+    },
+
+    /// A batch-fetch response arrived from a peer (D·Step 15e).
+    ///
+    /// `batch_bytes` is `None` if the peer does not have the batch.
+    /// The node layer decodes, verifies, and pins the batch in `BatchStore`.
+    BatchFetchResponse {
+        /// The peer that served the response.
+        from: PeerId,
+        /// Blake3 digest of the requested batch (echoed from request).
+        digest: lemma_core::hash::Hash,
+        /// The batch bytes (JSON-encoded `Batch`), or `None` if not available.
+        batch_bytes: Option<Vec<u8>>,
     },
 
     /// A connection to a new peer was established.
@@ -355,6 +404,49 @@ impl NetworkHandle {
         response: crate::messages::RangeResponse,
     ) -> Result<(), NetworkError> {
         self.send(NetworkCommand::SendRangeResponse { channel, response })
+            .await
+    }
+
+    /// Request a specific batch from a peer (availability pull, D·Step 15e).
+    ///
+    /// The response arrives as [`NetworkEvent::BatchFetchResponse`]. Non-fatal
+    /// if the peer does not have the batch — `batch_bytes` will be `None`.
+    ///
+    /// ## Phase 3 note (open wire-up — tracked in living-notes Technical Debt)
+    ///
+    /// This method has zero production call sites in Phase 2. `process_surge_output`
+    /// records availability misses as `(digest, author: Address)`, but triggering
+    /// a fetch requires an `Address → PeerId` mapping (validator-set ↔ peer-table
+    /// wiring) that is deferred to Phase 3. The full transport + verification is
+    /// built; only the peer-selection wire is missing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn request_batch_fetch(
+        &self,
+        peer: PeerId,
+        digest: lemma_core::hash::Hash,
+    ) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::RequestBatchFetch { peer, digest })
+            .await
+    }
+
+    /// Send a batch-fetch response through an open request-response channel.
+    ///
+    /// The `channel` comes from a [`NetworkEvent::BatchFetchRequest`] event.
+    /// The channel is consumed — calling this more than once for the same
+    /// request is a no-op on the second call (the channel will be closed).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    pub async fn send_batch_fetch_response(
+        &self,
+        channel: request_response::ResponseChannel<BatchFetchResponse>,
+        response: BatchFetchResponse,
+    ) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::SendBatchFetchResponse { channel, response })
             .await
     }
 
@@ -597,6 +689,31 @@ impl NetworkService {
 
             LemmaBehaviourEvent::Sync(_) => {}
 
+            // ── Batch fetch-on-miss (request-response) ────────────────────────
+            LemmaBehaviourEvent::BatchFetch(request_response::Event::Message {
+                peer,
+                message,
+                ..
+            }) => {
+                self.handle_batch_fetch_message(peer, message);
+            }
+
+            LemmaBehaviourEvent::BatchFetch(request_response::Event::OutboundFailure {
+                peer,
+                error,
+                ..
+            }) => {
+                // Non-fatal: batch fetch failure means the peer doesn't have the
+                // batch or timed out. The requester should try another peer.
+                tracing::debug!(
+                    peer = %peer,
+                    error = ?error,
+                    "batch_fetch outbound failure (non-fatal — try another peer)"
+                );
+            }
+
+            LemmaBehaviourEvent::BatchFetch(_) => {}
+
             // ── Kademlia ──────────────────────────────────────────────────────
             LemmaBehaviourEvent::Kademlia(kad_event) => {
                 discovery::handle_kademlia_event(&kad_event, &mut self.peers);
@@ -687,6 +804,55 @@ impl NetworkService {
                 );
                 self.peers.record_event(&from, PeerEvent::InvalidMessage);
                 self.apply_peer_score(&from);
+            }
+        }
+    }
+
+    // ── Batch fetch message handling ──────────────────────────────────────────
+
+    /// Handle an inbound or outbound batch-fetch request-response message.
+    ///
+    /// - **Inbound request**: emit [`NetworkEvent::BatchFetchRequest`] so the
+    ///   node layer can look up the batch in `BatchStore` and respond.
+    /// - **Inbound response**: validate size, then emit
+    ///   [`NetworkEvent::BatchFetchResponse`] for the node layer to decode and pin.
+    fn handle_batch_fetch_message(
+        &mut self,
+        from: PeerId,
+        message: request_response::Message<BatchFetchRequest, BatchFetchResponse>,
+    ) {
+        match message {
+            request_response::Message::Request {
+                request, channel, ..
+            } => {
+                // Emit to node layer — it will look up the batch and respond.
+                self.emit(NetworkEvent::BatchFetchRequest {
+                    from,
+                    digest: request.digest,
+                    channel,
+                });
+            }
+
+            request_response::Message::Response { response, .. } => {
+                // Validate response size before emitting (DoS guard — AGENTS §15.1).
+                if let Some(ref bytes) = response.batch_bytes {
+                    if bytes.len() > BatchFetchResponse::MAX_BYTES {
+                        tracing::warn!(
+                            peer = %from,
+                            size = bytes.len(),
+                            max  = BatchFetchResponse::MAX_BYTES,
+                            "batch_fetch response too large — dropped (AGENTS §15.1)"
+                        );
+                        self.peers.record_event(&from, PeerEvent::InvalidMessage);
+                        self.apply_peer_score(&from);
+                        return;
+                    }
+                }
+                self.emit(NetworkEvent::BatchFetchResponse {
+                    from,
+                    digest: response.digest,
+                    batch_bytes: response.batch_bytes,
+                });
             }
         }
     }
@@ -831,6 +997,25 @@ impl NetworkService {
                     .send_response(channel, response)
                 {
                     tracing::warn!(error = ?e, "SendRangeResponse failed (channel may have closed)");
+                }
+            }
+
+            NetworkCommand::RequestBatchFetch { peer, digest } => {
+                self.swarm
+                    .behaviour_mut()
+                    .batch_fetch
+                    .send_request(&peer, BatchFetchRequest { digest });
+            }
+
+            NetworkCommand::SendBatchFetchResponse { channel, response } => {
+                if let Err(e) = self
+                    .swarm
+                    .behaviour_mut()
+                    .batch_fetch
+                    .send_response(channel, response)
+                {
+                    // Non-fatal: channel may have closed if the requester timed out.
+                    tracing::debug!(error = ?e, "SendBatchFetchResponse failed (channel may have closed — non-fatal)");
                 }
             }
 

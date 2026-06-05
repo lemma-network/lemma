@@ -255,11 +255,13 @@ fn resolve_block_payload_returns_txs_for_pinned_ref() {
     let mut out = Vec::new();
 
     // Act
-    resolve_block_payload(&block, &store, &mut seen, &mut out);
+    let mut missing = Vec::new();
+    resolve_block_payload(&block, &store, &mut seen, &mut out, &mut missing);
 
     // Assert
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].hash, tx.hash);
+    assert!(missing.is_empty(), "no missing batches for pinned ref");
 }
 
 #[test]
@@ -268,18 +270,25 @@ fn resolve_block_payload_skips_unpinned_ref() {
     let kp = KeyPair::generate().expect("keygen");
     let batch = Batch::new(addr(1), vec![make_tx(&kp, 0)]);
     let batch_ref = batch.to_ref().unwrap();
+    let expected_digest = batch_ref.digest;
     // Note: batch NOT inserted into store.
     let store: HashMap<Hash, Batch> = HashMap::new();
 
     let block = make_dag_block(0, addr(1), vec![batch_ref]);
     let mut seen = HashSet::new();
     let mut out = Vec::new();
+    let mut missing = Vec::new();
 
     // Act
-    resolve_block_payload(&block, &store, &mut seen, &mut out);
+    resolve_block_payload(&block, &store, &mut seen, &mut out, &mut missing);
 
-    // Assert: skipped, no panic
+    // Assert: skipped, no panic; missing recorded
     assert!(out.is_empty(), "unpinned ref must be skipped gracefully");
+    assert_eq!(missing.len(), 1, "unpinned ref must be recorded in missing");
+    assert_eq!(
+        missing[0].0, expected_digest,
+        "missing digest must match the unpinned ref"
+    );
 }
 
 #[test]
@@ -300,13 +309,15 @@ fn resolve_block_payload_deduplicates_within_single_block() {
     let block = make_dag_block(0, addr(1), vec![r0, r1]);
     let mut seen = HashSet::new();
     let mut out = Vec::new();
+    let mut missing = Vec::new();
 
     // Act
-    resolve_block_payload(&block, &store, &mut seen, &mut out);
+    resolve_block_payload(&block, &store, &mut seen, &mut out, &mut missing);
 
     // Assert: tx appears exactly once
     assert_eq!(out.len(), 1, "duplicate tx must appear exactly once");
     assert_eq!(out[0].hash, tx.hash);
+    assert!(missing.is_empty(), "no missing batches for pinned refs");
 }
 
 // ── resolve_committed_txs ─────────────────────────────────────────────────────
@@ -336,7 +347,7 @@ fn resolve_committed_txs_returns_all_txs_in_subdag_order() {
     let commit = make_commit(vec![block_ref]);
 
     // Act
-    let txs = resolve_committed_txs(&commit, &dag, &store);
+    let (txs, missing) = resolve_committed_txs(&commit, &dag, &store);
 
     // Assert: both txs present, in batch-insertion order
     assert_eq!(txs.len(), 2);
@@ -345,6 +356,7 @@ fn resolve_committed_txs_returns_all_txs_in_subdag_order() {
         "tx0 must come first (insertion order)"
     );
     assert_eq!(txs[1].hash, tx1.hash, "tx1 must come second");
+    assert!(missing.is_empty(), "no missing batches for pinned refs");
 }
 
 #[test]
@@ -386,7 +398,7 @@ fn resolve_committed_txs_deduplicates_across_blocks() {
     let commit = make_commit(vec![ref_v1, ref_v2]);
 
     // Act
-    let txs = resolve_committed_txs(&commit, &dag, &store);
+    let (txs, missing) = resolve_committed_txs(&commit, &dag, &store);
 
     // Assert: exactly one occurrence; first occurrence (from addr(1)) wins.
     assert_eq!(
@@ -395,6 +407,7 @@ fn resolve_committed_txs_deduplicates_across_blocks() {
         "same tx across two validators must be deduped"
     );
     assert_eq!(txs[0].hash, tx.hash);
+    assert!(missing.is_empty(), "no missing batches for pinned refs");
 }
 
 #[test]
@@ -409,10 +422,11 @@ fn resolve_committed_txs_empty_payload_produces_empty_list() {
     let commit = make_commit(vec![block_ref]);
 
     // Act
-    let txs = resolve_committed_txs(&commit, &dag, &store);
+    let (txs, missing) = resolve_committed_txs(&commit, &dag, &store);
 
     // Assert
     assert!(txs.is_empty(), "empty payload → zero txs");
+    assert!(missing.is_empty(), "no missing batches for empty payload");
 }
 
 #[test]
@@ -424,12 +438,16 @@ fn resolve_committed_txs_skips_missing_dag_block() {
     let store: HashMap<Hash, Batch> = HashMap::new();
 
     // Act
-    let txs = resolve_committed_txs(&commit, &dag, &store);
+    let (txs, missing) = resolve_committed_txs(&commit, &dag, &store);
 
     // Assert: skipped, no panic
     assert!(
         txs.is_empty(),
         "missing DagBlock must be skipped gracefully"
+    );
+    assert!(
+        missing.is_empty(),
+        "missing DagBlock produces no batch-miss entries (block not found)"
     );
 }
 
@@ -450,12 +468,17 @@ fn resolve_committed_txs_skips_availability_miss() {
     let commit = make_commit(vec![block_ref]);
 
     // Act
-    let txs = resolve_committed_txs(&commit, &dag, &store);
+    let (txs, missing) = resolve_committed_txs(&commit, &dag, &store);
 
-    // Assert: skipped, no panic
+    // Assert: skipped, no panic; missing recorded
     assert!(
         txs.is_empty(),
         "availability miss must be skipped gracefully"
+    );
+    assert_eq!(
+        missing.len(),
+        1,
+        "availability miss must be recorded in missing list"
     );
 }
 
@@ -477,12 +500,17 @@ fn resolve_committed_txs_is_deterministic() {
     let commit = make_commit(vec![block_ref]);
 
     // Act: call twice with same inputs
-    let txs1 = resolve_committed_txs(&commit, &dag, &store);
-    let txs2 = resolve_committed_txs(&commit, &dag, &store);
+    let (txs1, missing1) = resolve_committed_txs(&commit, &dag, &store);
+    let (txs2, missing2) = resolve_committed_txs(&commit, &dag, &store);
 
     // Assert: identical outputs
     assert_eq!(txs1.len(), txs2.len());
     for (t1, t2) in txs1.iter().zip(txs2.iter()) {
         assert_eq!(t1.hash, t2.hash, "resolve must be deterministic");
     }
+    assert_eq!(
+        missing1.len(),
+        missing2.len(),
+        "missing list must be deterministic"
+    );
 }

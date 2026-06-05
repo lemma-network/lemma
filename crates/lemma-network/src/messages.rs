@@ -2,16 +2,19 @@
 //!
 //! Two categories of messages carry data between peers:
 //!
-//! ## Request-response (CBOR, `/lemma/sync/1`)
+//! ## Request-response (CBOR, `/lemma/sync/1` · `/lemma/batch-fetch/1`)
 //!
-//! Targeted pull requests for missing block ranges. The CBOR codec is handled
-//! automatically by `libp2p::request_response::cbor::Behaviour` — these types
-//! only need `Serialize + Deserialize`.
+//! Targeted pull requests for missing block ranges and missing batches. The
+//! CBOR codec is handled automatically by
+//! `libp2p::request_response::cbor::Behaviour` — these types only need
+//! `Serialize + Deserialize`.
 //!
 //! | Type | Direction | Protocol |
 //! |------|-----------|----------|
 //! | [`RangeRequest`] | requester → responder | `/lemma/sync/1` |
 //! | [`RangeResponse`] | responder → requester | `/lemma/sync/1` |
+//! | [`BatchFetchRequest`] | requester → responder | `/lemma/batch-fetch/1` |
+//! | [`BatchFetchResponse`] | responder → requester | `/lemma/batch-fetch/1` |
 //!
 //! ## Gossipsub (bincode, `lemma/blocks/1` · `lemma/tx/1` · `lemma/dag/1` · `lemma/batch/1`)
 //!
@@ -298,6 +301,42 @@ impl RangeResponse {
         }
         Ok(())
     }
+}
+
+// ── BatchFetchRequest / BatchFetchResponse ────────────────────────────────────
+
+/// Pull a specific batch by digest from a peer (`/lemma/batch-fetch/1`).
+///
+/// Used when a validator receives a committed `DagBlock` that references a
+/// [`TxBatchRef`] whose batch was not pinned locally (availability miss).
+/// The responding peer serves the batch bytes or `None` if not available.
+///
+/// [`TxBatchRef`]: lemma_core::hash::Hash
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchFetchRequest {
+    /// Blake3 digest of the requested batch.
+    pub digest: lemma_core::hash::Hash,
+}
+
+/// Response to a [`BatchFetchRequest`].
+///
+/// `batch_bytes` is `None` if the responding peer does not have the batch
+/// (e.g. it has already been GC'd or was never stored). In that case the
+/// requester should try another peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchFetchResponse {
+    /// The requested digest (echoed for correlation).
+    pub digest: lemma_core::hash::Hash,
+    /// The batch bytes (JSON-encoded `Batch`), or `None` if not available.
+    pub batch_bytes: Option<Vec<u8>>,
+}
+
+impl BatchFetchResponse {
+    /// Maximum response size (same as gossip: 1 MiB).
+    ///
+    /// A batch approaching this limit is already pathological under gas limits.
+    /// Responses exceeding this are rejected before decoding (AGENTS §15.1).
+    pub const MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 }
 
 // ── GossipMessage ─────────────────────────────────────────────────────────────

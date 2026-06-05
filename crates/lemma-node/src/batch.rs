@@ -48,16 +48,12 @@
 //!   dedup key and prevents the consensus-divergence vector where two honest
 //!   nodes resolve the same committed sub-DAG to different tx lists because a
 //!   malicious peer forged `tx.hash` fields.
-//! - **Signature verification**: deferred to D·Step 15 (multi-validator testnet).
-//!   Per-tx Ed25519/ML-DSA-65 verification requires the sender's public key;
-//!   gossiped batches bypass `Mempool::admit` and do not yet carry the sender
-//!   pubkey on the wire (same constraint as `residual-2`).
-//!
-//! // SECURITY GATE (D·Step 15): before real validator peers are admitted,
-//! // `handle_batch_received` MUST add full per-tx signature verification
-//! // (re-validate each tx through `Mempool::admit` or an equivalent path that
-//! // carries `sender_pubkey`). Without it, a peer can inject unsigned or
-//! // incorrectly-signed txs that would pass execution if they have valid hashes.
+//! - **Signature verification**: ✅ **SECURITY GATE CLOSED (D·Step 15d)**.
+//!   `handle_batch_received` in `network_runner.rs` now:
+//!   (a) rejects any `Signature::Unsigned` tx in the batch (whole batch dropped),
+//!   (b) for vset senders: full Ed25519+ML-DSA-65 sig verify via ConsensusKey→PublicKey,
+//!   (c) for non-vset senders: hash integrity sufficient (Phase 2 documented limitation).
+//!   See `network_runner.rs:handle_batch_received` + D·Step 15d commit.
 //!
 //! ## Batch availability (Rule 7, spec §2.1)
 //!
@@ -229,9 +225,8 @@ pub fn new_batch_store() -> BatchStore {
 ///    - If not found (GC'ed or suspended): log a warning and skip.
 /// 3. For each [`TxBatchRef`] in `block.payload`:
 ///    - Look up the [`Batch`] by `ref.digest` in `store`.
-///    - If not found (availability miss): log a warning and skip (deferred
-///      fetch path — D·Step 15). This is spec Rule 7 unavailability; the
-///      block is still produced with the available txs.
+///    - If not found (availability miss): log a warning, record the miss in
+///      `missing`, and skip. The block is still produced with available txs.
 /// 4. Extend the output with the batch's `txs`, deduplicating by tx hash
 ///    (first occurrence wins — deterministic because the sub-DAG order is
 ///    deterministic).
@@ -249,15 +244,25 @@ pub fn new_batch_store() -> BatchStore {
 /// - `dag` — the local DAG state (from `SurgeDriver::dag()`).
 /// - `store` — the current batch pin store snapshot (caller holds read-lock).
 ///
+/// ## Returns
+///
+/// `(txs, missing)` where:
+/// - `txs` — the deduplicated, ordered transaction list.
+/// - `missing` — `(batch_digest, batch_author)` pairs for batches not found
+///   in the local store. The caller may use these to trigger fetch-on-miss
+///   requests to peers (D·Step 15e). Best-effort: the block is produced with
+///   the available txs regardless.
+///
 /// [`Linearizer`]: lemma_consensus::pulse::linearizer::Linearizer
 /// [`DagBlockRef`]: lemma_consensus::dag::block::DagBlockRef
 pub fn resolve_committed_txs(
     commit: &Commit,
     dag: &lemma_consensus::dag::graph::Dag,
     store: &HashMap<Hash, Batch>,
-) -> Vec<Transaction> {
+) -> (Vec<Transaction>, Vec<(Hash, Address)>) {
     let mut seen: HashSet<Hash> = HashSet::new();
     let mut txs: Vec<Transaction> = Vec::new();
+    let mut missing: Vec<(Hash, Address)> = Vec::new();
 
     for block_ref in &commit.blocks {
         // Look up the full DagBlock — may be missing if GC'ed (rare in Phase 2).
@@ -272,21 +277,27 @@ pub fn resolve_committed_txs(
             continue;
         };
 
-        resolve_block_payload(dag_block, store, &mut seen, &mut txs);
+        resolve_block_payload(dag_block, store, &mut seen, &mut txs, &mut missing);
     }
 
-    txs
+    (txs, missing)
 }
 
 /// Resolve one [`DagBlock`]'s payload refs into the output transaction list.
 ///
 /// Extracted as a helper so [`resolve_committed_txs`] stays readable and this
 /// path is independently testable.
+///
+/// `missing` accumulates `(batch_digest, batch_author)` pairs for batches not
+/// found in the local store. The caller may use these to trigger fetch-on-miss
+/// requests to peers (D·Step 15e). Best-effort: the block is produced with the
+/// available txs regardless.
 pub(crate) fn resolve_block_payload(
     block: &DagBlock,
     store: &HashMap<Hash, Batch>,
     seen: &mut HashSet<Hash>,
     out: &mut Vec<Transaction>,
+    missing: &mut Vec<(Hash, Address)>,
 ) {
     for batch_ref in &block.payload {
         let Some(batch) = store.get(&batch_ref.digest) else {
@@ -295,8 +306,10 @@ pub(crate) fn resolve_block_payload(
                 author = %batch_ref.author,
                 size   = batch_ref.size,
                 "resolve_committed_txs: batch not in store — availability miss \
-                 (fetch-on-miss deferred to D·Step 15)"
+                 (fetch-on-miss: D·Step 15e)"
             );
+            // Record the miss so the caller can trigger a fetch-on-miss request.
+            missing.push((batch_ref.digest, batch_ref.author));
             continue;
         };
 

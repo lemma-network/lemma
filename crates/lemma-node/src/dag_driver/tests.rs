@@ -931,3 +931,224 @@ async fn run_dag_driver_processes_peer_block_via_channel() {
         "first committed block must be at height 1"
     );
 }
+
+// ── D·15e: 4-validator consensus produces identical commits + state_root ──────
+
+/// D·15e integration test: 4 validators run in-process, all reach the same
+/// commits, and the first committed chain block has a non-None quorum_cert.
+///
+/// ## What this tests
+///
+/// 1. **Consensus correctness**: 4 `SurgeDriver` instances fed the same set of
+///    `DagBlock`s (in the same order) produce identical commit sequences.
+/// 2. **Commit determinism**: all 4 drivers agree on commit index, leader round,
+///    and leader author for every commit.
+/// 3. **QC assembly**: `build_block_from_commit` produces a `Block` with
+///    `quorum_cert = Some(qc)` (D·15b-3 path exercised from the 4-node context).
+/// 4. **State-root determinism**: calling `build_block_from_commit` twice with
+///    the same commit and empty txs produces the same `state_root`.
+///
+/// ## Test design
+///
+/// Uses `Signature::Unsigned` + `sig_ok = true` (unit-test focus: consensus
+/// correctness, not signature verification). The sig-verify path is covered by
+/// `build_dag_block_signature_verifiable_by_public_key` and the D·15b/c tests.
+///
+/// 3 × WAVE_LENGTH = 9 rounds (0–8) covers 3 waves:
+/// - Foundation: rounds 0–2 (strong-link ancestors for round 3).
+/// - Wave 1: rounds 3–5 (leader @ 3, voting @ 4, decision @ 5).
+/// - Wave 2: rounds 6–8 (leader @ 6, voting @ 7, decision @ 8).
+///
+/// AGENTS §11: separate tests.rs, `{action}_{outcome}` naming, AAA pattern.
+#[test]
+fn four_validator_consensus_produces_identical_commits_and_state_root() {
+    use std::collections::BTreeMap;
+
+    use lemma_consensus::{
+        dag::block::{DagBlock, DagBlockBody, DagBlockRef},
+        SurgeDriver, WAVE_LENGTH,
+    };
+    use lemma_core::{
+        amount::Amount,
+        signature::Signature,
+        validator::{ConsensusKey, VotingPower},
+        validator_set::{Member, ValidatorSet},
+    };
+
+    // ── Arrange: 4-validator uniform-stake committee ──────────────────────────
+
+    const N: u8 = 4;
+    const POWER_DROP: u128 = 1_000_000;
+
+    // Build a 4-validator ValidatorSet (epoch 1, uniform stake).
+    let mut members = BTreeMap::new();
+    for i in 1u8..=N {
+        members.insert(
+            addr(i),
+            Member {
+                consensus_pubkey: ConsensusKey::from_bytes(vec![0u8; 32], vec![0u8; 32]),
+                power: VotingPower(Amount::from_drop(POWER_DROP)),
+            },
+        );
+    }
+    let vset = ValidatorSet {
+        epoch: 1,
+        members,
+        total_power: Amount::from_drop(N as u128 * POWER_DROP),
+    };
+
+    // ── Build all DagBlocks for 3 × WAVE_LENGTH rounds ───────────────────────
+    //
+    // Round 0: 4 genesis blocks (no ancestors, Signature::Unsigned).
+    // Rounds 1–8: 4 blocks per round, each referencing all blocks from the
+    //             previous round (full connectivity — maximises quorum speed).
+    //
+    // All blocks use Signature::Unsigned + sig_ok=true (unit-test focus:
+    // consensus correctness, not signature verification).
+
+    let make_block = |round: u64, author_n: u8, ancestors: Vec<DagBlockRef>| -> DagBlock {
+        DagBlock::new(
+            DagBlockBody {
+                epoch: 1,
+                round,
+                author: addr(author_n),
+                timestamp_ms: 1_000 * round + author_n as u64,
+                ancestors,
+                payload: vec![],
+                commit_votes: vec![],
+            },
+            Signature::Unsigned,
+        )
+    };
+
+    // Build all blocks round by round, collecting (block, sig_ok) pairs.
+    let mut all_blocks: Vec<(DagBlock, bool)> = Vec::new();
+
+    // Round 0: genesis (no ancestors).
+    let mut prev_refs: Vec<DagBlockRef> = Vec::new();
+    for i in 1u8..=N {
+        let b = make_block(0, i, vec![]);
+        prev_refs.push(b.reference());
+        all_blocks.push((b, true));
+    }
+
+    // Rounds 1 through 3 × WAVE_LENGTH - 1.
+    let total_rounds = 3 * WAVE_LENGTH; // = 9
+    for round in 1..total_rounds {
+        let mut round_refs: Vec<DagBlockRef> = Vec::new();
+        for i in 1u8..=N {
+            let b = make_block(round, i, prev_refs.clone());
+            round_refs.push(b.reference());
+            all_blocks.push((b, true));
+        }
+        prev_refs = round_refs;
+    }
+
+    // ── Act: feed all blocks to 4 independent SurgeDrivers ───────────────────
+
+    let mut drivers: Vec<SurgeDriver> = (0..N)
+        .map(|_| SurgeDriver::new(vset.clone()).expect("SurgeDriver::new"))
+        .collect();
+
+    // Collect all commits from each driver.
+    let mut all_commits: Vec<Vec<lemma_consensus::Commit>> = vec![Vec::new(); N as usize];
+
+    for (block, sig_ok) in &all_blocks {
+        for (idx, driver) in drivers.iter_mut().enumerate() {
+            match driver.on_block(block.clone(), *sig_ok) {
+                Ok(out) => {
+                    all_commits[idx].extend(out.commits);
+                }
+                Err(e) => {
+                    panic!(
+                        "driver[{}] on_block failed at round {}: {}",
+                        idx, block.round, e
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Assert 1: all 4 drivers produced at least one commit ─────────────────
+
+    for (idx, commits) in all_commits.iter().enumerate() {
+        assert!(
+            !commits.is_empty(),
+            "driver[{idx}] must produce at least one commit after {total_rounds} rounds"
+        );
+    }
+
+    // ── Assert 2: all 4 drivers produced the SAME commit sequence ────────────
+
+    let reference_commits = &all_commits[0];
+    for (idx, commits) in all_commits.iter().enumerate().skip(1) {
+        assert_eq!(
+            commits.len(),
+            reference_commits.len(),
+            "driver[{idx}] produced {} commits but driver[0] produced {} — must be identical",
+            commits.len(),
+            reference_commits.len()
+        );
+        for (pos, (c, ref_c)) in commits.iter().zip(reference_commits.iter()).enumerate() {
+            assert_eq!(
+                c.index, ref_c.index,
+                "driver[{idx}] commit[{pos}].index={} != driver[0].index={}",
+                c.index, ref_c.index
+            );
+            assert_eq!(
+                c.leader.round, ref_c.leader.round,
+                "driver[{idx}] commit[{pos}].leader.round={} != driver[0].leader.round={}",
+                c.leader.round, ref_c.leader.round
+            );
+            assert_eq!(
+                c.leader.author, ref_c.leader.author,
+                "driver[{idx}] commit[{pos}].leader.author != driver[0].leader.author"
+            );
+        }
+    }
+
+    // ── Assert 3: QC assembly + state_root determinism ───────────────────────
+    //
+    // Build a chain block from the first commit using a fresh chain.
+    // Verify: quorum_cert is Some(qc) and state_root is deterministic.
+
+    let kp = test_kp();
+    let proposer = *kp.address();
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+
+    let first_commit = &reference_commits[0];
+
+    let (block1, _hash1) = build_block_from_commit(
+        first_commit,
+        &chain,
+        proposer,
+        Arc::clone(&db),
+        vec![], // empty txs — determinism test
+        &kp,
+    )
+    .expect("build_block_from_commit must succeed");
+
+    // QC must be present (D·15b-3).
+    assert!(
+        block1.quorum_cert.is_some(),
+        "first committed chain block must have quorum_cert = Some(qc) (D·15b-3)"
+    );
+
+    // State-root determinism: same call with same empty txs → same state_root.
+    let (block2, _hash2) =
+        build_block_from_commit(first_commit, &chain, proposer, Arc::clone(&db), vec![], &kp)
+            .expect("second build_block_from_commit must succeed");
+
+    assert_eq!(
+        block1.header.state_root, block2.header.state_root,
+        "state_root must be deterministic for the same commit + empty txs"
+    );
+
+    // Commit index must be 1 (first commit).
+    assert_eq!(
+        block1.height(),
+        first_commit.index,
+        "block height must equal commit.index"
+    );
+}

@@ -1,6 +1,6 @@
 //! LemmaBehaviour — the composed libp2p [`NetworkBehaviour`] for the Lemma P2P stack.
 //!
-//! Composes six sub-behaviours into one unified type via the
+//! Composes seven sub-behaviours into one unified type via the
 //! `#[derive(NetworkBehaviour)]` macro, following the transport table in
 //! `12-NETWORK_SYNC_SPEC.md §1`:
 //!
@@ -8,6 +8,7 @@
 //! |-------|---------------|------|
 //! | `gossipsub` | `gossipsub::Behaviour` | Push: blocks, DAG msgs, txs |
 //! | `sync` | `request_response::cbor::Behaviour` | Pull: range backfill |
+//! | `batch_fetch` | `request_response::cbor::Behaviour` | Pull: batch fetch-on-miss |
 //! | `kademlia` | `kad::Behaviour<MemoryStore>` | DHT peer discovery |
 //! | `identify` | `identify::Behaviour` | Peer metadata exchange |
 //! | `mdns` | `mdns::tokio::Behaviour` | LAN peer discovery |
@@ -48,7 +49,7 @@ use libp2p::{
 use crate::{
     config::{self, NetworkConfig},
     error::NetworkError,
-    messages::{RangeRequest, RangeResponse},
+    messages::{BatchFetchRequest, BatchFetchResponse, RangeRequest, RangeResponse},
 };
 
 // ── Message ID ────────────────────────────────────────────────────────────────
@@ -77,7 +78,8 @@ pub(crate) fn compute_message_id(data: &[u8]) -> gossipsub::MessageId {
 /// sub-behaviour to the correct protocol strings and configuration values.
 ///
 /// The `#[derive(NetworkBehaviour)]` macro generates `LemmaBehaviourEvent`
-/// with variants `Gossipsub`, `Sync`, `Kademlia`, `Identify`, `Mdns`, `Ping`.
+/// with variants `Gossipsub`, `Sync`, `BatchFetch`, `Kademlia`, `Identify`,
+/// `Mdns`, `Ping`.
 #[derive(NetworkBehaviour)]
 pub struct LemmaBehaviour {
     /// Gossipsub v1.1 — push dissemination for blocks, transactions, DAG messages.
@@ -91,6 +93,13 @@ pub struct LemmaBehaviour {
     /// The partition-heal path (12-NETWORK_SYNC_SPEC §2.2, 07-CONSENSUS_SPEC §8):
     /// a stalled minority reconnects and pulls the missed block range.
     pub sync: cbor::Behaviour<RangeRequest, RangeResponse>,
+
+    /// Request-response over CBOR — batch fetch-on-miss (`/lemma/batch-fetch/1`).
+    ///
+    /// Used when a validator's `resolve_block_payload` detects a `TxBatchRef`
+    /// not pinned locally (availability miss). The requesting node pulls the
+    /// batch bytes from a peer that has it (D·Step 15e).
+    pub batch_fetch: cbor::Behaviour<BatchFetchRequest, BatchFetchResponse>,
 
     /// Kademlia DHT — public peer discovery (`/lemma/kad/1`).
     ///
@@ -191,6 +200,18 @@ pub fn build_behaviour(
         request_response::Config::default().with_request_timeout(config.request_timeout),
     );
 
+    // ── Request-response (batch fetch-on-miss, /lemma/batch-fetch/1) ─────────
+    // Mirrors the `sync` pattern exactly (same CBOR codec, same timeout).
+    // Used when a validator's resolve_block_payload detects a TxBatchRef not
+    // pinned locally — it pulls the batch from a peer that has it (D·Step 15e).
+    let batch_fetch = cbor::Behaviour::<BatchFetchRequest, BatchFetchResponse>::new(
+        [(
+            StreamProtocol::new(config::PROTOCOL_BATCH_FETCH),
+            ProtocolSupport::Full, // both send and receive batch-fetch requests
+        )],
+        request_response::Config::default().with_request_timeout(config.request_timeout),
+    );
+
     // ── Kademlia DHT (/lemma/kad/1) ──────────────────────────────────────────
     // kad::Config::new(StreamProtocol) sets the single protocol name for this
     // Kademlia instance. Custom protocol so Lemma nodes do not join or pollute
@@ -222,6 +243,7 @@ pub fn build_behaviour(
     Ok(LemmaBehaviour {
         gossipsub,
         sync,
+        batch_fetch,
         kademlia,
         identify,
         mdns,
