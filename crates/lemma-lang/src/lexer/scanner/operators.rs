@@ -106,7 +106,9 @@ impl<'src> Scanner<'src> {
                 }
             }
             '*' => {
-                if self.advance_if('=') {
+                if self.advance_if('*') {
+                    Token::StarStar
+                } else if self.advance_if('=') {
                     Token::StarAssign
                 } else {
                     Token::Star
@@ -128,7 +130,13 @@ impl<'src> Scanner<'src> {
             }
             '^' => Token::BitXor,
             '~' => Token::BitNot,
-            '?' => Token::QuestionMark,
+            '?' => {
+                if self.advance_if('?') {
+                    Token::NullCoalesce
+                } else {
+                    Token::QuestionMark
+                }
+            }
             '_' => Token::Underscore,
             ',' => Token::Comma,
             ';' => Token::Semicolon,

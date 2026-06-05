@@ -1,8 +1,9 @@
 //! Error types for `lemma-lang`.
 //!
 //! [`LangError`] is the top-level error enum for all Lem language processing
-//! stages. Additional variants (Parse, Type, Safety, Codegen) will be added
-//! by later build steps. The lexer stage uses the [`LangError::Lex`] variant.
+//! stages. The lexer stage uses [`LangError::Lex`]; the parser stage uses
+//! [`LangError::Parse`]. Type, Safety, and Codegen variants will be added
+//! by later build steps.
 //!
 //! ## Usage
 //!
@@ -15,17 +16,20 @@
 //!     Err(LangError::Lex { message, span }) => {
 //!         eprintln!("lex error at {}:{}: {}", span.line, span.col, message);
 //!     }
+//!     _ => {}
 //! }
 //! ```
 
 use thiserror::Error;
 
 use crate::lexer::token::Span;
+use crate::parser::error::ParseError;
 
 /// Top-level error type for all Lem language processing stages.
 ///
 /// Each variant corresponds to a compiler stage. The `Lex` variant is
-/// populated by the lexer; later stages add `Parse`, `Type`, `Safety`, etc.
+/// populated by the lexer; `Parse` by the parser; later stages add
+/// `Type`, `Safety`, `Codegen`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LangError {
@@ -39,6 +43,10 @@ pub enum LangError {
         /// Source location of the offending character or token.
         span: Span,
     },
+
+    /// A parse error encountered while building the AST from the token stream.
+    #[error("parse error: {0}")]
+    Parse(#[from] ParseError),
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

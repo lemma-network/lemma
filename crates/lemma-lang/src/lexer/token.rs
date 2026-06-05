@@ -127,6 +127,44 @@ pub enum Token {
     Unchecked,
     /// `type` (for `type Alias = T`)
     Type,
+    /// `struct`
+    Struct,
+    /// `enum`
+    Enum,
+    /// `interface`
+    Interface,
+    /// `library`
+    Library,
+    /// `loop`
+    Loop,
+    /// `break`
+    Break,
+    /// `continue`
+    Continue,
+    /// `try`
+    Try,
+    /// `catch`
+    Catch,
+    /// `mut`
+    Mut,
+    /// `of` (for-of iteration)
+    Of,
+    /// `in` (for-in range iteration)
+    In,
+    /// `using` (for `using Library for Type`)
+    Using,
+    /// `error` (for `error Foo { ... }`)
+    Error,
+    /// `extends` (for `token Foo extends Bar`)
+    Extends,
+    /// `new` (for `new Foo(args)`)
+    New,
+    /// `receive` (special function)
+    Receive,
+    /// `fallback` (special function)
+    Fallback,
+    /// `immutable` (for `immutable NAME: T`)
+    Immutable,
 
     // ── Type keywords ─────────────────────────────────────────────────────────
     /// `u8`
@@ -304,6 +342,10 @@ pub enum Token {
     SlashAssign,
     /// `%=`
     PercentAssign,
+    /// `**` (exponentiation)
+    StarStar,
+    /// `??` (null-coalescing)
+    NullCoalesce,
 
     // ── Punctuation ───────────────────────────────────────────────────────────
     /// `->`
