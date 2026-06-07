@@ -2,8 +2,9 @@
 //!
 //! [`LangError`] is the top-level error enum for all Lem language processing
 //! stages. The lexer stage uses [`LangError::Lex`]; the parser stage uses
-//! [`LangError::Parse`]; the type checker uses [`LangError::Type`].
-//! Safety and Codegen variants will be added by later build steps.
+//! [`LangError::Parse`]; the type checker uses [`LangError::Type`];
+//! the safety analyzer uses [`LangError::Safety`].
+//! The `Codegen` variant will be added in Step 6.
 //!
 //! ## Usage
 //!
@@ -22,6 +23,7 @@
 
 use thiserror::Error;
 
+use crate::analyzer::error::SafetyError;
 use crate::lexer::token::Span;
 use crate::parser::error::ParseError;
 use crate::type_checker::error::TypeError;
@@ -29,12 +31,13 @@ use crate::type_checker::error::TypeError;
 /// Top-level error type for all Lem language processing stages.
 ///
 /// Each variant corresponds to a compiler stage:
-/// - `Lex`   — lexer (tokenization)
-/// - `Parse` — parser (AST construction)
-/// - `Type`  — type checker (type inference + name resolution)
-/// - `Safety`, `Codegen` — planned for Steps 4 + 6
+/// - `Lex`    — lexer (tokenization)
+/// - `Parse`  — parser (AST construction)
+/// - `Type`   — type checker (type inference + name resolution)
+/// - `Safety` — safety analyzer (SAFETY-001…013 token rules)
+/// - `Codegen` — planned for Step 6
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum LangError {
     /// A lexical error encountered while tokenizing Lem source code.
     ///
@@ -56,6 +59,18 @@ pub enum LangError {
     // double-printing when TypeError's own #[error] already includes "type error at".
     #[error("{0}")]
     Type(#[from] TypeError),
+
+    /// One or more safety violations detected by the safety analyzer.
+    ///
+    /// Each element is a [`SafetyError`] identifying a specific SAFETY-001…013
+    /// violation.  `analyze_safety` collects **all** violations before returning
+    /// (never fail-fast), so the developer sees every problem in one compile.
+    #[error(
+        "safety analysis failed: {} violation(s) — \
+         contract cannot be compiled",
+        .0.len()
+    )]
+    Safety(Vec<SafetyError>),
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
