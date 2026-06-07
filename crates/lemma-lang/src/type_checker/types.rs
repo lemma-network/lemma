@@ -386,8 +386,13 @@ pub struct FnSig {
 /// Signature of a struct — its field names and types in declaration order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructSig {
-    /// Fields in declaration order: `(name, resolved_type)`.
-    pub fields: Vec<(String, ResolvedType)>,
+    /// Fields in declaration order: `(name, resolved_type, has_default)`.
+    ///
+    /// The third element (`has_default`) is `true` when the field declaration
+    /// includes a default expression (`field: T = expr`).  Fields without a
+    /// default are *required* — a struct literal that omits them is a type error
+    /// ([`crate::type_checker::error::TypeErrorKind::MissingField`]).
+    pub fields: Vec<(String, ResolvedType, bool)>,
     /// Methods: `(name, method_symbol_id)`.
     /// The method's full `FnSig` lives at `sigs[method_symbol_id]`.
     pub methods: Vec<(String, SymbolId)>,
@@ -442,6 +447,13 @@ impl SymbolId {
 /// lowered here.  Type-namespace symbols (contract, struct, enum, etc.) carry
 /// [`ResolvedType::Unknown`] until a later subtask provides the self-referential
 /// projection (3g / Step 4).
+///
+/// ## `mutable` field
+///
+/// Whether this symbol can be assigned after its initial binding.  `true` only
+/// for `let mut` local variables.  All other kinds (params, consts, state
+/// fields, immutables) are immutable for assignment purposes.  Populated by the
+/// resolver (3e) and consumed by the safety analyzer (Step 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolInfo {
     /// The declared name of this symbol.
@@ -456,6 +468,11 @@ pub struct SymbolInfo {
     /// whose type has not yet been lowered (e.g., function return types
     /// deferred to 3g).
     pub ty: ResolvedType,
+    /// Whether this symbol can be assigned after its initial binding.
+    ///
+    /// `true` only for `let mut` local variables.  All other kinds (params,
+    /// consts, state fields, immutables) are immutable for assignment purposes.
+    pub mutable: bool,
 }
 
 /// The kind of declaration a [`SymbolInfo`] describes.

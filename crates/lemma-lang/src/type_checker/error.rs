@@ -143,9 +143,42 @@ pub enum TypeErrorKind {
         /// The type of the base expression (human-readable).
         ty: String,
     },
-    // 3e: MutationOfImmutable { name: String },
-    //     ReturnTypeMismatch { func: String, expected: String, found: String },
-    //     ConditionNotBool { found: String }
+
+    /// Assignment to a local variable declared without `mut`.
+    ///
+    /// Example: `let x = 1; x = 2;` — `x` is immutable, use `let mut x`.
+    MutationOfImmutable {
+        /// The name of the immutable binding being assigned.
+        name: String,
+    },
+
+    /// A `return` expression type does not match the function's declared return type.
+    ///
+    /// Example: `fn foo() -> u128 { return true; }` — bool vs u128.
+    ReturnTypeMismatch {
+        /// The function's declared return type.
+        expected: String,
+        /// The type of the returned expression.
+        found: String,
+    },
+
+    /// An `if` or `while` condition expression is not of type `bool`.
+    ///
+    /// Example: `if 42 { ... }` — integer is not bool.
+    ConditionNotBool {
+        /// The actual type of the condition expression.
+        found: String,
+    },
+
+    /// A struct literal omits a required field (one without a default value).
+    ///
+    /// Example: `Point { x: 1 }` when `Point` has required field `y`.
+    MissingField {
+        /// The struct type name.
+        ty: String,
+        /// The field name that was omitted.
+        field: String,
+    },
     // 3f: TraitBoundViolation { param: String, bound: String, found: String },
     //     UnresolvedGeneric(String)
 }

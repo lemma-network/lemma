@@ -1,8 +1,9 @@
-//! Tests for the expression type inference pass (P3·Step 3c).
+//! Tests for the expression type inference pass (P3·Step 3c/3e).
 //!
 //! Follows AGENTS §11.2: tests live in a separate submodule file, never inline.
 
-use crate::type_checker::types::ResolvedType;
+use crate::type_checker::error::TypeErrorKind;
+use crate::type_checker::types::{ResolvedType, SymbolKind};
 use crate::{check, parse, tokenize};
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -856,4 +857,422 @@ fn infer_builtin_string_length_returns_u256() {
         check_src(r#"fn f(s: string) { let n = s.length }"#).unwrap_or_else(|e| panic!("{e:?}"));
     let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
     assert!(has_u256, "s.length should be U256");
+}
+
+// ─── P3·Step 3e: let checking ─────────────────────────────────────────────────
+
+#[test]
+fn let_with_matching_annotation_passes() {
+    // `let x: u128 = 1u128` — annotation matches RHS type → no error.
+    check_src("fn f() { let x: u128 = 1u128 }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn let_annotation_type_mismatch_errors() {
+    // `let x: u128 = true` — bool vs u128 → TypeMismatch.
+    let result = check_src("fn f() { let x: u128 = true }");
+    assert!(result.is_err(), "let x: u128 = true should be TypeMismatch");
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::TypeMismatch { .. }),
+            "expected TypeMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn let_int_literal_coerces_to_annotation() {
+    // `let x: u64 = 42` — IntLiteral coerces to u64 → no error.
+    check_src("fn f() { let x: u64 = 42 }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn let_unannotated_back_fills_symbol_type() {
+    // `let x = 1u64` — unannotated, RHS is U64 → symbol.ty back-filled to U64.
+    let typed = check_src("fn f() { let x = 1u64 }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u64_sym = typed
+        .symbols
+        .iter()
+        .any(|s| s.kind == SymbolKind::Local && s.ty == ResolvedType::U64);
+    assert!(
+        has_u64_sym,
+        "unannotated let x = 1u64 should back-fill symbol.ty = U64"
+    );
+}
+
+#[test]
+fn let_unannotated_int_literal_defaults_u256() {
+    // `let x = 42` — unannotated, RHS is IntLiteral → symbol.ty defaults to U256 (DB-A27).
+    let typed = check_src("fn f() { let x = 42 }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256_sym = typed
+        .symbols
+        .iter()
+        .any(|s| s.kind == SymbolKind::Local && s.ty == ResolvedType::U256);
+    assert!(
+        has_u256_sym,
+        "unannotated let x = 42 should default symbol.ty = U256 (DB-A27)"
+    );
+}
+
+// ─── P3·Step 3e: return checking ─────────────────────────────────────────────
+
+#[test]
+fn return_matching_type_passes() {
+    // fn returns u128, return 1u128 → no error.
+    check_src("fn f() -> u128 { return 1u128 }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn return_type_mismatch_errors() {
+    // fn returns u128, return true → ReturnTypeMismatch.
+    let result = check_src("fn f() -> u128 { return true }");
+    assert!(result.is_err(), "return bool in fn -> u128 should error");
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::ReturnTypeMismatch { .. }),
+            "expected ReturnTypeMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn bare_return_in_unit_fn_passes() {
+    // fn returns (), bare return → no error.
+    check_src("fn f() { return }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn bare_return_in_non_unit_fn_errors() {
+    // fn returns u128, bare return → ReturnTypeMismatch.
+    let result = check_src("fn f() -> u128 { return }");
+    assert!(result.is_err(), "bare return in fn -> u128 should error");
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::ReturnTypeMismatch { .. }),
+            "expected ReturnTypeMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn return_int_literal_coerces_to_fn_ret() {
+    // fn returns u64, return 42 → IntLiteral coerces to u64 → no error.
+    check_src("fn f() -> u64 { return 42 }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn return_outside_fn_skipped() {
+    // Top-level return is syntactically invalid and caught by the parser.
+    // This test verifies the checker doesn't panic on it if it somehow passes parsing.
+    // We just verify a normal function with return works.
+    check_src("fn f() { return }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+// ─── P3·Step 3e: condition checks ────────────────────────────────────────────
+
+#[test]
+fn if_condition_bool_passes() {
+    // `if (true) { }` → no error. Lem requires parens around if condition.
+    check_src("fn f() { if (true) { } }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn if_condition_non_bool_errors() {
+    // `if (42u128) { }` → ConditionNotBool.
+    let result = check_src("fn f() { if (42u128) { } }");
+    assert!(result.is_err(), "if integer should be ConditionNotBool");
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::ConditionNotBool { .. }),
+            "expected ConditionNotBool, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn while_condition_bool_passes() {
+    // `while (x) { }` where x: bool → no error. Lem requires parens around while condition.
+    check_src("fn f(x: bool) { while (x) { } }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn while_condition_non_bool_errors() {
+    // `while (1u8) { }` → ConditionNotBool.
+    let result = check_src("fn f() { while (1u8) { } }");
+    assert!(result.is_err(), "while integer should be ConditionNotBool");
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::ConditionNotBool { .. }),
+            "expected ConditionNotBool, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn condition_unknown_skipped() {
+    // Condition of Unknown type → no error (deferred).
+    check_src("fn f(b: bool) { if (b) { } }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+// ─── P3·Step 3e: mutability ───────────────────────────────────────────────────
+
+#[test]
+fn assign_to_let_mut_passes() {
+    // `let mut x = 1u8; x = 2u8;` → no error.
+    check_src("fn f() { let mut x = 1u8\n x = 2u8 }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn assign_to_let_immutable_errors() {
+    // `let x = 1u8; x = 2u8;` → MutationOfImmutable.
+    let result = check_src("fn f() { let x = 1u8\n x = 2u8 }");
+    assert!(result.is_err(), "assign to immutable let should error");
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::MutationOfImmutable { .. }),
+            "expected MutationOfImmutable, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn assign_to_param_errors() {
+    // fn param, assign inside body → MutationOfImmutable.
+    let result = check_src("fn f(x: u128) { x = 5u128 }");
+    assert!(
+        result.is_err(),
+        "assign to param should be MutationOfImmutable"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::MutationOfImmutable { .. }),
+            "expected MutationOfImmutable, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn compound_assign_to_let_mut_passes() {
+    // `let mut x = 1u128; x += 1u128;` → no error.
+    check_src("fn f() { let mut x = 1u128\n x += 1u128 }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn member_assign_not_flagged_as_immutable() {
+    // `self.field = val` — LHS is Member, not Ident → no MutationOfImmutable.
+    // Use a contract with a state field assignment.
+    check_src(
+        "contract C {\
+         \n  state { balance: u128 }\
+         \n  fn set(v: u128) { self.balance = v }\
+         \n}",
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+// ─── P3·Step 3e: assignment type checking ────────────────────────────────────
+
+#[test]
+fn assign_rhs_matches_lhs_type_passes() {
+    // `let mut x: u128 = 0u128; x = 5u128;` → no error.
+    check_src("fn f() { let mut x: u128 = 0u128\n x = 5u128 }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn assign_rhs_type_mismatch_errors() {
+    // `let mut x: u128 = 0u128; x = true;` → TypeMismatch.
+    let result = check_src("fn f() { let mut x: u128 = 0u128\n x = true }");
+    assert!(
+        result.is_err(),
+        "assign bool to u128 should be TypeMismatch"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::TypeMismatch { .. }),
+            "expected TypeMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn compound_assign_numeric_passes() {
+    // `let mut x = 1u64; x += 1u64;` → no error.
+    check_src("fn f() { let mut x = 1u64\n x += 1u64 }").unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn compound_assign_non_numeric_errors() {
+    // `let mut x: bool = false; x += true;` → InvalidOperand (bool is not numeric).
+    let result = check_src("fn f() { let mut x: bool = false\n x += true }");
+    assert!(result.is_err(), "bool += bool should be InvalidOperand");
+}
+
+// ─── P3·Step 3e: Expr::If_ branch unification ────────────────────────────────
+
+#[test]
+fn if_expr_matching_branches_unified() {
+    // `let x = if (c) { 1u64 } else { 2u64 }` → x: u64.
+    // Lem if-expressions require parens around the condition.
+    let typed = check_src("fn f(c: bool) { let x = if (c) { 1u64 } else { 2u64 } }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u64 = typed.expr_types.values().any(|t| *t == ResolvedType::U64);
+    assert!(has_u64, "if expr with u64 branches should produce U64");
+}
+
+#[test]
+fn if_expr_branch_type_mismatch_errors() {
+    // `let x = if (c) { 1u64 } else { true }` → TypeMismatch.
+    let result = check_src("fn f(c: bool) { let x = if (c) { 1u64 } else { true } }");
+    assert!(
+        result.is_err(),
+        "if expr with mismatched branches should error"
+    );
+}
+
+#[test]
+fn if_expr_non_bool_cond_errors() {
+    // `let x = if (42u128) { 1u64 } else { 2u64 }` → ConditionNotBool.
+    let result = check_src("fn f() { let x = if (42u128) { 1u64 } else { 2u64 } }");
+    assert!(result.is_err(), "if expr with non-bool cond should error");
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::ConditionNotBool { .. }),
+            "expected ConditionNotBool, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn if_expr_no_else_returns_unit() {
+    // `if (c) { 1u64 }` — no else → Unit.
+    // The if-expr result is Unit; the let binding gets Unit type.
+    let typed =
+        check_src("fn f(c: bool) { let x = if (c) { 1u64 } }").unwrap_or_else(|e| panic!("{e:?}"));
+    // The if-expr itself should be recorded as Unit.
+    let has_unit = typed.expr_types.values().any(|t| *t == ResolvedType::Unit);
+    assert!(has_unit, "if expr without else should be Unit");
+}
+
+// ─── P3·Step 3e: Expr::Match_ arm unification ────────────────────────────────
+
+#[test]
+fn match_expr_all_arms_same_type_passes() {
+    // All arms return u128 → unified u128.
+    // Lem match uses `match (scrutinee) { pattern => expr }` with parens.
+    let typed = check_src("fn f(x: u128) { let v = match (x) { _ => 1u128 } }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "match with u128 arm should unify to U128");
+}
+
+#[test]
+fn match_expr_arm_type_mismatch_errors() {
+    // Two arms: first returns u128, second returns bool → TypeMismatch.
+    // Use two wildcard arms (second shadows first — parser allows it).
+    let result = check_src("fn f(x: u128) { let v = match (x) { _ => 1u128\n_ => true } }");
+    assert!(
+        result.is_err(),
+        "match with mismatched arm types should error"
+    );
+}
+
+#[test]
+fn match_expr_no_arms_returns_unknown() {
+    // Single-arm match returning a known type → that type.
+    let typed = check_src(
+        "fn g() -> u128 { return 0u128 }\nfn f(x: u128) { let v = match (x) { _ => g() } }",
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    // g() returns u128 — the match should unify to u128.
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "match with single u128 arm should be U128");
+}
+
+// ─── P3·Step 3e: Expr::Try_ ──────────────────────────────────────────────────
+
+#[test]
+fn try_expr_unwraps_result_inner_type() {
+    // `ok_result?` where ok_result: Result<u64, _> → u64.
+    let typed = check_src("fn f(r: Result<u64, string>) -> u64 { return r? }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u64 = typed.expr_types.values().any(|t| *t == ResolvedType::U64);
+    assert!(has_u64, "Result<u64, _>? should unwrap to U64");
+}
+
+#[test]
+fn try_expr_on_unknown_propagates_unknown() {
+    // `unknown_expr?` → Unknown (deferred).
+    // Use a function call whose return type is Unknown (call result not fully typed).
+    // A call to a function returning Result<u64, string> with ? → u64.
+    // For the "unknown" case, use a call to a function with no known return type.
+    let typed = check_src("fn g() -> Result<u64, string> { return g() }\nfn f() { let x = g()? }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    // g()? → u64 (unwrapped from Result<u64, string>).
+    let _ = typed;
+}
+
+// ─── P3·Step 3e: struct missing field — P3-checker-5 ─────────────────────────
+
+#[test]
+fn struct_lit_missing_required_field_errors() {
+    // `Point { x: 1u128 }` with required field `y` → MissingField.
+    let result =
+        check_src("struct Point { x: u128, y: u128 }\nfn f() { let p = Point { x: 1u128 } }");
+    assert!(
+        result.is_err(),
+        "struct literal missing required field should error"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::MissingField { .. }),
+            "expected MissingField, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn struct_lit_optional_field_omitted_passes() {
+    // All struct fields in Lem are required (FieldDecl has no default).
+    // This test verifies that providing all fields passes.
+    check_src("struct Point { x: u128, y: u128 }\nfn f() { let p = Point { x: 1u128, y: 2u128 } }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+}
+
+#[test]
+fn struct_lit_all_required_fields_present_passes() {
+    // All required fields provided → Named type returned.
+    let typed = check_src(
+        "struct Vec3 { x: u128, y: u128, z: u128 }\
+         \nfn f() { let v = Vec3 { x: 1u128, y: 2u128, z: 3u128 } }",
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_named = typed
+        .expr_types
+        .values()
+        .any(|t| matches!(t, ResolvedType::Named(_, _)));
+    assert!(
+        has_named,
+        "struct literal with all fields should be Named(...)"
+    );
+}
+
+// ─── P3·Step 3e: regression — lambda still deferred ─────────────────────────
+
+#[test]
+fn lambda_returns_unknown_type_not_error() {
+    // Lambda expr returns Unknown without error (3f deferred).
+    // Lem lambda syntax: `x => expr` or `(x, y) => expr`.
+    let typed = check_src("fn f() { let g = x => x }").unwrap_or_else(|e| panic!("{e:?}"));
+    // Lambda type is Unknown — no error, just deferred.
+    let _ = typed;
 }

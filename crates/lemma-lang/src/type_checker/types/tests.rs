@@ -237,6 +237,7 @@ fn symbol_info_constructs_with_all_fields() {
         decl_span: test_span(),
         kind: SymbolKind::Function,
         ty: unknown(),
+        mutable: false,
     };
     assert_eq!(info.name, "transfer");
     assert!(matches!(info.kind, SymbolKind::Function));
@@ -249,6 +250,7 @@ fn symbol_info_carries_resolved_type() {
         decl_span: test_span(),
         kind: SymbolKind::Param,
         ty: ResolvedType::U128,
+        mutable: false,
     };
     assert_eq!(info.ty, ResolvedType::U128);
 }
@@ -260,6 +262,7 @@ fn symbol_info_clones_equal() {
         decl_span: test_span(),
         kind: SymbolKind::StateField,
         ty: unknown(),
+        mutable: false,
     };
     assert_eq!(info.clone(), info);
 }
@@ -271,12 +274,14 @@ fn symbol_info_different_names_not_equal() {
         decl_span: test_span(),
         kind: SymbolKind::Local,
         ty: unknown(),
+        mutable: false,
     };
     let b = SymbolInfo {
         name: "b".into(),
         decl_span: test_span(),
         kind: SymbolKind::Local,
         ty: unknown(),
+        mutable: false,
     };
     assert_ne!(a, b);
 }

@@ -124,6 +124,7 @@ impl Resolver {
             decl_span,
             kind,
             ty,
+            mutable: false,
         });
         id
     }
@@ -141,6 +142,16 @@ impl Resolver {
     fn set_sym_ty(&mut self, id: SymbolId, ty: ResolvedType) {
         if let Some(info) = self.symbols.get_mut((id.0 as usize).saturating_sub(1)) {
             info.ty = ty;
+        }
+    }
+
+    /// Mark an already-allocated symbol as mutable.
+    ///
+    /// Called for `let mut` bindings only.  All other symbols default to
+    /// immutable (`mutable: false` set in [`Self::alloc_typed`]).
+    fn set_sym_mutable(&mut self, id: SymbolId) {
+        if let Some(info) = self.symbols.get_mut((id.0 as usize).saturating_sub(1)) {
+            info.mutable = true;
         }
     }
 
@@ -473,12 +484,16 @@ impl Resolver {
                 // Build StructSig — generic params are in scope so lower_type resolves correctly.
                 // Struct methods are NOT in any value scope here (they're not in global scope),
                 // so methods list is empty for 3d; deferred to 3g.
-                let fields: Vec<(String, ResolvedType)> = s
+                // FieldDecl has no `default` field in the AST (struct fields
+                // are always required in Lem).  `has_default` is always false
+                // here; the field exists in StructSig for future extensibility
+                // and to close P3-checker-5 (missing required field check).
+                let fields: Vec<(String, ResolvedType, bool)> = s
                     .members
                     .iter()
                     .filter_map(|m| {
                         if let StructMember::Field(f) = m {
-                            Some((f.name.clone(), self.lower_type(&f.ty)))
+                            Some((f.name.clone(), self.lower_type(&f.ty), false))
                         } else {
                             None
                         }
@@ -690,12 +705,14 @@ impl Resolver {
                     }
                 }
                 // Build StructSig for contract-nested struct.
-                let fields: Vec<(String, ResolvedType)> = s
+                // FieldDecl has no `default` field — struct fields are always
+                // required in Lem (has_default = false).
+                let fields: Vec<(String, ResolvedType, bool)> = s
                     .members
                     .iter()
                     .filter_map(|m| {
                         if let StructMember::Field(f) = m {
-                            Some((f.name.clone(), self.lower_type(&f.ty)))
+                            Some((f.name.clone(), self.lower_type(&f.ty), false))
                         } else {
                             None
                         }
@@ -896,11 +913,11 @@ impl Resolver {
     fn resolve_stmt(&mut self, stmt: &Stmt) -> Result<(), LangError> {
         match stmt {
             Stmt::Let {
+                mutable,
                 pattern,
                 ty,
                 expr,
                 span,
-                ..
             } => {
                 // RHS resolves in scope *before* the new binding (decision ②).
                 self.resolve_expr(expr)?;
@@ -921,6 +938,9 @@ impl Resolver {
                         ResolvedType::Unknown
                     };
                     let id = self.alloc_typed(&name, bspan, SymbolKind::Local, sym_ty);
+                    if *mutable {
+                        self.set_sym_mutable(id);
+                    }
                     // Shadowing is allowed; no duplicate-error for let bindings.
                     // (Dup-error is only for same-scope-level *declarations*, not
                     // let-bindings which naturally shadow in nested scopes.)

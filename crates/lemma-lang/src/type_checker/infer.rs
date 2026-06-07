@@ -27,8 +27,9 @@ use std::collections::BTreeMap;
 use crate::error::LangError;
 use crate::lexer::token::Span;
 use crate::parser::ast::{
-    Ast, BinaryOp, CallArg, ContractMember, Expr, ForIter, Function, Item, LambdaBody, Literal,
-    MatchArm, MatchBody, Stmt, StructMember, TemplateExprSegment, UnaryOp, UnitKind,
+    AssignOp, Ast, BinaryOp, CallArg, ContractMember, Expr, ForIter, Function, Item, LambdaBody,
+    Literal, MatchArm, MatchBody, Pattern, Stmt, StructMember, TemplateExprSegment, Type, UnaryOp,
+    UnitKind,
 };
 use crate::parser::expr_span;
 
@@ -43,7 +44,9 @@ use super::types::{ResolvedType, SymbolId, SymbolInfo, SymbolKind, SymbolSig};
 /// name resolver) plus a mutable reference to the `expr_types` side-table it
 /// is filling in.
 pub(super) struct Inferer<'a> {
-    symbols: &'a [SymbolInfo],
+    /// Mutable borrow of the symbol arena — needed for unannotated `let`
+    /// type back-fill (3e, DB-A27).
+    symbols: &'a mut Vec<SymbolInfo>,
     resolutions: &'a BTreeMap<Span, SymbolId>,
     /// Structured signatures for functions, structs, and enums (from 3d resolver pass).
     sigs: &'a BTreeMap<SymbolId, SymbolSig>,
@@ -51,11 +54,16 @@ pub(super) struct Inferer<'a> {
     /// Used by `lower_cast_target` to resolve `Type::Named` in cast targets.
     global_types: &'a BTreeMap<String, SymbolId>,
     expr_types: &'a mut BTreeMap<Span, ResolvedType>,
+    /// Return type of the innermost enclosing function, set in `walk_function`.
+    ///
+    /// `None` outside any function body.  Used by `check_return` (3e) to
+    /// validate that `return expr` matches the declared return type.
+    current_fn_ret: Option<ResolvedType>,
 }
 
 impl<'a> Inferer<'a> {
     pub(super) fn new(
-        symbols: &'a [SymbolInfo],
+        symbols: &'a mut Vec<SymbolInfo>,
         resolutions: &'a BTreeMap<Span, SymbolId>,
         sigs: &'a BTreeMap<SymbolId, SymbolSig>,
         global_types: &'a BTreeMap<String, SymbolId>,
@@ -67,6 +75,7 @@ impl<'a> Inferer<'a> {
             sigs,
             global_types,
             expr_types,
+            current_fn_ret: None,
         }
     }
 
@@ -168,43 +177,79 @@ impl<'a> Inferer<'a> {
     }
 
     fn walk_function(&mut self, f: &Function) -> Result<(), LangError> {
+        // Find the FnSig for this function by matching its declaration span.
+        // Save and restore current_fn_ret to handle nested fn declarations.
+        let prev_ret = self.current_fn_ret.take();
+        self.current_fn_ret = self
+            .symbols
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.kind == SymbolKind::Function && s.decl_span == f.span)
+            .and_then(|(i, _)| self.sigs.get(&SymbolId((i + 1) as u32)))
+            .and_then(|sig| {
+                if let SymbolSig::Function(fs) = sig {
+                    Some(fs.ret.clone())
+                } else {
+                    None
+                }
+            });
+
         // Default expressions on parameters.
         for p in &f.params {
             if let Some(default) = &p.default_expr {
                 self.infer_expr(default)?;
             }
         }
+
+        // Walk body with current_fn_ret set.
         if let Some(body) = &f.body {
             for s in body {
                 self.walk_stmt(s)?;
             }
         }
+
+        // Restore previous return type (handles nested fn declarations).
+        self.current_fn_ret = prev_ret;
         Ok(())
     }
 
     fn walk_stmt(&mut self, stmt: &Stmt) -> Result<(), LangError> {
         match stmt {
-            Stmt::Let { expr, .. } => {
-                self.infer_expr(expr)?;
+            Stmt::Let {
+                pattern,
+                ty,
+                expr,
+                span,
+                ..
+            } => {
+                // check_let handles RHS inference + annotation check + back-fill.
+                // Do NOT also call infer_expr(expr) here — that would double-record.
+                self.check_let(pattern, ty.as_ref(), expr, *span)?;
             }
             Stmt::Const(c) => {
                 self.infer_expr(&c.value)?;
             }
-            Stmt::Assign { target, value, .. } => {
-                // 3e: full assignment type check (mutability, type match).
-                // 3c: walk sub-expressions to record their types.
-                self.infer_expr(target)?;
-                self.infer_expr(value)?;
+            Stmt::Assign {
+                target,
+                op,
+                value,
+                span,
+            } => {
+                // check_assign handles mutability + type match.
+                self.check_assign(target, op, value, *span)?;
             }
-            Stmt::Return(expr, _) => {
-                if let Some(e) = expr {
-                    self.infer_expr(e)?;
-                }
+            Stmt::Return(expr, span) => {
+                // check_return handles return type vs fn signature.
+                self.check_return(expr.as_ref(), *span)?;
             }
             Stmt::If {
-                cond, then, else_, ..
+                cond,
+                then,
+                else_,
+                span,
             } => {
-                self.infer_expr(cond)?;
+                // check_condition infers cond and validates it is bool.
+                self.check_condition(cond, "if", *span)?;
                 for s in then {
                     self.walk_stmt(s)?;
                 }
@@ -214,8 +259,8 @@ impl<'a> Inferer<'a> {
                     }
                 }
             }
-            Stmt::While { cond, body, .. } => {
-                self.infer_expr(cond)?;
+            Stmt::While { cond, body, span } => {
+                self.check_condition(cond, "while", *span)?;
                 for s in body {
                     self.walk_stmt(s)?;
                 }
@@ -225,14 +270,19 @@ impl<'a> Inferer<'a> {
                     self.walk_stmt(s)?;
                 }
             }
-            Stmt::For { iter, body, .. } => {
+            Stmt::For {
+                iter, body, span, ..
+            } => {
                 match iter {
                     ForIter::Of(e) => {
                         self.infer_expr(e)?;
                     }
                     ForIter::In(start, _, end, _) => {
-                        self.infer_expr(start)?;
-                        self.infer_expr(end)?;
+                        // Range bounds must be integer (for..in x..y).
+                        let start_ty = self.infer_expr(start)?;
+                        let end_ty = self.infer_expr(end)?;
+                        self.require_int_or_literal(&start_ty, "for..in", *span)?;
+                        self.require_int_or_literal(&end_ty, "for..in", *span)?;
                     }
                 }
                 for s in body {
@@ -420,9 +470,9 @@ impl<'a> Inferer<'a> {
                 }
             }
 
-            // ── 3e: deferred ────────────────────────────────────────────────
-            // Lambdas, match/if expressions, template strings, assignment,
-            // try — these need statement-level context (3e) to type fully.
+            // ── 3e: now implemented (if/match/assign/try) ─────────────────────────────
+            // ── 3f: deferred ──────────────────────────────────────────────────────────
+            // Lambda: fn(…) → … requires inference + generics (3f).
             Expr::Lambda { params, body, .. } => {
                 for p in params {
                     if let Some(d) = &p.default_expr {
@@ -439,28 +489,58 @@ impl<'a> Inferer<'a> {
                         }
                     }
                 }
-                Ok(ResolvedType::Unknown) // 3e: fn(…) -> …
+                Ok(ResolvedType::Unknown) // TODO(3f): infer lambda Fn type
             }
-            Expr::Match_(scrutinee, arms, _) => {
+            Expr::Match_(scrutinee, arms, span) => {
                 self.infer_expr(scrutinee)?;
+                let mut unified: Option<ResolvedType> = None;
                 for arm in arms {
-                    self.walk_match_arm(arm)?;
+                    if let Some(guard) = &arm.guard {
+                        self.infer_expr(guard)?;
+                    }
+                    let arm_ty = match &arm.body {
+                        MatchBody::Expr(e) => self.infer_expr(e)?,
+                        MatchBody::Block(stmts) => self.infer_block_type(stmts)?,
+                    };
+                    unified = Some(match unified {
+                        None => arm_ty,
+                        Some(prev) => {
+                            if prev == ResolvedType::Unknown || arm_ty == ResolvedType::Unknown {
+                                if prev != ResolvedType::Unknown {
+                                    prev
+                                } else {
+                                    arm_ty
+                                }
+                            } else {
+                                self.unify_branch_types(&prev, &arm_ty, "match", *span)?
+                            }
+                        }
+                    });
                 }
-                Ok(ResolvedType::Unknown) // 3e: unified arm types
+                Ok(unified.unwrap_or(ResolvedType::Unknown))
             }
             Expr::If_ {
-                cond, then, else_, ..
+                cond,
+                then,
+                else_,
+                span,
             } => {
-                self.infer_expr(cond)?;
-                for s in then {
-                    self.walk_stmt(s)?;
-                }
-                if let Some(else_branch) = else_ {
-                    for s in else_branch {
-                        self.walk_stmt(s)?;
+                self.check_condition(cond, "if", *span)?;
+                let then_ty = self.infer_block_type(then)?;
+                match else_ {
+                    None => Ok(ResolvedType::Unit), // if without else = Unit
+                    Some(else_branch) => {
+                        let else_ty = self.infer_block_type(else_branch)?;
+                        if then_ty == ResolvedType::Unknown || else_ty == ResolvedType::Unknown {
+                            return Ok(if then_ty != ResolvedType::Unknown {
+                                then_ty
+                            } else {
+                                else_ty
+                            });
+                        }
+                        self.unify_branch_types(&then_ty, &else_ty, "if", *span)
                     }
                 }
-                Ok(ResolvedType::Unknown) // 3e: unified branch types
             }
             Expr::Template(segments, _) => {
                 for seg in segments {
@@ -470,14 +550,20 @@ impl<'a> Inferer<'a> {
                 }
                 Ok(ResolvedType::StringTy) // template string → string always
             }
-            Expr::Assign_(target, _, val, _) => {
-                self.infer_expr(target)?;
-                self.infer_expr(val)?;
-                Ok(ResolvedType::Unit) // 3e: assignment statement result
+            Expr::Assign_(target, op, val, span) => {
+                self.check_assign(target, op, val, *span)?;
+                Ok(ResolvedType::Unit)
             }
             Expr::Try_(inner, _) => {
-                self.infer_expr(inner)?;
-                Ok(ResolvedType::Unknown) // 3e: unwraps Result<T,E> → T
+                let inner_ty = self.infer_expr(inner)?;
+                // `?` unwraps Result<T,E> → T. Unknown is propagated.
+                match &inner_ty {
+                    ResolvedType::Result_(ok_ty, _) => Ok(*ok_ty.clone()),
+                    ResolvedType::Unknown => Ok(ResolvedType::Unknown),
+                    // In 3e: be lenient for non-Result types (could be deferred call return).
+                    // Full check in 3f when all types are resolved.
+                    _ => Ok(ResolvedType::Unknown),
+                }
             }
         }
     }
@@ -1205,7 +1291,7 @@ impl<'a> Inferer<'a> {
             match self.sigs.get(&struct_id) {
                 Some(SymbolSig::Struct(sig)) => {
                     // Check fields.
-                    if let Some((_, ft)) = sig.fields.iter().find(|(n, _)| n == name) {
+                    if let Some((_, ft, _)) = sig.fields.iter().find(|(n, _, _)| n == name) {
                         return Ok(ft.clone());
                     }
                     // Check methods (returns the Fn type; Call will extract ret).
@@ -1308,8 +1394,8 @@ impl<'a> Inferer<'a> {
 
     /// Type-check a struct literal `Name { field: expr, ... }`.
     ///
-    /// Validates that all provided field names exist on the struct.
-    /// Full field-type checking is deferred to 3e.
+    /// Validates that all provided field names exist on the struct and that
+    /// all required fields (those without a default) are provided.
     fn infer_struct_lit(
         &self,
         name: &str,
@@ -1320,7 +1406,7 @@ impl<'a> Inferer<'a> {
             if let Some(SymbolSig::Struct(sig)) = self.sigs.get(&struct_id) {
                 // Check each provided field exists on the struct.
                 for (field_name, _) in fields {
-                    if !sig.fields.iter().any(|(n, _)| n == field_name) {
+                    if !sig.fields.iter().any(|(n, _, _)| n == field_name) {
                         return Err(type_err(
                             TypeErrorKind::UnknownField {
                                 ty: name.to_owned(),
@@ -1331,11 +1417,326 @@ impl<'a> Inferer<'a> {
                         ));
                     }
                 }
+                // Check for missing required fields (fields without defaults).
+                // Closes P3-checker-5.
+                for (field_name, _, has_default) in &sig.fields {
+                    if !has_default && !fields.iter().any(|(n, _)| n == field_name) {
+                        return Err(type_err(
+                            TypeErrorKind::MissingField {
+                                ty: name.to_owned(),
+                                field: field_name.clone(),
+                            },
+                            span,
+                            format!(
+                                "struct `{}` requires field `{}` but it was not provided",
+                                name, field_name
+                            ),
+                        ));
+                    }
+                }
             }
             return Ok(ResolvedType::Named(struct_id, vec![]));
         }
         // Unknown struct (import / deferred) → Unknown.
         Ok(ResolvedType::Unknown)
+    }
+
+    // ── 3e: statement checking helpers ───────────────────────────────────
+
+    /// Type-check a `let` binding statement.
+    ///
+    /// Infers the RHS type, then either:
+    /// - Back-fills the symbol's type if the binding is unannotated (DB-A27).
+    /// - Checks the RHS matches the annotation if annotated.
+    fn check_let(
+        &mut self,
+        pattern: &Pattern,
+        _ty: Option<&Type>,
+        expr: &Expr,
+        span: Span,
+    ) -> Result<(), LangError> {
+        let rhs_ty = self.infer_expr(expr)?;
+
+        // For simple `let x (: T)? = rhs` patterns: find the binding's SymbolId
+        // by searching for a Local symbol whose decl_span matches the pattern span.
+        // (The resolutions map records USE-site spans, not declaration spans.)
+        if let Pattern::Ident(_, bind_span) = pattern {
+            // Find the SymbolId for this binding by decl_span.
+            let maybe_id = self
+                .symbols
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.kind == SymbolKind::Local && s.decl_span == *bind_span)
+                .map(|(i, _)| SymbolId((i + 1) as u32));
+
+            if let Some(id) = maybe_id {
+                let sym_ty = self
+                    .symbols
+                    .get((id.0 as usize).saturating_sub(1))
+                    .map(|s| s.ty.clone())
+                    .unwrap_or(ResolvedType::Unknown);
+
+                if sym_ty == ResolvedType::Unknown {
+                    // Unannotated let: back-fill symbol type from RHS.
+                    // IntLiteral defaults to u256 (DB-A27).
+                    let resolved = if rhs_ty.is_int_literal() {
+                        ResolvedType::U256
+                    } else {
+                        rhs_ty.clone()
+                    };
+                    if let Some(info) = self.symbols.get_mut((id.0 as usize).saturating_sub(1)) {
+                        if info.ty == ResolvedType::Unknown {
+                            info.ty = resolved;
+                        }
+                    }
+                } else {
+                    // Annotated let: check RHS matches annotation.
+                    if rhs_ty != ResolvedType::Unknown && sym_ty != ResolvedType::Unknown {
+                        // IntLiteral coerces to annotation type without error.
+                        if rhs_ty.is_int_literal() && sym_ty.is_integer() {
+                            self.expr_types.insert(expr_span(expr), sym_ty.clone());
+                        } else if rhs_ty != sym_ty {
+                            if let Some(coerced) = rhs_ty.coerce_int_literal(&sym_ty) {
+                                self.expr_types.insert(expr_span(expr), coerced.clone());
+                            } else {
+                                return Err(type_err(
+                                    TypeErrorKind::TypeMismatch {
+                                        expected: sym_ty.display_name(),
+                                        found: rhs_ty.display_name(),
+                                    },
+                                    span,
+                                    format!(
+                                        "let binding type mismatch: declared `{}`, got `{}`",
+                                        sym_ty.display_name(),
+                                        rhs_ty.display_name()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // For destructuring patterns: sub-expression types are already recorded
+        // by infer_expr above.
+        // TODO(3f): back-fill destructuring pattern binding types.
+        Ok(())
+    }
+
+    /// Type-check a `return` statement.
+    ///
+    /// Validates that the returned expression's type matches the enclosing
+    /// function's declared return type.
+    fn check_return(&mut self, expr: Option<&Expr>, span: Span) -> Result<(), LangError> {
+        let Some(ref expected) = self.current_fn_ret.clone() else {
+            // Outside a function body — top-level return is syntactically
+            // invalid and caught by the parser; skip here.
+            if let Some(e) = expr {
+                self.infer_expr(e)?;
+            }
+            return Ok(());
+        };
+
+        match expr {
+            None => {
+                // Bare `return` — valid only if fn returns Unit (or Unknown).
+                if *expected != ResolvedType::Unit && *expected != ResolvedType::Unknown {
+                    return Err(type_err(
+                        TypeErrorKind::ReturnTypeMismatch {
+                            expected: expected.display_name(),
+                            found: "()".into(),
+                        },
+                        span,
+                        format!(
+                            "bare `return` in function returning `{}`; provide a value",
+                            expected.display_name()
+                        ),
+                    ));
+                }
+            }
+            Some(e) => {
+                let ret_ty = self.infer_expr(e)?;
+                if ret_ty == ResolvedType::Unknown || *expected == ResolvedType::Unknown {
+                    return Ok(());
+                }
+                // IntLiteral coerces to expected type.
+                if ret_ty.is_int_literal() && expected.is_integer() {
+                    self.expr_types.insert(expr_span(e), expected.clone());
+                    return Ok(());
+                }
+                if let Some(coerced) = ret_ty.coerce_int_literal(expected) {
+                    self.expr_types.insert(expr_span(e), coerced.clone());
+                    return Ok(());
+                }
+                if ret_ty != *expected {
+                    return Err(type_err(
+                        TypeErrorKind::ReturnTypeMismatch {
+                            expected: expected.display_name(),
+                            found: ret_ty.display_name(),
+                        },
+                        span,
+                        format!(
+                            "return type mismatch: function returns `{}`, got `{}`",
+                            expected.display_name(),
+                            ret_ty.display_name()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that a condition expression is of type `bool`.
+    ///
+    /// Used for `if`, `while`, and `Expr::If_` conditions.
+    fn check_condition(&mut self, cond: &Expr, label: &str, span: Span) -> Result<(), LangError> {
+        let cond_ty = self.infer_expr(cond)?;
+        if cond_ty != ResolvedType::Bool && cond_ty != ResolvedType::Unknown {
+            return Err(type_err(
+                TypeErrorKind::ConditionNotBool {
+                    found: cond_ty.display_name(),
+                },
+                span,
+                format!(
+                    "`{label}` condition must be `bool`, found `{}`",
+                    cond_ty.display_name()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check an assignment: mutability + LHS/RHS type compatibility.
+    ///
+    /// Used for both `Stmt::Assign` and `Expr::Assign_`.
+    fn check_assign(
+        &mut self,
+        target: &Expr,
+        op: &AssignOp,
+        value: &Expr,
+        span: Span,
+    ) -> Result<(), LangError> {
+        let lhs_ty = self.infer_expr(target)?;
+        let rhs_ty = self.infer_expr(value)?;
+
+        // Mutability check: bare ident target → look up symbol.
+        if let Expr::Ident(name, ident_span) = target {
+            if let Some(&id) = self.resolutions.get(ident_span) {
+                if !id.is_unresolved() {
+                    if let Some(info) = self.symbols.get((id.0 as usize).saturating_sub(1)) {
+                        // Immutable if: kind == Local and mutable == false, or any
+                        // non-Local kind (Param, Const, Immutable, StateField, etc.)
+                        let is_immutable = match info.kind {
+                            SymbolKind::Local => !info.mutable,
+                            SymbolKind::Param | SymbolKind::Const | SymbolKind::Immutable => true,
+                            // StateField: mutable via self.field = ... (LHS is Member, not Ident)
+                            _ => false,
+                        };
+                        if is_immutable {
+                            return Err(type_err(
+                                TypeErrorKind::MutationOfImmutable { name: name.clone() },
+                                span,
+                                format!("cannot assign to `{name}`: binding is not declared `mut`"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // For compound assignment ops (+=, -=, *=, /=, %=):
+        // LHS must be numeric (or Unknown).
+        let is_compound = !matches!(op, AssignOp::Assign);
+        if is_compound && lhs_ty != ResolvedType::Unknown {
+            self.require_int_or_literal(&lhs_ty, &format!("{op:?}"), span)?;
+        }
+
+        // RHS must match LHS (with IntLiteral coercion).
+        if lhs_ty != ResolvedType::Unknown && rhs_ty != ResolvedType::Unknown {
+            if rhs_ty.is_int_literal() && (lhs_ty.is_integer() || lhs_ty.is_int_literal()) {
+                self.expr_types.insert(expr_span(value), lhs_ty.clone());
+            } else if rhs_ty != lhs_ty && rhs_ty.coerce_int_literal(&lhs_ty).is_none() {
+                return Err(type_err(
+                    TypeErrorKind::TypeMismatch {
+                        expected: lhs_ty.display_name(),
+                        found: rhs_ty.display_name(),
+                    },
+                    span,
+                    format!(
+                        "assignment type mismatch: cannot assign `{}` to `{}`",
+                        rhs_ty.display_name(),
+                        lhs_ty.display_name()
+                    ),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Infer the "result type" of a block (list of statements).
+    ///
+    /// Returns the type of the last statement if it is a bare expression
+    /// statement (`Stmt::Expr`), or `Unit` if the block ends with any other
+    /// kind of statement or is empty.
+    ///
+    /// Does NOT double-walk: the last `Stmt::Expr` is handled by calling
+    /// `infer_expr` directly (not `walk_stmt`) to avoid recording the type
+    /// twice.
+    fn infer_block_type(&mut self, stmts: &[Stmt]) -> Result<ResolvedType, LangError> {
+        if stmts.is_empty() {
+            return Ok(ResolvedType::Unit);
+        }
+        // Walk all-but-last for side effects.
+        for s in &stmts[..stmts.len() - 1] {
+            self.walk_stmt(s)?;
+        }
+        let last = &stmts[stmts.len() - 1];
+        // If last is a bare expression, its type is the block's type.
+        if let Stmt::Expr(e, _) = last {
+            self.infer_expr(e) // also records in expr_types
+        } else {
+            self.walk_stmt(last)?;
+            Ok(ResolvedType::Unit)
+        }
+    }
+
+    /// Unify two types for block/branch expressions.
+    ///
+    /// Used by `Expr::If_` and `Expr::Match_` to unify branch types without
+    /// needing `Expr` references (unlike `unify_eq_types`).
+    fn unify_branch_types(
+        &self,
+        t1: &ResolvedType,
+        t2: &ResolvedType,
+        op: &str,
+        span: Span,
+    ) -> Result<ResolvedType, LangError> {
+        if t1 == t2 {
+            return Ok(t1.clone());
+        }
+        if let Some(c) = t1.coerce_int_literal(t2) {
+            return Ok(c.clone());
+        }
+        if let Some(c) = t2.coerce_int_literal(t1) {
+            return Ok(c.clone());
+        }
+        if t1.is_int_literal() && t2.is_int_literal() {
+            return Ok(ResolvedType::IntLiteral);
+        }
+        Err(type_err(
+            TypeErrorKind::TypeMismatch {
+                expected: t1.display_name(),
+                found: t2.display_name(),
+            },
+            span,
+            format!(
+                "{op} branch types must match: `{}` vs `{}`",
+                t1.display_name(),
+                t2.display_name()
+            ),
+        ))
     }
 }
 

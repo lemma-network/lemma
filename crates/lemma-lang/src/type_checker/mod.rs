@@ -62,15 +62,16 @@ pub use self::types::{ResolvedType, SymbolId};
 /// (consumed by the Step 4 safety analyzer) or `Err(LangError::Type(...))`
 /// on the first type violation found.
 ///
-/// ## Current coverage (P3·Step 3c)
+/// ## Current coverage (P3·Step 3e)
 ///
 /// - Duplicate top-level declaration names (3a)
 /// - Name resolution — every identifier linked to its declaration (3b)
 /// - Expression typing — literals, operators, ternary, nullish (3c)
+/// - Calls, member access, index, struct/array/tuple literals (3d)
+/// - Statement checking — let inference, return types, mutability,
+///   conditions, assignment, if/match/try expressions (3e)
 ///
 /// Deferred to later subtasks:
-/// - Calls, member access, index, struct/array/tuple literals → 3d
-/// - Statement checking, return types, mutability → 3e
 /// - Generics + trait bounds → 3f
 /// - Declaration walk → fully-populated TypedAst → 3g
 ///
@@ -106,10 +107,13 @@ impl Checker {
         self.check_no_duplicate_top_level_names(&ast.items)?;
 
         // Pass 2 (3b/3d): name resolution + SymbolSig building.
-        let (symbols, resolutions, sigs) = resolver::resolve(&ast)?;
+        let (mut symbols, resolutions, sigs) = resolver::resolve(&ast)?;
 
         // Build flat global-type namespace for the Inferer's lower_cast_target.
         // Maps each type-namespace symbol's name to its SymbolId.
+        // Collected from cloned strings + computed SymbolIds — no live borrows
+        // into `symbols` after this block, so the subsequent `&mut symbols`
+        // borrow for the Inferer is safe.
         let global_types: BTreeMap<String, SymbolId> = symbols
             .iter()
             .enumerate()
@@ -127,11 +131,13 @@ impl Checker {
             .map(|(i, s)| (s.name.clone(), SymbolId((i + 1) as u32)))
             .collect();
 
-        // Pass 3 (3c/3d): expression typing — populates expr_types.
+        // Pass 3 (3c/3e): expression + statement typing — populates expr_types.
+        // `symbols` is passed mutably so the Inferer can back-fill unannotated
+        // `let` binding types (DB-A27).
         let mut expr_types = BTreeMap::new();
         {
             let mut inferer = infer::Inferer::new(
-                &symbols,
+                &mut symbols,
                 &resolutions,
                 &sigs,
                 &global_types,
