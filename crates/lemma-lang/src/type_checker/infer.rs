@@ -62,6 +62,12 @@ pub(super) struct Inferer<'a> {
     /// `None` outside any function body.  Used by `check_return` (3e) to
     /// validate that `return expr` matches the declared return type.
     current_fn_ret: Option<ResolvedType>,
+    /// The [`SymbolId`] of the contract currently being walked, set in
+    /// `walk_item` when entering a `Contract` or `Token_` item.
+    ///
+    /// `None` outside any contract body.  Used by `check_assign` (P3-checker-7)
+    /// to look up state fields and immutables for `self.field = x` LHS checks.
+    current_contract_id: Option<SymbolId>,
 }
 
 impl<'a> Inferer<'a> {
@@ -81,6 +87,7 @@ impl<'a> Inferer<'a> {
             struct_traits,
             expr_types,
             current_fn_ret: None,
+            current_contract_id: None,
         }
     }
 
@@ -101,14 +108,32 @@ impl<'a> Inferer<'a> {
                 self.infer_expr(&c.value)?;
             }
             Item::Contract(c) => {
+                // Set current_contract_id for P3-checker-7 (self.field mutability).
+                let prev_contract = self.current_contract_id.take();
+                self.current_contract_id = self
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| s.kind == SymbolKind::Contract && s.name == c.name)
+                    .map(|(i, _)| SymbolId((i + 1) as u32));
                 for member in &c.members {
                     self.walk_contract_member(member)?;
                 }
+                self.current_contract_id = prev_contract;
             }
             Item::Token_(t) => {
+                // Set current_contract_id for P3-checker-7 (self.field mutability).
+                let prev_contract = self.current_contract_id.take();
+                self.current_contract_id = self
+                    .symbols
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| s.kind == SymbolKind::Contract && s.name == t.name)
+                    .map(|(i, _)| SymbolId((i + 1) as u32));
                 for member in &t.members {
                     self.walk_contract_member(member)?;
                 }
+                self.current_contract_id = prev_contract;
             }
             Item::Struct(s) => {
                 for member in &s.members {
@@ -462,7 +487,9 @@ impl<'a> Inferer<'a> {
                 Ok(ResolvedType::Tuple(types?))
             }
             Expr::New {
-                ty: type_name, args, ..
+                ty: type_name,
+                args,
+                ..
             } => {
                 for arg in args {
                     match arg {
@@ -1138,6 +1165,106 @@ impl<'a> Inferer<'a> {
         super::lower::lower_type_with(ty, &recurse, &resolve_named)
     }
 
+    /// Validate that a named type annotation has the correct number of generic
+    /// type arguments (P3-checker-12).
+    ///
+    /// Called from `check_let` (via `check_type_annotation_counts`) when a
+    /// `let x: Queue<u128, bool>` annotation is present.  Errors if the
+    /// provided arg count does not match the declared generic param count.
+    ///
+    /// Skips the check when:
+    /// - The type name is not in `global_types` (import or deferred).
+    /// - The type has no sig (e.g. primitives, type aliases).
+    /// - `provided_args.len() == 0` — uninstantiated generic (e.g. `let q: Queue`).
+    fn check_generic_arg_count(
+        &self,
+        type_name: &str,
+        provided_args: &[ResolvedType],
+        span: Span,
+    ) -> Result<(), LangError> {
+        // Skip if 0 args provided — uninstantiated generic is allowed.
+        if provided_args.is_empty() {
+            return Ok(());
+        }
+        let Some(&type_id) = self.global_types.get(type_name) else {
+            return Ok(()); // Import or deferred — skip.
+        };
+        let expected = match self.sigs.get(&type_id) {
+            Some(SymbolSig::Struct(sig)) => sig.generic_params.len(),
+            Some(SymbolSig::Enum(sig)) => sig.generic_params.len(),
+            _ => return Ok(()), // Function sig or unknown — skip.
+        };
+        if provided_args.len() != expected {
+            return Err(type_err(
+                TypeErrorKind::WrongTypeArgCount {
+                    name: type_name.to_owned(),
+                    expected,
+                    found: provided_args.len(),
+                },
+                span,
+                format!(
+                    "type `{}` expects {} type argument(s), got {}",
+                    type_name,
+                    expected,
+                    provided_args.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Walk a type annotation and validate all `Named` type arg counts.
+    ///
+    /// Recursively checks all `Type::Named(name, args)` nodes in `ty`.
+    /// Called from `check_let` when an annotation is present.
+    fn check_type_annotation_counts(
+        &self,
+        ty: &crate::parser::ast::Type,
+        span: Span,
+    ) -> Result<(), LangError> {
+        match ty {
+            crate::parser::ast::Type::Named(name, args) => {
+                // Skip `_` (inferred lambda param placeholder).
+                if name == "_" {
+                    return Ok(());
+                }
+                let lowered_args: Vec<ResolvedType> =
+                    args.iter().map(|a| self.lower_cast_target(a)).collect();
+                self.check_generic_arg_count(name, &lowered_args, span)?;
+                // Recurse into args.
+                for arg in args {
+                    self.check_type_annotation_counts(arg, span)?;
+                }
+            }
+            crate::parser::ast::Type::Array(inner)
+            | crate::parser::ast::Type::Set(inner)
+            | crate::parser::ast::Type::Option_(inner)
+            | crate::parser::ast::Type::FixedArray(inner, _) => {
+                self.check_type_annotation_counts(inner, span)?;
+            }
+            crate::parser::ast::Type::Map(k, v)
+            | crate::parser::ast::Type::FastMap(k, v)
+            | crate::parser::ast::Type::Result_(k, v) => {
+                self.check_type_annotation_counts(k, span)?;
+                self.check_type_annotation_counts(v, span)?;
+            }
+            crate::parser::ast::Type::Tuple(elems) => {
+                for e in elems {
+                    self.check_type_annotation_counts(e, span)?;
+                }
+            }
+            crate::parser::ast::Type::Fn(params, ret) => {
+                for p in params {
+                    self.check_type_annotation_counts(p, span)?;
+                }
+                self.check_type_annotation_counts(ret, span)?;
+            }
+            // Primitives and built-in compound types — no named type to check.
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Type-check a cast expression `from_ty as to_ty`.
     ///
     /// Only integer widening is supported via `as`.  Narrowing must use
@@ -1241,25 +1368,19 @@ impl<'a> Inferer<'a> {
 
                 // Generic substitution (3f): if the callee has generic params,
                 // infer the substitution map from the call-site arg types.
-                let generic_params: &[(String, Option<SymbolId>)] =
-                    if let Some(fn_id) = callee_fn_id {
-                        if let Some(SymbolSig::Function(sig)) = self.sigs.get(&fn_id) {
-                            &sig.generic_params // borrow from sigs — lifetime ok
-                        } else {
-                            &[]
-                        }
-                    } else {
-                        &[]
-                    };
+                // Also capture sig.params for named-arg alignment (P3-checker-13).
+                // Clone both to avoid lifetime issues with the `sigs` borrow.
+                let mut generic_params_owned: Vec<(String, Option<SymbolId>)> = Vec::new();
+                let mut sig_params_owned: Vec<(String, ResolvedType, bool)> = Vec::new();
+                if let Some(fn_id) = callee_fn_id {
+                    if let Some(SymbolSig::Function(sig)) = self.sigs.get(&fn_id) {
+                        generic_params_owned = sig.generic_params.clone();
+                        sig_params_owned = sig.params.clone();
+                    }
+                }
 
-                // We need to own the generic_params slice for the duration of this call.
-                // Clone it to avoid lifetime issues with the `sigs` borrow.
-                let generic_params_owned: Vec<(String, Option<SymbolId>)> = generic_params.to_vec();
-
-                // Filter to positional args ONCE — both inference and checking
-                // must use the same positional-only view so param_types[i] aligns
-                // with arg_types[i] in both passes.
-                // TODO(3g): named-arg reordering (match by name, not position).
+                // Filter to positional args for generic type inference — positional
+                // args align with param_types[i] by index.
                 let positional_args: Vec<&ResolvedType> = arg_types
                     .iter()
                     .zip(args.iter())
@@ -1277,11 +1398,37 @@ impl<'a> Inferer<'a> {
                 if !subst.is_empty() {
                     self.check_trait_bounds(&subst, &generic_params_owned, span)?;
                 }
-                for (i, (param_ty, arg_ty)) in
-                    param_types.iter().zip(positional_args.iter()).enumerate()
-                {
+
+                // Build aligned (param_type, arg_type) pairs for type checking.
+                // Positional args align by index; named args align by param name
+                // (P3-checker-13).  Unknown named params are skipped — the resolver
+                // already emitted UndefinedName for them.
+                let mut aligned: Vec<(&ResolvedType, &ResolvedType)> = Vec::new();
+                let mut positional_idx = 0usize;
+                for (arg, arg_ty) in args.iter().zip(arg_types.iter()) {
+                    match arg {
+                        CallArg::Positional(_) => {
+                            if let Some(param_ty) = param_types.get(positional_idx) {
+                                aligned.push((param_ty, arg_ty));
+                            }
+                            positional_idx += 1;
+                        }
+                        CallArg::Named(name, _) => {
+                            // Match by param name from sig_params (if available).
+                            if let Some((_, param_ty, _)) =
+                                sig_params_owned.iter().find(|(n, _, _)| n == name)
+                            {
+                                aligned.push((param_ty, arg_ty));
+                            }
+                            // Unknown named param → skip (UndefinedName already
+                            // caught by resolver).
+                        }
+                    }
+                }
+
+                for (i, (param_ty, arg_ty)) in aligned.iter().enumerate() {
                     let concrete_param = if subst.is_empty() {
-                        param_ty.clone()
+                        (*param_ty).clone()
                     } else {
                         substitute(param_ty, &subst)
                     };
@@ -1598,6 +1745,12 @@ impl<'a> Inferer<'a> {
         expr: &Expr,
         span: Span,
     ) -> Result<(), LangError> {
+        // P3-checker-12: validate generic arg counts in the type annotation.
+        // Do this before inferring the RHS so annotation errors are reported first.
+        if let Some(ann) = _ty {
+            self.check_type_annotation_counts(ann, span)?;
+        }
+
         let rhs_ty = self.infer_expr(expr)?;
 
         // For simple `let x (: T)? = rhs` patterns: find the binding's SymbolId
@@ -1859,10 +2012,66 @@ impl<'a> Inferer<'a> {
             }
         }
 
-        // Note: only bare Ident LHS is checked for mutability above.
-        // Index LHS (`arr[i] = x`) and Member LHS (`self.field = x`) mutability
-        // are deferred to 3g when full collection/state-access context is available.
-        // TODO(3g): check mutability for Index and Member assignment targets.
+        // Member LHS (`self.field = x`) — check immutability of state fields.
+        // Only `self.field` is checked here; cross-contract member assignment
+        // is deferred to Step 4 (call-graph / EffAuth analysis).
+        if let Expr::Member(base, field_name, _) = target {
+            if let Expr::Ident(_, ident_span) = base.as_ref() {
+                if let Some(&id) = self.resolutions.get(ident_span) {
+                    if let Some(info) = self.symbols.get((id.0 as usize).saturating_sub(1)) {
+                        if info.kind == SymbolKind::SelfBinding {
+                            // self.field — check if field_name is an `immutable` symbol.
+                            let is_immutable = self
+                                .symbols
+                                .iter()
+                                .any(|s| s.name == *field_name && s.kind == SymbolKind::Immutable);
+                            if is_immutable {
+                                return Err(type_err(
+                                    TypeErrorKind::MutationOfImmutable {
+                                        name: field_name.clone(),
+                                    },
+                                    span,
+                                    format!(
+                                        "cannot assign to `self.{}`: field is `immutable`",
+                                        field_name
+                                    ),
+                                ));
+                            }
+                            // StateField is mutable — OK.
+                        }
+                    }
+                }
+            }
+        }
+
+        // Index LHS (`arr[i] = x`) — check if base binding is immutable.
+        if let Expr::Index(base, _, _) = target {
+            if let Expr::Ident(name, ident_span) = base.as_ref() {
+                if let Some(&id) = self.resolutions.get(ident_span) {
+                    if !id.is_unresolved() {
+                        if let Some(info) = self.symbols.get((id.0 as usize).saturating_sub(1)) {
+                            let is_immutable = match info.kind {
+                                SymbolKind::Local => !info.mutable,
+                                SymbolKind::Param | SymbolKind::Const | SymbolKind::Immutable => {
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if is_immutable {
+                                return Err(type_err(
+                                    TypeErrorKind::MutationOfImmutable { name: name.clone() },
+                                    span,
+                                    format!(
+                                        "cannot assign to `{}[...]`: binding is not declared `mut`",
+                                        name
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // For compound assignment ops (+=, -=, *=, /=, %=):
         // LHS must be numeric (or Unknown).
@@ -2212,7 +2421,7 @@ pub(super) fn substitute(
 ///
 /// `arg_types` must be pre-filtered to positional args only so that
 /// `param_types[i]` and `arg_types[i]` refer to the same parameter.
-/// Named-arg reordering is deferred to 3g. (TODO(3g))
+/// Named-arg reordering is handled in `infer_call` (P3-checker-13, 3g).
 pub(super) fn infer_type_args(
     param_types: &[ResolvedType],
     arg_types: &[&ResolvedType],

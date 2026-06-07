@@ -49,8 +49,9 @@
 use std::collections::BTreeMap;
 
 use crate::lexer::token::Span;
-use crate::parser::ast::Ast;
+use crate::parser::ast::{Ast, Item};
 
+use super::typed_contract::TypedContract;
 use super::types::{ResolvedType, SymbolId, SymbolInfo, SymbolSig};
 
 /// The typed AST returned by [`crate::type_checker::check`].
@@ -193,6 +194,27 @@ impl TypedAst {
     #[must_use]
     pub fn has_name_resolution(&self) -> bool {
         !self.symbols.is_empty()
+    }
+
+    /// Iterate over all contracts and tokens in the program, each as a borrowed
+    /// [`TypedContract`] view.
+    ///
+    /// Produced by 3g (P3-checker-1).  Consumed by the Step 4 safety analyzer:
+    /// `pub fn analyze_safety(contract: &TypedContract) -> Result<(), Vec<SafetyError>>`
+    ///
+    /// Skips non-contract items (structs, enums, functions, etc.).
+    #[must_use]
+    pub fn contracts(&self) -> Vec<TypedContract<'_>> {
+        use super::typed_contract::ContractItem;
+        self.ast
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Contract(c) => Some(TypedContract::new(self, ContractItem::Contract(c))),
+                Item::Token_(t) => Some(TypedContract::new(self, ContractItem::Token(t))),
+                _ => None,
+            })
+            .collect()
     }
 }
 

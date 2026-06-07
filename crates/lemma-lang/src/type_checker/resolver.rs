@@ -70,10 +70,16 @@ pub(super) type ResolveOutput = (
 /// [`LangError::Type`] encountered on failure.
 pub(super) fn resolve(ast: &Ast) -> Result<ResolveOutput, LangError> {
     let mut r = Resolver::new();
+    // Pass 1: register all top-level names into the global scope.
     r.build_global_scope(ast)?;
+    // Pass 2: resolve item bodies (functions, structs, enums, contracts, …).
     for item in &ast.items {
         r.resolve_item(item)?;
     }
+    // Pass 3 (P3-checker-3): re-lower any SymbolInfo.ty == Unknown that had a
+    // forward-reference miss during Pass 1.  All type-namespace symbols are now
+    // registered, so lower_type will succeed for previously-unseen names.
+    r.re_lower_forward_refs();
     Ok((r.symbols, r.resolutions, r.sigs, r.struct_traits))
 }
 
@@ -138,6 +144,40 @@ impl Resolver {
             kind,
             ty,
             mutable: false,
+            pending_ann: None,
+        });
+        id
+    }
+
+    /// Allocate a symbol with an explicit resolved type AND a pending annotation
+    /// for forward-reference re-lowering (P3-checker-3).
+    ///
+    /// When `lower_type(ann)` returns `Unknown` because the annotated type is a
+    /// forward-reference, store the original annotation so `re_lower_forward_refs`
+    /// can retry after all declarations are in scope.
+    fn alloc_typed_with_ann(
+        &mut self,
+        name: impl Into<String>,
+        decl_span: Span,
+        kind: SymbolKind,
+        ty: ResolvedType,
+        ann: Option<Type>,
+    ) -> SymbolId {
+        let id = SymbolId((self.symbols.len() + 1) as u32);
+        // Only store pending_ann when ty == Unknown AND an annotation was provided.
+        // If ty resolved successfully, no re-lowering is needed.
+        let pending_ann = if ty == ResolvedType::Unknown {
+            ann
+        } else {
+            None
+        };
+        self.symbols.push(SymbolInfo {
+            name: name.into(),
+            decl_span,
+            kind,
+            ty,
+            mutable: false,
+            pending_ann,
         });
         id
     }
@@ -146,6 +186,45 @@ impl Resolver {
     /// and value symbols deferred to a later subtask).
     fn alloc(&mut self, name: impl Into<String>, decl_span: Span, kind: SymbolKind) -> SymbolId {
         self.alloc_typed(name, decl_span, kind, ResolvedType::Unknown)
+    }
+
+    // ── Forward-reference re-lowering (P3-checker-3) ──────────────────────
+
+    /// Re-lower any `SymbolInfo.ty == Unknown` entries that had a forward-reference
+    /// miss during the first pass.
+    ///
+    /// At this point ALL type-namespace symbols are registered in the global type
+    /// scope, so `lower_type` will succeed for previously-unseen names.
+    ///
+    /// Uses a two-step collect-then-apply pattern to avoid borrow conflicts:
+    /// Step 1 collects `(index, annotation)` pairs (no `lower_type` call yet).
+    /// Step 2 calls `lower_type` for each pair and patches `symbols[i]`.
+    fn re_lower_forward_refs(&mut self) {
+        // Step 1: collect (index, annotation) pairs — no lower_type call yet.
+        // `self.symbols` is immutably borrowed here; no conflict.
+        let to_relower: Vec<(usize, Type)> = self
+            .symbols
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                if s.ty == ResolvedType::Unknown {
+                    s.pending_ann.clone().map(|ann| (i, ann))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Step 2: re-lower each (self.symbols is no longer borrowed).
+        for (i, ann) in to_relower {
+            let new_ty = self.lower_type(&ann);
+            if new_ty != ResolvedType::Unknown {
+                self.symbols[i].ty = new_ty;
+            }
+            // Always clear pending_ann — even if still Unknown (import or truly
+            // undefined — the UndefinedType error was already emitted in Pass 2).
+            self.symbols[i].pending_ann = None;
+        }
     }
 
     /// Retroactively set the resolved type on an already-allocated symbol.
@@ -259,10 +338,10 @@ impl Resolver {
                     //       in the same file.  The global-scope build processes
                     //       items sequentially, so the type isn't in scope yet
                     //       when lower_type runs for the Const.
-                    // TODO(3g): two-phase type lowering — after all declarations
-                    // are resolved, re-lower any Unknown `SymbolInfo.ty` entries
-                    // that suffered forward-reference miss.  Tracked in
-                    // living-notes Technical Debt as P3-checker-3.
+                    // Forward-reference miss: the type is not yet in scope.
+                    // `pending_ann` is set on the SymbolInfo so that
+                    // `re_lower_forward_refs` (Pass 3) can retry after all
+                    // declarations are registered (P3-checker-3, closed in 3g).
                     None => ResolvedType::Unknown,
                 }
             }
@@ -443,9 +522,16 @@ impl Resolver {
                 Item::Const(c) => {
                     // Lower the const type; primitives always resolve immediately.
                     // User-defined type references in a const annotation that appear
-                    // before the type declaration get Unknown (deferred to 3g).
+                    // before the type declaration get Unknown (deferred to 3g via
+                    // pending_ann + re_lower_forward_refs — P3-checker-3).
                     let ty = self.lower_type(&c.ty);
-                    let id = self.alloc_typed(&c.name, c.span, SymbolKind::Const, ty);
+                    let id = self.alloc_typed_with_ann(
+                        &c.name,
+                        c.span,
+                        SymbolKind::Const,
+                        ty,
+                        Some(c.ty.clone()),
+                    );
                     self.define_value_or_err(&c.name, id, c.span)?;
                 }
                 Item::TypeAlias(a) => {
@@ -499,14 +585,23 @@ impl Resolver {
                 for gp in &s.generic_params {
                     self.register_generic_param(gp)?;
                 }
+                // Pre-register struct methods in the value scope so that
+                // resolve_function_body can find them via lookup_value.
+                // (Top-level struct methods are NOT in the global scope from
+                // build_global_scope — only Item::Function items are.)
+                self.push_value_scope();
+                for member in &s.members {
+                    if let StructMember::Method(f) = member {
+                        let id = self.alloc(&f.name, f.span, SymbolKind::Function);
+                        self.define_value_or_err(&f.name, id, f.span)?;
+                    }
+                }
                 for member in &s.members {
                     if let StructMember::Method(f) = member {
                         self.resolve_function_body(f)?;
                     }
                 }
                 // Build StructSig — generic params are in scope so lower_type resolves correctly.
-                // Struct methods are NOT in any value scope here (they're not in global scope),
-                // so methods list is empty for 3d; deferred to 3g.
                 // FieldDecl has no `default` field in the AST (struct fields
                 // are always required in Lem).  `has_default` is always false
                 // here; the field exists in StructSig for future extensibility
@@ -522,6 +617,20 @@ impl Resolver {
                         }
                     })
                     .collect();
+                // Collect method SymbolIds — look up each method by name in the
+                // value scope while the struct's method scope is still active.
+                let methods: Vec<(String, SymbolId)> = s
+                    .members
+                    .iter()
+                    .filter_map(|m| {
+                        if let StructMember::Method(f) = m {
+                            self.lookup_value(&f.name).map(|id| (f.name.clone(), id))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                self.pop_value_scope();
                 if let Some(struct_id) = self.lookup_type(&s.name) {
                     let generic_params: Vec<String> =
                         s.generic_params.iter().map(|gp| gp.name.clone()).collect();
@@ -529,7 +638,7 @@ impl Resolver {
                         struct_id,
                         SymbolSig::Struct(StructSig {
                             fields,
-                            methods: Vec::new(), // TODO(3g): populate struct method SymbolIds
+                            methods,
                             generic_params,
                         }),
                     );
@@ -558,8 +667,15 @@ impl Resolver {
                     })
                     .collect();
                 if let Some(enum_id) = self.lookup_type(&e.name) {
-                    self.sigs
-                        .insert(enum_id, SymbolSig::Enum(EnumSig { variants }));
+                    let generic_params: Vec<String> =
+                        e.generic_params.iter().map(|gp| gp.name.clone()).collect();
+                    self.sigs.insert(
+                        enum_id,
+                        SymbolSig::Enum(EnumSig {
+                            variants,
+                            generic_params,
+                        }),
+                    );
                 }
                 self.pop_type_scope();
             }
@@ -626,18 +742,36 @@ impl Resolver {
             ContractMember::State(s) => {
                 for field in &s.fields {
                     let ty = self.lower_type(&field.ty);
-                    let id = self.alloc_typed(&field.name, field.span, SymbolKind::StateField, ty);
+                    let id = self.alloc_typed_with_ann(
+                        &field.name,
+                        field.span,
+                        SymbolKind::StateField,
+                        ty,
+                        Some(field.ty.clone()),
+                    );
                     self.define_value_or_err(&field.name, id, field.span)?;
                 }
             }
             ContractMember::Const(c) => {
                 let ty = self.lower_type(&c.ty);
-                let id = self.alloc_typed(&c.name, c.span, SymbolKind::Const, ty);
+                let id = self.alloc_typed_with_ann(
+                    &c.name,
+                    c.span,
+                    SymbolKind::Const,
+                    ty,
+                    Some(c.ty.clone()),
+                );
                 self.define_value_or_err(&c.name, id, c.span)?;
             }
             ContractMember::Immutable(i) => {
                 let ty = self.lower_type(&i.ty);
-                let id = self.alloc_typed(&i.name, i.span, SymbolKind::Immutable, ty);
+                let id = self.alloc_typed_with_ann(
+                    &i.name,
+                    i.span,
+                    SymbolKind::Immutable,
+                    ty,
+                    Some(i.ty.clone()),
+                );
                 self.define_value_or_err(&i.name, id, i.span)?;
             }
             ContractMember::Function(f) => {
@@ -697,7 +831,13 @@ impl Resolver {
                 self.push_value_scope();
                 for p in &m.params {
                     let ty = self.lower_type(&p.ty);
-                    let id = self.alloc_typed(&p.name, p.span, SymbolKind::Param, ty);
+                    let id = self.alloc_typed_with_ann(
+                        &p.name,
+                        p.span,
+                        SymbolKind::Param,
+                        ty,
+                        Some(p.ty.clone()),
+                    );
                     let _ = self.define_value(&p.name, id);
                     self.resolve_type_ref(&p.ty, p.span)?;
                 }
@@ -744,6 +884,20 @@ impl Resolver {
                         }
                     })
                     .collect();
+                // Collect method SymbolIds while the struct's type scope is still
+                // active.  Contract-nested struct methods are registered in the
+                // contract's value scope by resolve_function_body.
+                let methods: Vec<(String, SymbolId)> = s
+                    .members
+                    .iter()
+                    .filter_map(|m| {
+                        if let StructMember::Method(f) = m {
+                            self.lookup_value(&f.name).map(|id| (f.name.clone(), id))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 if let Some(struct_id) = self.lookup_type(&s.name) {
                     let generic_params: Vec<String> =
                         s.generic_params.iter().map(|gp| gp.name.clone()).collect();
@@ -751,7 +905,7 @@ impl Resolver {
                         struct_id,
                         SymbolSig::Struct(StructSig {
                             fields,
-                            methods: Vec::new(), // TODO(3g): populate struct method SymbolIds
+                            methods,
                             generic_params,
                         }),
                     );
@@ -837,7 +991,13 @@ impl Resolver {
         self.push_value_scope();
         for p in &f.params {
             let ty = self.lower_type(&p.ty);
-            let id = self.alloc_typed(&p.name, p.span, SymbolKind::Param, ty);
+            let id = self.alloc_typed_with_ann(
+                &p.name,
+                p.span,
+                SymbolKind::Param,
+                ty,
+                Some(p.ty.clone()),
+            );
             // In the same function signature, duplicate param names are errors.
             self.define_value_or_err(&p.name, id, p.span)?;
             self.resolve_type_ref(&p.ty, p.span)?;
@@ -887,9 +1047,10 @@ impl Resolver {
     /// AST, so the enclosing context span is used as a proxy — placing the
     /// `UndefinedType` diagnostic at the nearest declaration site.
     ///
-    /// TODO(3g): once type-annotation spans are threaded through the AST,
-    /// replace `context_span` with the type node's own span for precise
-    /// per-annotation location.
+    /// QoL (3g): type-annotation spans are not yet threaded through the AST
+    /// (each `Type::Named` node has no span of its own).  The enclosing
+    /// declaration span is used as a proxy.  When annotation spans are added
+    /// to the AST, replace `context_span` with the type node's own span.
     fn resolve_type_ref(&mut self, ty: &Type, context_span: Span) -> Result<(), LangError> {
         match ty {
             // Built-in primitive and composite types need no resolution.
@@ -979,14 +1140,29 @@ impl Resolver {
                     // For a simple `let x: T = expr` pattern, lower the
                     // annotation to get the local's type.  For destructuring
                     // or unannotated let, use Unknown (inferred in 3c/3e).
-                    let sym_ty = if matches!(pattern, Pattern::Ident(_, _)) {
-                        ty.as_ref()
+                    let (sym_ty, ann_for_pending) = if matches!(pattern, Pattern::Ident(_, _)) {
+                        let ann = ty.as_ref();
+                        let lowered = ann
                             .map(|t| self.lower_type(t))
-                            .unwrap_or(ResolvedType::Unknown)
+                            .unwrap_or(ResolvedType::Unknown);
+                        // Store annotation for forward-ref re-lowering only when
+                        // the annotation was provided but lowered to Unknown.
+                        let pending = if lowered == ResolvedType::Unknown {
+                            ann.cloned()
+                        } else {
+                            None
+                        };
+                        (lowered, pending)
                     } else {
-                        ResolvedType::Unknown
+                        (ResolvedType::Unknown, None)
                     };
-                    let id = self.alloc_typed(&name, bspan, SymbolKind::Local, sym_ty);
+                    let id = self.alloc_typed_with_ann(
+                        &name,
+                        bspan,
+                        SymbolKind::Local,
+                        sym_ty,
+                        ann_for_pending,
+                    );
                     if *mutable {
                         self.set_sym_mutable(id);
                     }
@@ -1000,7 +1176,13 @@ impl Resolver {
                 self.resolve_type_ref(&c.ty, c.span)?;
                 self.resolve_expr(&c.value)?;
                 let ty = self.lower_type(&c.ty);
-                let id = self.alloc_typed(&c.name, c.span, SymbolKind::Const, ty);
+                let id = self.alloc_typed_with_ann(
+                    &c.name,
+                    c.span,
+                    SymbolKind::Const,
+                    ty,
+                    Some(c.ty.clone()),
+                );
                 self.define_value_or_err(&c.name, id, c.span)?;
             }
             Stmt::Assign { target, value, .. } => {
@@ -1244,7 +1426,13 @@ impl Resolver {
                     // `_` placeholder (unannotated lambda param) lowers to Unknown;
                     // the expression typer resolves it in 3c.
                     let ty = self.lower_type(&p.ty);
-                    let id = self.alloc_typed(&p.name, p.span, SymbolKind::Param, ty);
+                    let id = self.alloc_typed_with_ann(
+                        &p.name,
+                        p.span,
+                        SymbolKind::Param,
+                        ty,
+                        Some(p.ty.clone()),
+                    );
                     let _ = self.define_value(&p.name, id);
                     self.resolve_type_ref(&p.ty, p.span)?;
                 }
@@ -1259,16 +1447,14 @@ impl Resolver {
                 self.pop_value_scope();
             }
             // `new Foo(args)` — type name in value position.
-            Expr::New { ty, args, .. } => {
+            Expr::New { ty, args, span, .. } => {
                 // `ty` is a String here (the type name from the AST).
                 // We look it up in the type namespace.
-                // Note: Expr::New doesn't carry a Span for `ty` separately;
-                // the whole expression span is used.
-                // TODO(3g): thread precise spans for `ty` in Expr::New.
+                // Use the outer expression span for the error location — the
+                // `new` expression's span covers the entire `new Foo(...)` form,
+                // which is the best available location (QoL: resolver.rs:1267).
                 if self.lookup_type(ty).is_none() {
-                    // Use a zero-span placeholder; type name is in the error msg.
-                    let placeholder = Span::at(0, 0, 0);
-                    return Err(self.undef_type_err(ty, placeholder));
+                    return Err(self.undef_type_err(ty, *span));
                 }
                 for arg in args {
                     match arg {

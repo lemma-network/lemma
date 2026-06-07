@@ -420,6 +420,12 @@ pub struct EnumSig {
     /// Each field is `(field_name, resolved_type)`.
     /// Positional variants use synthetic names `"_0"`, `"_1"`, … (parser convention).
     pub variants: Vec<(String, Vec<(String, ResolvedType)>)>,
+    /// Generic type parameter names (e.g. `["T"]` for `enum Option<T>`).
+    ///
+    /// Populated in 3g from `Enum.generic_params`.  Analogous to
+    /// `StructSig.generic_params`.  Used by `check_generic_arg_count` (P3-checker-12)
+    /// to validate type annotation arg counts.
+    pub generic_params: Vec<String>,
 }
 
 // ─── SymbolId ─────────────────────────────────────────────────────────────────
@@ -469,7 +475,18 @@ impl SymbolId {
 /// for `let mut` local variables.  All other kinds (params, consts, state
 /// fields, immutables) are immutable for assignment purposes.  Populated by the
 /// resolver (3e) and consumed by the safety analyzer (Step 4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// ## `pending_ann` field (P3-checker-3)
+///
+/// When `lower_type` returns `Unknown` for a value-namespace symbol because the
+/// annotated type is a forward-reference (a struct/enum declared later in the
+/// same file), the original [`crate::parser::ast::Type`] annotation is stored
+/// here.  After all declarations are registered, `re_lower_forward_refs` retries
+/// the lowering and clears this field.  `None` for all other symbols.
+// Note: `Eq` is NOT derived here because `pending_ann: Option<Type>` does not
+// implement `Eq` (the parser `Type` enum contains `Expr` which has floats).
+// `PartialEq` is sufficient for all existing uses of `SymbolInfo` comparison.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SymbolInfo {
     /// The declared name of this symbol.
     pub name: String,
@@ -488,6 +505,14 @@ pub struct SymbolInfo {
     /// `true` only for `let mut` local variables.  All other kinds (params,
     /// consts, state fields, immutables) are immutable for assignment purposes.
     pub mutable: bool,
+    /// Pending type annotation for forward-reference re-lowering (P3-checker-3).
+    ///
+    /// Set in `alloc_typed` when `lower_type(ann)` returns `Unknown` and an
+    /// annotation was provided.  Cleared by `re_lower_forward_refs` after all
+    /// declarations are in scope.  `None` for all other symbols.
+    ///
+    /// `pub(super)` — only the resolver uses this field.
+    pub(super) pending_ann: Option<crate::parser::ast::Type>,
 }
 
 /// The kind of declaration a [`SymbolInfo`] describes.

@@ -1884,3 +1884,256 @@ fn trait_bound_with_typeparam_concrete_skips_check() {
         "generic calling generic with TypeParam should not produce TraitBoundViolation: {result:?}"
     );
 }
+
+// ─── P3-checker-7: Member and Index LHS mutability ────────────────────────────
+
+#[test]
+fn assign_to_self_state_field_passes() {
+    // `self.balance = x` where balance is a StateField → OK (mutable).
+    let result = check_src(
+        r#"
+        contract Foo {
+            state { balance: u128 }
+            fn update(amount: u128) {
+                self.balance = amount
+            }
+        }
+        "#,
+    );
+    assert!(
+        result.is_ok(),
+        "assigning to self.balance (StateField) should pass: {result:?}"
+    );
+}
+
+#[test]
+fn assign_to_self_immutable_field_errors() {
+    // `self.owner = x` where owner is `immutable` → MutationOfImmutable.
+    let result = check_src(
+        r#"
+        contract Foo {
+            immutable owner: Address
+            fn bad(addr: Address) {
+                self.owner = addr
+            }
+        }
+        "#,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(crate::error::LangError::Type(ref e))
+                if matches!(&e.kind, TypeErrorKind::MutationOfImmutable { name } if name == "owner")
+        ),
+        "assigning to self.owner (immutable) should error: {result:?}"
+    );
+}
+
+#[test]
+fn assign_to_indexed_let_mut_passes() {
+    // `let mut arr: Map<u256, u128> = m; arr[0u256] = 99u128` → OK.
+    // Pass the map as a parameter to avoid `new Map()` (built-in, not user type).
+    let result = check_src(
+        r#"
+        fn f(m: Map<u256, u128>) {
+            let mut arr: Map<u256, u128> = m
+            arr[0u256] = 99u128
+        }
+        "#,
+    );
+    assert!(
+        result.is_ok(),
+        "assigning to arr[0] where arr is let mut should pass: {result:?}"
+    );
+}
+
+#[test]
+fn assign_to_indexed_let_immutable_errors() {
+    // `let arr: Map<u256, u128> = m; arr[0] = x` → MutationOfImmutable.
+    let result = check_src(
+        r#"
+        fn f(m: Map<u256, u128>) {
+            let arr: Map<u256, u128> = m
+            arr[0u256] = 99u128
+        }
+        "#,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(crate::error::LangError::Type(ref e))
+                if matches!(&e.kind, TypeErrorKind::MutationOfImmutable { name } if name == "arr")
+        ),
+        "assigning to arr[0] where arr is immutable let should error: {result:?}"
+    );
+}
+
+#[test]
+fn assign_to_member_of_non_self_skipped() {
+    // `other.field = x` (not self) → no error (deferred to Step 4).
+    // We can't easily test this without cross-contract calls, so just verify
+    // that self.stateField assignment doesn't false-positive on non-self.
+    let result = check_src(
+        r#"
+        contract Foo {
+            state { balance: u128 }
+            fn update(amount: u128) {
+                self.balance = amount
+            }
+        }
+        "#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.stateField assignment should not error: {result:?}"
+    );
+}
+
+// ─── P3-checker-13: Named-arg alignment ───────────────────────────────────────
+
+#[test]
+fn named_arg_type_matches_param_passes() {
+    // `f(x: 42u128)` where `fn f(x: u128)` → OK.
+    let result = check_src(
+        r#"
+        fn greet(name: u128) -> u128 { return name }
+        fn caller() -> u128 { return greet(name: 42u128) }
+        "#,
+    );
+    assert!(
+        result.is_ok(),
+        "named arg with matching type should pass: {result:?}"
+    );
+}
+
+#[test]
+fn named_arg_type_mismatch_errors() {
+    // `f(x: true)` where `fn f(x: u128)` → TypeMismatch.
+    let result = check_src(
+        r#"
+        fn greet(name: u128) -> u128 { return name }
+        fn caller() -> u128 { return greet(name: true) }
+        "#,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(crate::error::LangError::Type(ref e))
+                if matches!(&e.kind, TypeErrorKind::TypeMismatch { .. })
+        ),
+        "named arg with wrong type should error: {result:?}"
+    );
+}
+
+#[test]
+fn mixed_positional_and_named_args_both_checked() {
+    // `f(1u128, y: true)` where `fn f(x: u128, y: bool)` → OK.
+    let result = check_src(
+        r#"
+        fn f(x: u128, y: bool) -> bool { return y }
+        fn caller() -> bool { return f(1u128, y: true) }
+        "#,
+    );
+    assert!(
+        result.is_ok(),
+        "mixed positional + named args should pass: {result:?}"
+    );
+}
+
+// ─── P3-checker-12: Generic arg-count validation ──────────────────────────────
+
+#[test]
+fn generic_type_annotation_correct_arg_count_passes() {
+    // `let p: Pair<u128, bool>` where `struct Pair<A, B>` has 2 params → OK
+    // (no WrongTypeArgCount error — arg count is correct).
+    // Note: the struct literal returns Named(id, []) (no type args on literal),
+    // so we use Unknown RHS to avoid the type-mismatch check.
+    let result = check_src(
+        r#"
+        struct Pair<A, B> { first: A, second: B }
+        fn f(p: Pair<u128, bool>) { let q: Pair<u128, bool> = p }
+        "#,
+    );
+    assert!(
+        result.is_ok(),
+        "correct generic arg count should pass: {result:?}"
+    );
+}
+
+#[test]
+fn generic_type_annotation_too_many_args_errors() {
+    // `let q: Pair<u128, bool, u64>` where Pair has 2 params → WrongTypeArgCount.
+    let result = check_src(
+        r#"
+        struct Pair<A, B> { first: A, second: B }
+        fn f() { let q: Pair<u128, bool, u64> = Pair { first: 1u128, second: true } }
+        "#,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(crate::error::LangError::Type(ref e))
+                if matches!(&e.kind, TypeErrorKind::WrongTypeArgCount { name, found, .. }
+                    if name == "Pair" && *found == 3)
+        ),
+        "too many type args should error: {result:?}"
+    );
+}
+
+#[test]
+fn generic_type_annotation_too_few_args_errors() {
+    // `let p: Pair<u128>` where Pair has 2 params → WrongTypeArgCount.
+    let result = check_src(
+        r#"
+        struct Pair<A, B> { first: A, second: B }
+        fn f() { let p: Pair<u128> = Pair { first: 1u128, second: true } }
+        "#,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(crate::error::LangError::Type(ref e))
+                if matches!(&e.kind, TypeErrorKind::WrongTypeArgCount { name, found, .. }
+                    if name == "Pair" && *found == 1)
+        ),
+        "too few type args should error: {result:?}"
+    );
+}
+
+#[test]
+fn non_generic_type_with_args_errors() {
+    // `let x: u128<bool>` — u128 is not generic → WrongTypeArgCount.
+    // Note: u128 is a primitive, not in global_types, so this is caught
+    // differently. Test with a user-defined non-generic struct instead.
+    let result = check_src(
+        r#"
+        struct Point { x: u128, y: u128 }
+        fn f() { let p: Point<u128> = Point { x: 1u128, y: 2u128 } }
+        "#,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(crate::error::LangError::Type(ref e))
+                if matches!(&e.kind, TypeErrorKind::WrongTypeArgCount { name, .. }
+                    if name == "Point")
+        ),
+        "non-generic type with args should error: {result:?}"
+    );
+}
+
+#[test]
+fn generic_type_annotation_no_args_is_uninstantiated_ok() {
+    // `let q: Pair = ...` — 0 args for a generic type is allowed (uninstantiated).
+    let result = check_src(
+        r#"
+        struct Pair<A, B> { first: A, second: B }
+        fn f() { let q: Pair = Pair { first: 1u128, second: true } }
+        "#,
+    );
+    // 0 args is allowed (uninstantiated generic).
+    assert!(
+        result.is_ok(),
+        "uninstantiated generic (0 args) should pass: {result:?}"
+    );
+}

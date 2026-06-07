@@ -41,6 +41,7 @@ pub(crate) mod infer;
 pub(crate) mod lower;
 pub(crate) mod resolver;
 pub mod typed_ast;
+pub mod typed_contract;
 pub mod types;
 
 use std::collections::BTreeMap;

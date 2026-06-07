@@ -446,3 +446,248 @@ fn check_self_is_reserved_cannot_be_field_name() {
         "a field named `self` must fail to parse (self is a reserved keyword)"
     );
 }
+
+// ── P3-checker-3: Forward-reference re-lowering ────────────────────────────────
+
+#[test]
+fn forward_ref_struct_annotation_resolves_to_named() {
+    // `const X: Point = ...` where `struct Point` is declared AFTER the const.
+    // After re_lower_forward_refs, X's type should be Named(point_id, []).
+    let typed = check_src(
+        r#"
+        const X: Point = Point { x: 1u128, y: 2u128 }
+        struct Point { x: u128, y: u128 }
+        "#,
+    )
+    .expect("should resolve forward ref");
+    // Find the const symbol and verify its type is Named (not Unknown).
+    let x_sym = typed
+        .symbols
+        .iter()
+        .find(|s| s.name == "X")
+        .expect("X should be in symbols");
+    assert!(
+        matches!(
+            x_sym.ty,
+            crate::type_checker::types::ResolvedType::Named(_, _)
+        ),
+        "X.ty should be Named after forward-ref re-lowering, got {:?}",
+        x_sym.ty
+    );
+}
+
+#[test]
+fn forward_ref_resolves_only_if_type_exists() {
+    // A bogus type name stays Unknown (no double-error from re-lower pass).
+    // The UndefinedType error is emitted by resolve_type_ref in Pass 2.
+    let result = check_src("const X: BogusType = 42");
+    assert!(
+        result.is_err(),
+        "bogus type should produce UndefinedType error"
+    );
+}
+
+#[test]
+fn multiple_forward_refs_all_resolved() {
+    // Three forward-refs in one file — all should resolve.
+    let typed = check_src(
+        r#"
+        const A: Foo = Foo { x: 1u128 }
+        const B: Bar = Bar { y: true }
+        const C: Baz = Baz { z: 0u64 }
+        struct Foo { x: u128 }
+        struct Bar { y: bool }
+        struct Baz { z: u64 }
+        "#,
+    )
+    .expect("all forward refs should resolve");
+    for name in ["A", "B", "C"] {
+        let sym = typed
+            .symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} should be in symbols"));
+        assert!(
+            matches!(
+                sym.ty,
+                crate::type_checker::types::ResolvedType::Named(_, _)
+            ),
+            "{name}.ty should be Named, got {:?}",
+            sym.ty
+        );
+    }
+}
+
+#[test]
+fn non_forward_ref_annotation_unchanged() {
+    // In-order annotation (struct declared before const) should still work.
+    let typed = check_src(
+        r#"
+        struct Point { x: u128, y: u128 }
+        const P: Point = Point { x: 0u128, y: 0u128 }
+        "#,
+    )
+    .expect("in-order annotation should resolve");
+    let p_sym = typed
+        .symbols
+        .iter()
+        .find(|s| s.name == "P")
+        .expect("P should be in symbols");
+    assert!(
+        matches!(
+            p_sym.ty,
+            crate::type_checker::types::ResolvedType::Named(_, _)
+        ),
+        "P.ty should be Named, got {:?}",
+        p_sym.ty
+    );
+}
+
+// ── DB-A30: StructSig.methods population ──────────────────────────────────────
+
+#[test]
+fn struct_methods_populated_in_sig() {
+    use crate::type_checker::types::SymbolSig;
+    let typed = check_src(
+        r#"
+        struct Counter {
+            value: u128
+            fn increment(n: u128) -> u128 { return n }
+        }
+        "#,
+    )
+    .expect("struct with method should resolve");
+    // Find the Counter struct's SymbolId.
+    let counter_id = typed
+        .symbols
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.name == "Counter")
+        .map(|(i, _)| crate::type_checker::types::SymbolId((i + 1) as u32))
+        .expect("Counter should be in symbols");
+    // Check the StructSig has the method.
+    let sig = typed
+        .sigs
+        .get(&counter_id)
+        .expect("Counter should have a sig");
+    if let SymbolSig::Struct(struct_sig) = sig {
+        assert_eq!(
+            struct_sig.methods.len(),
+            1,
+            "Counter should have 1 method, got {:?}",
+            struct_sig.methods
+        );
+        assert_eq!(struct_sig.methods[0].0, "increment");
+    } else {
+        panic!("Counter sig should be Struct, got {:?}", sig);
+    }
+}
+
+#[test]
+fn struct_with_no_methods_has_empty_methods() {
+    use crate::type_checker::types::SymbolSig;
+    let typed = check_src("struct Point { x: u128, y: u128 }")
+        .expect("struct without methods should resolve");
+    let point_id = typed
+        .symbols
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.name == "Point")
+        .map(|(i, _)| crate::type_checker::types::SymbolId((i + 1) as u32))
+        .expect("Point should be in symbols");
+    let sig = typed.sigs.get(&point_id).expect("Point should have a sig");
+    if let SymbolSig::Struct(struct_sig) = sig {
+        assert!(
+            struct_sig.methods.is_empty(),
+            "Point should have no methods, got {:?}",
+            struct_sig.methods
+        );
+    } else {
+        panic!("Point sig should be Struct");
+    }
+}
+
+// ── EnumSig.generic_params ────────────────────────────────────────────────────
+
+#[test]
+fn enum_generic_params_populated_in_sig() {
+    use crate::type_checker::types::SymbolSig;
+    let typed = check_src(
+        r#"
+        enum Maybe<T> {
+            Some(T)
+            None
+        }
+        "#,
+    )
+    .expect("generic enum should resolve");
+    let maybe_id = typed
+        .symbols
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.name == "Maybe")
+        .map(|(i, _)| crate::type_checker::types::SymbolId((i + 1) as u32))
+        .expect("Maybe should be in symbols");
+    let sig = typed.sigs.get(&maybe_id).expect("Maybe should have a sig");
+    if let SymbolSig::Enum(enum_sig) = sig {
+        assert_eq!(
+            enum_sig.generic_params,
+            vec!["T".to_string()],
+            "Maybe should have generic param T"
+        );
+    } else {
+        panic!("Maybe sig should be Enum");
+    }
+}
+
+#[test]
+fn enum_with_no_generic_params_has_empty_list() {
+    use crate::type_checker::types::SymbolSig;
+    let typed = check_src(
+        r#"
+        enum Color { Red, Green, Blue }
+        "#,
+    )
+    .expect("non-generic enum should resolve");
+    let color_id = typed
+        .symbols
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.name == "Color")
+        .map(|(i, _)| crate::type_checker::types::SymbolId((i + 1) as u32))
+        .expect("Color should be in symbols");
+    let sig = typed.sigs.get(&color_id).expect("Color should have a sig");
+    if let SymbolSig::Enum(enum_sig) = sig {
+        assert!(
+            enum_sig.generic_params.is_empty(),
+            "Color should have no generic params"
+        );
+    } else {
+        panic!("Color sig should be Enum");
+    }
+}
+
+// ── QoL: Expr::New span improvement ───────────────────────────────────────────
+
+#[test]
+fn expr_new_unknown_type_error_has_nonzero_span() {
+    // The error span for `new BogusType()` should use the expression's span,
+    // not a zero-span placeholder.
+    let result = check_src("fn f() { let x = new BogusType() }");
+    match result {
+        Err(LangError::Type(ref e)) => {
+            assert!(
+                matches!(&e.kind, TypeErrorKind::UndefinedType { name } if name == "BogusType"),
+                "should be UndefinedType for BogusType"
+            );
+            // The span should not be the zero-span placeholder (offset=0, len=0).
+            // It should point somewhere in the source.
+            assert!(
+                e.span.len > 0 || e.span.offset > 0,
+                "span should not be zero-span placeholder, got {:?}",
+                e.span
+            );
+        }
+        other => panic!("expected UndefinedType error, got {:?}", other),
+    }
+}
