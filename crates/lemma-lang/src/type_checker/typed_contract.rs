@@ -270,7 +270,12 @@ pub struct ContractFunction<'a> {
     pub annotations: &'a [Annotation],
     /// Parameters in declaration order.
     pub params: &'a [crate::parser::Param],
-    /// Return type (`None` = Unit / no explicit return type).
+    /// Return type.
+    ///
+    /// - `Some(ResolvedType::Unit)` for functions with no explicit return-type annotation.
+    /// - `Some(T)` for functions annotated `-> T`.
+    /// - `None` only if the function's symbol could not be resolved in the symbol arena
+    ///   (a defensive fallback; should not occur for well-formed programs).
     pub return_type: Option<ResolvedType>,
     /// Function body statements (`None` for interface signatures).
     pub body: Option<&'a [Stmt]>,

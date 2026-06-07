@@ -151,13 +151,56 @@ self.totalLiquidity = self.totalLiquidity - shares
     );
 }
 
+/// Scenario 4 — staking contract with Map state, reward arithmetic, and
+/// multiple view + mutating functions.
+///
+/// Proves: Map<Address, u128> stakes, reward rate arithmetic (u128 * u128 / IntLiteral),
+/// multiple state fields, and stake/unstake/query patterns pass the type checker.
+///
+/// Note: uses explicit `staker: Address` params instead of `msg.sender`
+/// (blockchain global deferred to Step 7 — see P3-checker-14 in living-notes).
+#[test]
+fn check_staking_contract_accepts() {
+    let result = pipeline(
+        r#"contract SimpleStaking {
+state {
+pub totalStaked: u128
+stakes: Map<Address, u128>
+pub rewardRate: u128
+}
+pub fn stake(staker: Address, amount: u128) {
+self.stakes[staker] = self.stakes[staker] + amount
+self.totalStaked = self.totalStaked + amount
+}
+pub fn unstake(staker: Address, amount: u128) {
+self.stakes[staker] = self.stakes[staker] - amount
+self.totalStaked = self.totalStaked - amount
+}
+pub view fn pendingReward(staker: Address) -> u128 {
+return self.stakes[staker] * self.rewardRate / 1000000
+}
+pub view fn stakedBalance(staker: Address) -> u128 {
+return self.stakes[staker]
+}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "staking contract should type-check; got: {:?}",
+        result.err()
+    );
+}
+
 // ─── TypedContract projection tests ──────────────────────────────────────────
 
-/// Proves `TypedContract::name()` and `is_token()` return correct values for
-/// both `token` and plain `contract` items.
+/// Proves `TypedContract::name()`, `is_token()`, and `symbol_id()` return
+/// correct values for both `token` and plain `contract` items.
+///
+/// `symbol_id()` round-trip (`symbol_id() → TypedAst::symbol(id) → name`)
+/// validates the arena-indexing logic Step 4 uses to anchor contracts.
 #[test]
 fn typed_contract_name_and_is_token_flags_correct() {
-    // Token contract — is_token must be true
+    // Token contract — is_token must be true; symbol_id must round-trip
     let typed = pipeline(
         r#"token MyToken extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
@@ -171,8 +214,18 @@ config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
         contracts[0].is_token(),
         "token_ item must report is_token=true"
     );
+    let id = contracts[0]
+        .symbol_id()
+        .expect("token must have a symbol_id in the arena");
+    let sym = typed
+        .symbol(id)
+        .expect("symbol_id must resolve in TypedAst");
+    assert_eq!(
+        sym.name, "MyToken",
+        "symbol_id round-trip must return same name"
+    );
 
-    // Plain contract — is_token must be false
+    // Plain contract — is_token must be false; symbol_id must also resolve
     let typed = pipeline(r#"contract MyContract {}"#).expect("pipeline failed");
     let contracts = typed.contracts();
     assert_eq!(contracts.len(), 1, "expected one contract");
@@ -181,15 +234,23 @@ config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
         !contracts[0].is_token(),
         "plain contract must report is_token=false"
     );
+    assert!(
+        contracts[0].symbol_id().is_some(),
+        "plain contract must also have a symbol_id"
+    );
 }
 
 /// Proves `TypedContract::state_fields()` returns fields with correctly
-/// resolved types in declaration order.
+/// resolved types in declaration order, covering BOTH `state {}` fields
+/// (`is_immutable=false`) and `immutable` declarations (`is_immutable=true`).
 ///
 /// The three canonical state field types used by the safety analyzer are:
 /// - `u128` — token amounts, balances
 /// - `bool` — flags (paused, frozen, etc.)
 /// - `Address` — owners, recipients, operators
+///
+/// `is_immutable=true` is the safety-relevant branch: Step 4 reads it to
+/// identify fields that cannot be mutated after contract initialization.
 #[test]
 fn typed_contract_state_fields_resolved_types_correct() {
     let typed = pipeline(
@@ -197,8 +258,8 @@ fn typed_contract_state_fields_resolved_types_correct() {
 state {
 count: u128
 flag: bool
-owner: Address
 }
+immutable owner: Address
 }"#,
     )
     .expect("pipeline failed");
@@ -206,7 +267,7 @@ owner: Address
     let contracts = typed.contracts();
     assert_eq!(contracts.len(), 1);
     let fields = contracts[0].state_fields();
-    assert_eq!(fields.len(), 3, "expected 3 state fields");
+    assert_eq!(fields.len(), 3, "expected 2 state fields + 1 immutable");
 
     // Names in declaration order
     assert_eq!(fields[0].name, "count");
@@ -222,10 +283,14 @@ owner: Address
         "owner should be AddressTy"
     );
 
-    // None of these are immutable declarations
+    // state {} fields are mutable; immutable declarations are not
     assert!(
-        !fields[0].is_immutable && !fields[1].is_immutable && !fields[2].is_immutable,
+        !fields[0].is_immutable && !fields[1].is_immutable,
         "state {{ }} fields must have is_immutable=false"
+    );
+    assert!(
+        fields[2].is_immutable,
+        "immutable declaration must have is_immutable=true"
     );
 }
 
@@ -248,6 +313,12 @@ config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
         .config()
         .expect("token contract must expose config()");
     assert!(!config.is_empty(), "config must have entries");
+    // Step 4 reads config entries by key — prove key-based access works.
+    let has_name_entry = config.iter().any(|e| e.key == "name");
+    assert!(
+        has_name_entry,
+        "config must expose the 'name' entry — Step 4 reads entries by key"
+    );
 
     // Plain contract — config must be None
     let typed = pipeline(r#"contract C {}"#).expect("pipeline failed");

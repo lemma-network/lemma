@@ -41,8 +41,10 @@
 //!   [`TypedContract`](typed_contract::TypedContract) projection, named-arg
 //!   alignment, generic arg-count validation at all annotation sites.
 //! - **3h**: Integration proof — full tokenize→parse→check pipeline verified
-//!   against realistic token, DEX, and staking contracts; [`TypedContract`]
-//!   projection asserted correct for the Step 4 safety analyzer input contract.
+//!   against realistic token, DEX, and staking contracts
+//!   (`tests/check_contracts.rs`); [`TypedContract`] projection asserted correct
+//!   for the Step 4 safety analyzer input contract, including `symbol_id()`
+//!   round-trip, `is_immutable=true` state fields, and config entry key access.
 
 pub mod error;
 pub(crate) mod infer;
