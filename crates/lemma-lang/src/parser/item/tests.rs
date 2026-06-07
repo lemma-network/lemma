@@ -1045,6 +1045,42 @@ website: "https://example.com"
         assert_eq!(cfg.entries[4].value, ConfigValue::Unit(24, UnitKind::Hours));
     }
 
+    // ── ConfigValue::Ident ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_config_ident_value() {
+        let cfg = single_config("token T extends Token {\nconfig {\nmodel: BondingCurve\n}\n}");
+        assert_eq!(cfg.entries[0].key, "model");
+        assert_eq!(
+            cfg.entries[0].value,
+            ConfigValue::Ident("BondingCurve".into())
+        );
+    }
+
+    // ── Edge cases: zero int / empty string / empty nested object ─────────────
+
+    #[test]
+    fn parse_config_zero_int_value() {
+        let cfg = single_config("token T extends Token {\nconfig {\ndecimals: 0\n}\n}");
+        assert_eq!(cfg.entries[0].value, ConfigValue::Int(0));
+    }
+
+    #[test]
+    fn parse_config_empty_string_value() {
+        let cfg = single_config("token T extends Token {\nconfig {\nname: \"\"\n}\n}");
+        assert_eq!(cfg.entries[0].value, ConfigValue::Str(String::new()));
+    }
+
+    #[test]
+    fn parse_config_empty_nested_object() {
+        let cfg = single_config("token T extends Token {\nconfig {\nextensions: {}\n}\n}");
+        assert_eq!(cfg.entries[0].key, "extensions");
+        match &cfg.entries[0].value {
+            ConfigValue::Object(inner) => assert!(inner.is_empty()),
+            other => panic!("expected empty Object, got: {other:?}"),
+        }
+    }
+
     // ── Error cases ───────────────────────────────────────────────────────────
 
     #[test]

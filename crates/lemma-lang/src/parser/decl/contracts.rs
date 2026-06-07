@@ -330,7 +330,10 @@ impl Parser {
 
     /// Parse a sequence of `key: value` entries until a `}` is reached.
     ///
-    /// Entries are newline-separated (Lem uses significant whitespace — no commas).
+    /// Entries are separated by a comma, a newline, or both — the §24 spec uses
+    /// commas for inline objects (`{ k: v, k: v }`) and newlines for multi-line
+    /// blocks. A trailing separator before `}` is permitted.
+    ///
     /// This function is called by `parse_config_block`, `parse_metadata_block`,
     /// and recursively by `parse_config_value` for nested objects.
     fn parse_config_entries(&mut self) -> Result<Vec<ConfigEntry>, LangError> {
