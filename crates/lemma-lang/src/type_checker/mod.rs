@@ -147,6 +147,10 @@ impl Checker {
                 &mut expr_types,
             );
             inferer.walk_ast(&ast)?;
+            // P3-checker-12: validate generic type-argument counts at ALL annotation
+            // sites (function params, return types, state fields, struct fields, etc.).
+            // `check_let` catches `let` annotations inline; this pass covers the rest.
+            inferer.validate_type_annotations(&ast)?;
         }
 
         Ok(TypedAst::new(

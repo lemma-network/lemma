@@ -1265,6 +1265,105 @@ impl<'a> Inferer<'a> {
         Ok(())
     }
 
+    /// Validate generic type-argument counts across ALL annotation sites in the AST.
+    ///
+    /// Covers: function params, return types, state-field types, immutable types,
+    /// struct-field types, const types, and `let` annotations (already checked in
+    /// `check_let`, but harmlessly re-checked here for completeness).
+    ///
+    /// This closes **P3-checker-12** for all annotation positions, not just `let`.
+    /// Walks the full AST once — called from `check_program` after `walk_ast`.
+    pub(super) fn validate_type_annotations(&self, ast: &Ast) -> Result<(), LangError> {
+        use crate::parser::ast::{Item, StructMember};
+
+        for item in &ast.items {
+            match item {
+                Item::Function(f) => self.validate_fn_annotations(f)?,
+                Item::Const(c) => self.check_type_annotation_counts(&c.ty, c.span)?,
+                Item::Struct(s) => {
+                    for gp in &s.generic_params {
+                        if let Some(bound) = &gp.bound {
+                            self.check_type_annotation_counts(bound, gp.span)?;
+                        }
+                    }
+                    for member in &s.members {
+                        match member {
+                            StructMember::Field(f) => {
+                                self.check_type_annotation_counts(&f.ty, f.span)?;
+                            }
+                            StructMember::Method(f) => self.validate_fn_annotations(f)?,
+                        }
+                    }
+                }
+                Item::Contract(c) => {
+                    for member in &c.members {
+                        self.validate_contract_member_annotations(member)?;
+                    }
+                }
+                Item::Token_(t) => {
+                    for member in &t.members {
+                        self.validate_contract_member_annotations(member)?;
+                    }
+                }
+                // Interface / Trait / Library / TypeAlias / ErrorDecl / Import / Using:
+                // no type annotations to validate at this stage.
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate generic type-argument counts in a function's annotations.
+    fn validate_fn_annotations(&self, f: &Function) -> Result<(), LangError> {
+        for p in &f.params {
+            self.check_type_annotation_counts(&p.ty, p.span)?;
+        }
+        if let Some(ret) = &f.return_type {
+            self.check_type_annotation_counts(ret, f.span)?;
+        }
+        Ok(())
+    }
+
+    /// Validate generic type-argument counts in a contract member's annotations.
+    fn validate_contract_member_annotations(
+        &self,
+        member: &crate::parser::ast::ContractMember,
+    ) -> Result<(), LangError> {
+        use crate::parser::ast::{ContractMember as CM, StructMember};
+        match member {
+            CM::Function(f) => self.validate_fn_annotations(f)?,
+            CM::Modifier(m) => {
+                for p in &m.params {
+                    self.check_type_annotation_counts(&p.ty, p.span)?;
+                }
+            }
+            CM::State(s) => {
+                for field in &s.fields {
+                    self.check_type_annotation_counts(&field.ty, field.span)?;
+                }
+            }
+            CM::Immutable(i) => {
+                self.check_type_annotation_counts(&i.ty, i.span)?;
+            }
+            CM::Const(c) => {
+                self.check_type_annotation_counts(&c.ty, c.span)?;
+            }
+            CM::Struct(s) => {
+                for member in &s.members {
+                    if let StructMember::Field(f) = member {
+                        self.check_type_annotation_counts(&f.ty, f.span)?;
+                    }
+                    if let StructMember::Method(f) = member {
+                        self.validate_fn_annotations(f)?;
+                    }
+                }
+            }
+            // Enum, Event, ErrorDecl, Config, Metadata — no generic type annotations.
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Type-check a cast expression `from_ty as to_ty`.
     ///
     /// Only integer widening is supported via `as`.  Narrowing must use

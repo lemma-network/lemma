@@ -154,6 +154,75 @@ fn typed_contract_delegates_type_of_to_typed_ast() {
 }
 
 #[test]
+fn typed_contract_config_some_for_token() {
+    // token contracts expose config() as Some (P3-checker-1 coverage).
+    let typed = check_src(
+        r#"
+        token MyToken extends Token {
+            config { name: "MyToken" }
+        }
+        "#,
+    );
+    let contracts = typed.contracts();
+    let token = contracts.iter().find(|c| c.name() == "MyToken").unwrap();
+    assert!(
+        token.config().is_some(),
+        "token contract should expose config() as Some"
+    );
+}
+
+#[test]
+fn typed_contract_function_return_type_populated() {
+    // functions()[i].return_type should reflect the FnSig.ret from the sigs table.
+    let typed = check_src(
+        r#"
+        contract Foo {
+            fn balanceOf(addr: Address) -> u128 { return 0u128 }
+            fn reset() {}
+        }
+        "#,
+    );
+    let contracts = typed.contracts();
+    let fns = contracts[0].functions();
+    let bal = fns.iter().find(|f| f.name == "balanceOf").unwrap();
+    let reset = fns.iter().find(|f| f.name == "reset").unwrap();
+    // balanceOf -> u128
+    assert_eq!(
+        bal.return_type,
+        Some(ResolvedType::U128),
+        "balanceOf should have return_type Some(U128)"
+    );
+    // reset has no return annotation → Unit
+    assert_eq!(
+        reset.return_type,
+        Some(ResolvedType::Unit),
+        "reset should have return_type Some(Unit)"
+    );
+}
+
+#[test]
+fn typed_contract_immutable_field_ty_resolves() {
+    // state_fields() for an immutable should yield the correct resolved type,
+    // not Unknown — testing that the `ty` lookup succeeds, not just `is_immutable`.
+    let typed = check_src(
+        r#"
+        contract Foo {
+            immutable deployer: Address
+        }
+        "#,
+    );
+    let contracts = typed.contracts();
+    let fields = contracts[0].state_fields();
+    let deployer = fields.iter().find(|f| f.name == "deployer").unwrap();
+    assert!(deployer.is_immutable);
+    assert_eq!(
+        *deployer.ty,
+        ResolvedType::AddressTy,
+        "immutable deployer should resolve to AddressTy"
+    );
+}
+
+#[test]
 fn typed_contract_symbol_id_resolves_to_contract_kind() {
     let typed = check_src("contract Foo {}");
     let contracts = typed.contracts();

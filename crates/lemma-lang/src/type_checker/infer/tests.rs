@@ -2137,3 +2137,50 @@ fn generic_type_annotation_no_args_is_uninstantiated_ok() {
         "uninstantiated generic (0 args) should pass: {result:?}"
     );
 }
+
+#[test]
+fn generic_type_arg_count_validated_in_function_param() {
+    // P3-checker-12 covers ALL annotation sites — not just `let`.
+    // A function param with wrong generic arg count should error.
+    let result = check_src(
+        r#"
+        struct Pair<A, B> { first: A, second: B }
+        fn f(p: Pair<u128, bool, u64>) {}
+        "#,
+    );
+    assert!(
+        result.is_err(),
+        "function param with wrong type arg count should error"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::WrongTypeArgCount { .. }),
+            "expected WrongTypeArgCount, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn generic_type_arg_count_validated_in_state_field() {
+    // P3-checker-12 covers state field type annotations too.
+    let result = check_src(
+        r#"
+        struct Queue<T> { items: Array<T> }
+        contract Foo {
+            state { q: Queue<u128, bool> }
+        }
+        "#,
+    );
+    assert!(
+        result.is_err(),
+        "state field with wrong type arg count should error"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::WrongTypeArgCount { .. }),
+            "expected WrongTypeArgCount, got {:?}",
+            e.kind
+        );
+    }
+}
