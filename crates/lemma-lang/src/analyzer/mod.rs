@@ -37,7 +37,7 @@
 //!
 //! - **4a** (this step): `SafetyError` enum + `analyze_safety` stub (returns `Ok(())`).
 //! - **4b**: foundational analyses — `authset` (Auth/EffAuth), `cfg` (CFG/Ext(f)).
-//! - **4c**: `dataflow` (totalSupply reachability, fee sup-bound, restriction links).
+//! - **4c** (this step): `dataflow` — taint propagation + state-write reachability.
 //! - **4d**: rules batch 1 — SAFETY-004/012/008/011.
 //! - **4e**: rules batch 2 — SAFETY-002/003/006/013.
 //! - **4f**: rules batch 3 — SAFETY-005/009/001/007/010.
@@ -45,6 +45,7 @@
 
 pub(crate) mod authset;
 pub(crate) mod cfg;
+pub(crate) mod dataflow;
 pub mod error;
 pub(crate) mod safety;
 
