@@ -676,3 +676,38 @@ fn parse_expr_shift_precedence_tighter_than_addition() {
         _ => panic!("expected Shl binary (outer), got {expr:?}"),
     }
 }
+
+// ── Soft-keyword: `from` as identifier ───────────────────────────────────────
+
+#[test]
+fn expect_identifier_accepts_from_as_identifier_in_rvalue() {
+    // `from` is Token::From (import keyword) but must also parse as an
+    // identifier in rvalue position — e.g. `let x = from` after a param
+    // binding `from: Address`.  The soft-keyword rule in `expect_identifier`
+    // makes it available as `Expr::Identifier("from")`.
+    // See: DB-A24 (decisions-log), §24 hook `fn onTransfer(from: Address, …)`.
+    let expr = parse_expr_from_str("from").expect("should parse `from` as identifier");
+    match expr {
+        Expr::Ident(name, _) => assert_eq!(name, "from"),
+        other => panic!("expected Ident(\"from\"), got: {other:?}"),
+    }
+}
+
+#[test]
+fn expect_identifier_accepts_from_as_param_name_in_function() {
+    // Full function with `from: Address` as a parameter — proves `from` soft-keyword
+    // works end-to-end through parse_param_list → expect_identifier.
+    use crate::parser::ast::Item;
+    let tokens =
+        tokenize("fn transfer(from: Address, to: Address, amount: u128) {}").expect("tokenize");
+    let mut p = Parser::new(tokens);
+    let item = p
+        .parse_top_level_item()
+        .expect("should parse fn with `from` param");
+    let func = match item {
+        Item::Function(f) => f,
+        other => panic!("expected Function item, got: {other:?}"),
+    };
+    assert_eq!(func.params[0].name, "from");
+    assert_eq!(func.params[1].name, "to");
+}

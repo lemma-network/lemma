@@ -18,14 +18,17 @@
 //! It is fuzz-safe: it never panics on any token stream, returning
 //! `Err(LangError::Parse)` on malformed input.
 //!
-//! Submodules are added incrementally across subtasks 2a–2h:
-//! - `ast`   — all AST node definitions (2a)
-//! - `error` — `ParseError` type (2a)
-//! - `ty`    — type parser (2a)
-//! - `expr`  — expression parser (2b)
-//! - `stmt`  — statement parser (2c)
-//! - `decl`  — declaration parser (2d)
-//! - `item`  — struct/enum/interface/trait/library (2e–2f)
+//! ## Submodule layout
+//!
+//! - `ast`   — all AST node definitions
+//! - `error` — `ParseError` type
+//! - `ty`    — type parser (all primitive, composite, and generic types)
+//! - `expr`  — expression parser (literals, operators, calls, member access)
+//! - `stmt`  — statement parser (let, if, for, match, emit, return, …)
+//! - `decl`  — declaration parser (contract, token, function, import, using)
+//! - `item`  — struct, enum, event, error, interface, trait, library parsers
+//!
+//! Integration tests live in `tests/parse_contracts.rs` (P3·Step 2 acceptance proof).
 
 pub mod ast;
 mod decl;

@@ -36,6 +36,20 @@ impl Parser {
             // ── Identifier: ident, struct literal, or lambda ───────────────
             Token::Identifier(name) => self.parse_ident_or_struct_or_lambda(name),
 
+            // ── `from` soft/contextual keyword used as an expression ───────
+            // `from` is Token::From but may appear as an rvalue in function
+            // bodies wherever it was bound as a parameter (e.g. `fn onTransfer
+            // (from: Address, …) { emit T { sender: from } }`).  In expression
+            // position it behaves as a plain identifier — it cannot be a struct
+            // literal or lambda, but member access and call operators on it are
+            // handled by the postfix layer that wraps parse_primary.
+            // See: DB-A24 (decisions-log), §24 hook function spec.
+            Token::From => {
+                let span = self.peek_span();
+                self.advance();
+                Ok(Expr::Ident("from".into(), span))
+            }
+
             // ── self keyword ──────────────────────────────────────────────
             Token::SelfKw => {
                 let span = self.peek_span();

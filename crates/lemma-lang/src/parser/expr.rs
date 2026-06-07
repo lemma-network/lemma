@@ -236,6 +236,15 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
+            // `from` is a soft/contextual keyword in Lem: it serves as an
+            // import keyword after `import { … }` but is also widely used as a
+            // parameter name in hook functions (e.g. `fn onTransfer(from: Address, …)`,
+            // as in §24 of the language spec).  Accepting it here keeps identifier
+            // positions spec-compliant without making `from` a hard reserved word.
+            Token::From => {
+                self.advance();
+                Ok("from".to_string())
+            }
             tok => {
                 Err(self.error_expected(vec![ctx.into()], format!("expected {ctx}, got {tok:?}")))
             }
