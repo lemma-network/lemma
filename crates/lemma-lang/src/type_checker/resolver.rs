@@ -199,9 +199,19 @@ impl Resolver {
                         }
                     }
                     // Import or not-yet-visible name: defensive fallback.
-                    // The resolver validates names separately via resolve_type_ref;
-                    // if we reach here the name is either an import (opaque) or
-                    // an out-of-order forward reference (rare, deferred to 3g).
+                    // The resolver validates names separately via resolve_type_ref
+                    // so UndefinedType errors are caught there regardless.
+                    // Reaching here means either:
+                    //   (a) import (opaque, resolved at P3·Step 8), or
+                    //   (b) out-of-order forward reference — e.g. a top-level
+                    //       Const annotation referencing a Struct declared later
+                    //       in the same file.  The global-scope build processes
+                    //       items sequentially, so the type isn't in scope yet
+                    //       when lower_type runs for the Const.
+                    // TODO(3g): two-phase type lowering — after all declarations
+                    // are resolved, re-lower any Unknown `SymbolInfo.ty` entries
+                    // that suffered forward-reference miss.  Tracked in
+                    // living-notes Technical Debt as P3-checker-3.
                     None => ResolvedType::Unknown,
                 }
             }

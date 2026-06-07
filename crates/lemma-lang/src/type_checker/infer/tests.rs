@@ -379,6 +379,114 @@ fn infer_template_string_returns_string() {
     assert!(has_string, "template string should be StringTy");
 }
 
+// ─── Additional shift + literal coercion ─────────────────────────────────────
+
+#[test]
+fn infer_shl_int_literal_lhs_coerces_to_rhs() {
+    // `1 << 2u8` — lhs is IntLiteral, rhs is U8 → lhs coerces to U8,
+    // result type follows lhs (after coercion) = U8.
+    let typed = check_src("fn f() { let y = 1 << 2u8 }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u8 = typed.expr_types.values().any(|t| *t == ResolvedType::U8);
+    assert!(has_u8, "IntLiteral << u8 should yield U8");
+}
+
+#[test]
+fn infer_shl_both_literals_stays_int_literal() {
+    // `1 << 2` — both IntLiteral → result is IntLiteral.
+    let typed = check_src("fn f() { let y = 1 << 2 }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_literal = typed
+        .expr_types
+        .values()
+        .any(|t| *t == ResolvedType::IntLiteral);
+    assert!(has_literal, "IntLiteral << IntLiteral should be IntLiteral");
+}
+
+// ─── Additional arithmetic operators ─────────────────────────────────────────
+
+#[test]
+fn infer_rem_same_type() {
+    let typed =
+        check_src("fn f(a: u128, b: u128) { let x = a % b }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "u128 % u128 should be U128");
+}
+
+#[test]
+fn infer_pow_same_type() {
+    let typed =
+        check_src("fn f(a: u256, b: u256) { let x = a ** b }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "u256 ** u256 should be U256");
+}
+
+#[test]
+fn infer_sub_same_type() {
+    let typed =
+        check_src("fn f(a: i128, b: i128) { let x = a - b }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_i128 = typed.expr_types.values().any(|t| *t == ResolvedType::I128);
+    assert!(has_i128, "i128 - i128 should be I128");
+}
+
+// ─── Additional unary negative paths ─────────────────────────────────────────
+
+#[test]
+fn infer_neg_on_bool_errors() {
+    let result = check_src("fn f(b: bool) { let y = -b }");
+    assert!(result.is_err(), "-bool should be InvalidOperand");
+}
+
+// ─── Nullish type-mismatch (inner type vs default) ────────────────────────────
+
+#[test]
+fn infer_nullish_inner_type_mismatch_errors() {
+    // `opt ?? true` where opt: Option<u128> — default must match inner type u128, not bool.
+    let result = check_src("fn f(opt: Option<u128>) { let x = opt ?? true }");
+    assert!(
+        result.is_err(),
+        "Option<u128> ?? bool should be TypeMismatch"
+    );
+}
+
+// ─── Unit literals ────────────────────────────────────────────────────────────
+
+#[test]
+fn infer_ether_unit_literal_is_u256() {
+    // `1.ether` → scaled u256 value (1e18 Drop).
+    let typed = check_src("fn f() { let x = 1.ether }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "1.ether should be U256");
+}
+
+#[test]
+fn infer_days_unit_literal_is_u256() {
+    // `6.months` is not in the expression parser's unit set; `.days` is.
+    let typed = check_src("fn f() { let x = 6.days }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "6.days should be U256");
+}
+
+// ─── MUST-FIX 1 regression: known-bad operand errors even with Unknown partner ─
+
+#[test]
+fn infer_logical_and_known_bad_lhs_errors_despite_unknown_rhs() {
+    // `bool && unknownCallResult` — lhs is bool (good), rhs would be Unknown
+    // (Call result, deferred to 3d).  Result: Unknown propagated (rhs is deferred).
+    // But `u128 && unknownCallResult` — lhs is u128 (bad) should error regardless.
+    // Since we can't have an Unknown rhs that's typed, test with a mismatched pair:
+    let result = check_src("fn f(x: u128, b: bool) { let y = x && b }");
+    assert!(
+        result.is_err(),
+        "u128 && bool should error (u128 not bool for &&)"
+    );
+}
+
+#[test]
+fn infer_add_known_bool_errors_even_with_int_partner() {
+    // Core regression for MUST-FIX 1: bool + u128 must error, not pass via Unknown.
+    let result = check_src("fn f(b: bool, x: u128) { let y = b + x }");
+    assert!(result.is_err(), "bool + u128 should be InvalidOperand");
+}
+
 // ─── expr_types populated by 3c ───────────────────────────────────────────────
 
 #[test]

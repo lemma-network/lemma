@@ -40,6 +40,9 @@ mod ty;
 
 pub use ast::*;
 pub use error::ParseError;
+// Re-export the canonical span extractor so type_checker and other crate
+// modules can use it without reaching into the private `expr` submodule.
+pub(crate) use expr::expr_span;
 
 use crate::error::LangError;
 use crate::lexer::token::{Span, Token};

@@ -30,6 +30,7 @@ use crate::parser::ast::{
     Ast, BinaryOp, CallArg, ContractMember, Expr, ForIter, Function, Item, LambdaBody, Literal,
     MatchArm, MatchBody, Stmt, StructMember, TemplateExprSegment, UnaryOp, UnitKind,
 };
+use crate::parser::expr_span;
 
 use super::error::{TypeError, TypeErrorKind};
 use super::types::{ResolvedType, SymbolId, SymbolInfo};
@@ -299,7 +300,7 @@ impl<'a> Inferer<'a> {
     /// only need to call this on the outermost expression of interest.
     pub(super) fn infer_expr(&mut self, expr: &Expr) -> Result<ResolvedType, LangError> {
         let ty = self.infer_inner(expr)?;
-        let span = span_of(expr);
+        let span = expr_span(expr);
         // Only record non-zero-length spans (zero-length = EOF placeholder).
         if span.len > 0 {
             self.expr_types.insert(span, ty.clone());
@@ -546,12 +547,15 @@ impl<'a> Inferer<'a> {
         let lhs_ty = self.infer_expr(lhs)?;
         let rhs_ty = self.infer_expr(rhs)?;
 
-        // Short-circuit: if either side is Unknown (deferred 3d/3e sub-expr),
-        // propagate Unknown rather than generating false type errors.
-        if lhs_ty == ResolvedType::Unknown || rhs_ty == ResolvedType::Unknown {
-            return Ok(ResolvedType::Unknown);
-        }
-
+        // NOTE: there is NO blanket Unknown short-circuit here.
+        // Each operator branch first validates the *shape* of each operand
+        // independently, erroring on a known-bad concrete type regardless of
+        // whether the other operand is Unknown.  Only after shape validation
+        // passes does a per-branch Unknown bail-out propagate the deferred type.
+        //
+        // This prevents the hole where `someContractSymbol && true` (with
+        // `someContractSymbol.ty == Unknown`) would silently pass as Unknown
+        // instead of reporting `&&` requires bool operands.
         match op {
             // ── Arithmetic ────────────────────────────────────────────────
             BinaryOp::Add
@@ -567,9 +571,13 @@ impl<'a> Inferer<'a> {
             // ── Bitwise ───────────────────────────────────────────────────
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
                 let op_str = binary_op_str(op);
-                // Operands must be integers (not decimal).
+                // Shape check: error if a known concrete type is non-integer.
                 self.require_int_or_literal(&lhs_ty, op_str, span)?;
                 self.require_int_or_literal(&rhs_ty, op_str, span)?;
+                // Propagate Unknown if either deferred.
+                if lhs_ty == ResolvedType::Unknown || rhs_ty == ResolvedType::Unknown {
+                    return Ok(ResolvedType::Unknown);
+                }
                 self.unify_int_types(&lhs_ty, &rhs_ty, lhs, rhs, op_str, span)
             }
 
@@ -580,11 +588,15 @@ impl<'a> Inferer<'a> {
                 let op_str = binary_op_str(op);
                 self.require_int_or_literal(&lhs_ty, op_str, span)?;
                 self.require_int_or_literal(&rhs_ty, op_str, span)?;
+                // Propagate Unknown if either deferred.
+                if lhs_ty == ResolvedType::Unknown || rhs_ty == ResolvedType::Unknown {
+                    return Ok(ResolvedType::Unknown);
+                }
                 // Result type follows lhs; coerce lhs if it's IntLiteral.
                 if lhs_ty.is_int_literal() {
                     // Coerce literal using rhs if rhs is concrete.
                     if rhs_ty.is_integer() {
-                        self.expr_types.insert(span_of(lhs), rhs_ty.clone());
+                        self.expr_types.insert(expr_span(lhs), rhs_ty.clone());
                         Ok(rhs_ty)
                     } else {
                         Ok(ResolvedType::IntLiteral)
@@ -597,14 +609,18 @@ impl<'a> Inferer<'a> {
             // ── Comparison ────────────────────────────────────────────────
             BinaryOp::Eq | BinaryOp::NotEq => {
                 // Any two values of the same type; IntLiteral coerces.
+                // Unknown operands: skip — cannot prove validity or invalidity.
                 let op_str = binary_op_str(op);
+                if lhs_ty == ResolvedType::Unknown || rhs_ty == ResolvedType::Unknown {
+                    return Ok(ResolvedType::Bool);
+                }
                 self.unify_eq_types(&lhs_ty, &rhs_ty, lhs, rhs, op_str, span)?;
                 Ok(ResolvedType::Bool)
             }
             BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq => {
                 let op_str = binary_op_str(op);
-                // Both operands must be numeric.
-                if !lhs_ty.is_numeric() {
+                // Shape check: error if known concrete type is non-numeric.
+                if !lhs_ty.is_numeric() && lhs_ty != ResolvedType::Unknown {
                     return Err(type_err(
                         TypeErrorKind::InvalidOperand {
                             op: op_str.into(),
@@ -617,7 +633,7 @@ impl<'a> Inferer<'a> {
                         ),
                     ));
                 }
-                if !rhs_ty.is_numeric() {
+                if !rhs_ty.is_numeric() && rhs_ty != ResolvedType::Unknown {
                     return Err(type_err(
                         TypeErrorKind::InvalidOperand {
                             op: op_str.into(),
@@ -629,6 +645,9 @@ impl<'a> Inferer<'a> {
                             rhs_ty.display_name()
                         ),
                     ));
+                }
+                if lhs_ty == ResolvedType::Unknown || rhs_ty == ResolvedType::Unknown {
+                    return Ok(ResolvedType::Bool);
                 }
                 // Unify but discard the value type — result is always Bool.
                 self.unify_eq_types(&lhs_ty, &rhs_ty, lhs, rhs, op_str, span)?;
@@ -638,7 +657,8 @@ impl<'a> Inferer<'a> {
             // ── Logical ───────────────────────────────────────────────────
             BinaryOp::And | BinaryOp::Or => {
                 let op_str = binary_op_str(op);
-                if lhs_ty != ResolvedType::Bool {
+                // Shape check: error if known concrete type is non-bool.
+                if lhs_ty != ResolvedType::Bool && lhs_ty != ResolvedType::Unknown {
                     return Err(type_err(
                         TypeErrorKind::InvalidOperand {
                             op: op_str.into(),
@@ -651,7 +671,7 @@ impl<'a> Inferer<'a> {
                         ),
                     ));
                 }
-                if rhs_ty != ResolvedType::Bool {
+                if rhs_ty != ResolvedType::Bool && rhs_ty != ResolvedType::Unknown {
                     return Err(type_err(
                         TypeErrorKind::InvalidOperand {
                             op: op_str.into(),
@@ -663,6 +683,9 @@ impl<'a> Inferer<'a> {
                             rhs_ty.display_name()
                         ),
                     ));
+                }
+                if lhs_ty == ResolvedType::Unknown || rhs_ty == ResolvedType::Unknown {
+                    return Ok(ResolvedType::Bool);
                 }
                 Ok(ResolvedType::Bool)
             }
@@ -711,14 +734,10 @@ impl<'a> Inferer<'a> {
                 else_ty
             });
         }
-        self.unify_eq_types(&then_ty, &else_ty, then, else_, "?:", span)?;
-        // After unification, expr_types for the branches may have been updated;
-        // read back the (possibly coerced) then type as the result.
-        let result = self
-            .expr_types
-            .get(&span_of(then))
-            .cloned()
-            .unwrap_or(then_ty);
+        // unify_eq_types returns the unified type directly (handles IntLiteral
+        // coercion and same-type checks) — use it as the result rather than
+        // re-reading from expr_types.
+        let result = self.unify_eq_types(&then_ty, &else_ty, then, else_, "?:", span)?;
         Ok(result)
     }
 
@@ -795,8 +814,10 @@ impl<'a> Inferer<'a> {
         op: &str,
         span: Span,
     ) -> Result<ResolvedType, LangError> {
-        // Validate that both are numeric.
-        if !lhs_ty.is_numeric() {
+        // Shape check: error if a KNOWN concrete type is non-numeric.
+        // Unknown operands (deferred 3d/3e sub-expressions) skip the check —
+        // we cannot prove validity but also cannot prove invalidity.
+        if !lhs_ty.is_numeric() && *lhs_ty != ResolvedType::Unknown {
             return Err(type_err(
                 TypeErrorKind::InvalidOperand {
                     op: op.into(),
@@ -809,7 +830,7 @@ impl<'a> Inferer<'a> {
                 ),
             ));
         }
-        if !rhs_ty.is_numeric() {
+        if !rhs_ty.is_numeric() && *rhs_ty != ResolvedType::Unknown {
             return Err(type_err(
                 TypeErrorKind::InvalidOperand {
                     op: op.into(),
@@ -821,6 +842,10 @@ impl<'a> Inferer<'a> {
                     rhs_ty.display_name()
                 ),
             ));
+        }
+        // Propagate Unknown if either side is still deferred.
+        if *lhs_ty == ResolvedType::Unknown || *rhs_ty == ResolvedType::Unknown {
+            return Ok(ResolvedType::Unknown);
         }
         self.unify_int_types(lhs_ty, rhs_ty, lhs, rhs, op, span)
     }
@@ -841,11 +866,11 @@ impl<'a> Inferer<'a> {
         }
         // IntLiteral coerces to a concrete integer type.
         if let Some(concrete) = lhs_ty.coerce_int_literal(rhs_ty) {
-            self.expr_types.insert(span_of(lhs), concrete.clone());
+            self.expr_types.insert(expr_span(lhs), concrete.clone());
             return Ok(concrete.clone());
         }
         if let Some(concrete) = rhs_ty.coerce_int_literal(lhs_ty) {
-            self.expr_types.insert(span_of(rhs), concrete.clone());
+            self.expr_types.insert(expr_span(rhs), concrete.clone());
             return Ok(concrete.clone());
         }
         // Both IntLiteral.
@@ -884,11 +909,11 @@ impl<'a> Inferer<'a> {
             return Ok(lhs_ty.clone());
         }
         if let Some(concrete) = lhs_ty.coerce_int_literal(rhs_ty) {
-            self.expr_types.insert(span_of(lhs), concrete.clone());
+            self.expr_types.insert(expr_span(lhs), concrete.clone());
             return Ok(concrete.clone());
         }
         if let Some(concrete) = rhs_ty.coerce_int_literal(lhs_ty) {
-            self.expr_types.insert(span_of(rhs), concrete.clone());
+            self.expr_types.insert(expr_span(rhs), concrete.clone());
             return Ok(concrete.clone());
         }
         if lhs_ty.is_int_literal() && rhs_ty.is_int_literal() {
@@ -915,7 +940,8 @@ impl<'a> Inferer<'a> {
         op: &str,
         span: Span,
     ) -> Result<(), LangError> {
-        if ty.is_integer() || ty.is_int_literal() {
+        // Unknown operands (deferred 3d/3e sub-expressions) skip the check.
+        if *ty == ResolvedType::Unknown || ty.is_integer() || ty.is_int_literal() {
             return Ok(());
         }
         Err(type_err(
@@ -1003,35 +1029,8 @@ fn int_suffix_type(suffix: &str) -> ResolvedType {
     }
 }
 
-// ─── Helper: span extraction ──────────────────────────────────────────────────
-
-/// Extract the source span from an expression.
-///
-/// Every `Expr` variant carries a `Span` — this function extracts it
-/// uniformly without needing the private `parser::expr::span` module.
-fn span_of(expr: &Expr) -> Span {
-    match expr {
-        Expr::Literal(_, s)
-        | Expr::Ident(_, s)
-        | Expr::Tuple(_, s)
-        | Expr::Array(_, s)
-        | Expr::Unary(_, _, s)
-        | Expr::Binary(_, _, _, s)
-        | Expr::Nullish(_, _, s)
-        | Expr::Try_(_, s)
-        | Expr::Match_(_, _, s)
-        | Expr::Template(_, s)
-        | Expr::Assign_(_, _, _, s)
-        | Expr::Index(_, _, s)
-        | Expr::Member(_, _, s) => *s,
-        Expr::Struct_ { span, .. }
-        | Expr::Call { span, .. }
-        | Expr::Ternary { span, .. }
-        | Expr::Lambda { span, .. }
-        | Expr::New { span, .. }
-        | Expr::If_ { span, .. } => *span,
-    }
-}
+// Span extraction is handled by the canonical `crate::parser::expr_span`
+// (re-exported from `parser/mod.rs`).  No local duplicate needed.
 
 // ─── Error construction helper ────────────────────────────────────────────────
 
