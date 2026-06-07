@@ -2184,3 +2184,49 @@ fn generic_type_arg_count_validated_in_state_field() {
         );
     }
 }
+
+#[test]
+fn generic_type_arg_count_validated_in_type_alias() {
+    // P3-checker-12 covers type-alias RHS (e.g. `type Bad = Queue<u8, u8>`).
+    let result = check_src(
+        r#"
+        struct Queue<T> { items: Array<T> }
+        type Bad = Queue<u8, u8>
+        "#,
+    );
+    assert!(
+        result.is_err(),
+        "type alias with wrong arg count should error"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::WrongTypeArgCount { .. }),
+            "expected WrongTypeArgCount, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn generic_type_arg_count_validated_in_interface_method_param() {
+    // P3-checker-12 covers interface function signature params.
+    let result = check_src(
+        r#"
+        struct Pair<A, B> { first: A, second: B }
+        interface IBad {
+            fn process(p: Pair<u128, bool, u64>)
+        }
+        "#,
+    );
+    assert!(
+        result.is_err(),
+        "interface method param with wrong arg count should error"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::WrongTypeArgCount { .. }),
+            "expected WrongTypeArgCount, got {:?}",
+            e.kind
+        );
+    }
+}

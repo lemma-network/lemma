@@ -1274,7 +1274,7 @@ impl<'a> Inferer<'a> {
     /// This closes **P3-checker-12** for all annotation positions, not just `let`.
     /// Walks the full AST once — called from `check_program` after `walk_ast`.
     pub(super) fn validate_type_annotations(&self, ast: &Ast) -> Result<(), LangError> {
-        use crate::parser::ast::{Item, StructMember};
+        use crate::parser::ast::{InterfaceMember, Item, StructMember, TraitMember};
 
         for item in &ast.items {
             match item {
@@ -1305,8 +1305,30 @@ impl<'a> Inferer<'a> {
                         self.validate_contract_member_annotations(member)?;
                     }
                 }
-                // Interface / Trait / Library / TypeAlias / ErrorDecl / Import / Using:
-                // no type annotations to validate at this stage.
+                // Interface / Trait / Library: function signatures can carry generic
+                // type annotations on params and return types.
+                Item::Interface(i) => {
+                    for m in &i.members {
+                        if let InterfaceMember::Function(f) = m {
+                            self.validate_fn_annotations(f)?;
+                        }
+                    }
+                }
+                Item::Trait(t) => {
+                    for m in &t.members {
+                        if let TraitMember::Function(f) = m {
+                            self.validate_fn_annotations(f)?;
+                        }
+                    }
+                }
+                Item::Library(l) => {
+                    for f in &l.functions {
+                        self.validate_fn_annotations(f)?;
+                    }
+                }
+                // TypeAlias RHS can be a generic type (e.g. `type Pairs = Queue<u8, u8>`).
+                Item::TypeAlias(a) => self.check_type_annotation_counts(&a.ty, a.span)?,
+                // ErrorDecl / Import / Using / Enum: no generic type annotations at top level.
                 _ => {}
             }
         }
