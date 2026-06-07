@@ -174,6 +174,17 @@ impl Parser {
                     let span = expr_span(&expr).merge_with(q_span);
                     expr = Expr::Try_(Box::new(expr), span);
                 }
+                // Cast: expr as Type  (§3.7 widening; postfix so it binds tighter than all binary ops)
+                Token::As => {
+                    self.advance();
+                    let ty = self.parse_type()?;
+                    let span = expr_span(&expr).merge_with(self.prev_span());
+                    expr = Expr::Cast {
+                        expr: Box::new(expr),
+                        ty,
+                        span,
+                    };
+                }
                 _ => break,
             }
         }

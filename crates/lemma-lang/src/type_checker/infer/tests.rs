@@ -498,3 +498,362 @@ fn check_returns_non_empty_expr_types() {
         "3c should populate expr_types (is_fully_typed)"
     );
 }
+
+// ─── 3d: Cast ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn infer_cast_widening_u128_to_u256() {
+    // `100u128 as u256` → U256 (widening, same signedness class)
+    let typed =
+        check_src("fn f(x: u128) { let y = x as u256 }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "u128 as u256 should be U256");
+}
+
+#[test]
+fn infer_cast_int_literal_to_u128() {
+    // `42 as u128` — IntLiteral can cast to any concrete integer type.
+    let typed = check_src("fn f() { let y = 42 as u128 }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "IntLiteral as u128 should be U128");
+}
+
+#[test]
+fn infer_cast_narrowing_u256_to_u8_errors() {
+    // `x as u8` where x: u256 → InvalidConversion (narrowing via `as` is banned)
+    let result = check_src("fn f(x: u256) { let y = x as u8 }");
+    assert!(result.is_err(), "u256 as u8 should be InvalidConversion");
+}
+
+#[test]
+fn infer_cast_bool_to_integer_errors() {
+    // `true as u128` → error (bool is not an integer type)
+    let result = check_src("fn f() { let y = true as u128 }");
+    assert!(result.is_err(), "bool as u128 should be an error");
+}
+
+// ─── 3d: Array literal ────────────────────────────────────────────────────────
+
+#[test]
+fn infer_array_literal_homogeneous() {
+    // `[1u8, 2u8, 3u8]` → Array(U8)
+    let typed = check_src("fn f() { let a = [1u8, 2u8, 3u8] }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_array_u8 = typed
+        .expr_types
+        .values()
+        .any(|t| *t == ResolvedType::Array(Box::new(ResolvedType::U8)));
+    assert!(has_array_u8, "[1u8, 2u8, 3u8] should be Array(U8)");
+}
+
+#[test]
+fn infer_array_literal_type_mismatch_errors() {
+    // `[1u8, 2u16]` → TypeMismatch (u8 ≠ u16)
+    let result = check_src("fn f() { let a = [1u8, 2u16] }");
+    assert!(result.is_err(), "[u8, u16] should be TypeMismatch");
+}
+
+#[test]
+fn infer_empty_array_literal_is_array_unknown() {
+    // `[]` → Array(Unknown) — element type deferred
+    let typed = check_src("fn f() { let a = [] }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_array_unknown = typed
+        .expr_types
+        .values()
+        .any(|t| *t == ResolvedType::Array(Box::new(ResolvedType::Unknown)));
+    assert!(has_array_unknown, "[] should be Array(Unknown)");
+}
+
+// ─── 3d: Tuple literal ────────────────────────────────────────────────────────
+
+#[test]
+fn infer_tuple_literal_two_elements() {
+    // `(1u8, true)` → Tuple([U8, Bool])
+    let typed = check_src("fn f() { let t = (1u8, true) }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_tuple = typed
+        .expr_types
+        .values()
+        .any(|t| *t == ResolvedType::Tuple(vec![ResolvedType::U8, ResolvedType::Bool]));
+    assert!(has_tuple, "(1u8, true) should be Tuple([U8, Bool])");
+}
+
+// ─── 3d: Index ────────────────────────────────────────────────────────────────
+
+#[test]
+fn infer_index_fixed_array_returns_elem_type() {
+    // `arr[0u32]` where arr: [u128; 3] → U128
+    let typed =
+        check_src("fn f(arr: [u128; 3]) { let x = arr[0u32] }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "arr[0] where arr: [u128; 3] should be U128");
+}
+
+#[test]
+fn infer_index_map_returns_value_type() {
+    // `m[k]` where m: Map<Address, u128> → U128
+    let typed = check_src("fn f(m: Map<Address, u128>, k: Address) { let x = m[k] }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "m[k] where m: Map<Address, u128> should be U128");
+}
+
+#[test]
+fn infer_index_on_non_indexable_errors() {
+    // `s[0u32]` where s: string → NotIndexable
+    let result = check_src("fn f(s: string) { let x = s[0u32] }");
+    assert!(result.is_err(), "string[0] should be NotIndexable");
+}
+
+// ─── 3d: Struct literal ───────────────────────────────────────────────────────
+
+#[test]
+fn infer_struct_literal_returns_named_type() {
+    // `Point { x: 1u128, y: 2u128 }` → Named(point_id, [])
+    let typed = check_src(
+        "struct Point { x: u128, y: u128 }\nfn f() { let p = Point { x: 1u128, y: 2u128 } }",
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_named = typed
+        .expr_types
+        .values()
+        .any(|t| matches!(t, ResolvedType::Named(_, _)));
+    assert!(has_named, "struct literal should be Named(...)");
+}
+
+#[test]
+fn infer_struct_literal_unknown_field_errors() {
+    // `Point { z: 1u128 }` → UnknownField (z not in Point)
+    let result =
+        check_src("struct Point { x: u128, y: u128 }\nfn f() { let p = Point { z: 1u128 } }");
+    assert!(result.is_err(), "Point {{ z: ... }} should be UnknownField");
+}
+
+// ─── 3d: Function call ────────────────────────────────────────────────────────
+
+#[test]
+fn infer_fn_call_returns_return_type() {
+    // `add(1u128, 2u128)` where `fn add(a: u128, b: u128) -> u128` → U128
+    let typed = check_src(
+        "fn add(a: u128, b: u128) -> u128 { return a }\nfn f() { let x = add(1u128, 2u128) }",
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "add(u128, u128) -> u128 call should be U128");
+}
+
+#[test]
+fn infer_fn_call_too_many_args_errors() {
+    // `add(1u128, 2u128, 3u128)` where add takes 2 params → ArityMismatch
+    let result = check_src(
+        "fn add(a: u128, b: u128) -> u128 { return a }\nfn f() { let x = add(1u128, 2u128, 3u128) }",
+    );
+    assert!(result.is_err(), "too many args should be ArityMismatch");
+}
+
+#[test]
+fn infer_call_on_non_callable_errors() {
+    // `b(1u128)` where b: bool → NotCallable
+    let result = check_src("fn f(b: bool) { let x = b(1u128) }");
+    assert!(result.is_err(), "bool() should be NotCallable");
+}
+
+// ─── 3d: Member access ────────────────────────────────────────────────────────
+
+#[test]
+fn infer_member_builtin_length_on_array() {
+    // `arr.length` where arr: Array<u256> → U256
+    let typed = check_src("fn f(arr: Array<u256>) { let n = arr.length }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "arr.length should be U256");
+}
+
+#[test]
+fn infer_member_builtin_has_on_map() {
+    // `m.has` where m: Map<Address, u128> → Bool (via builtin_member_type)
+    // Note: .has is a method, so we call it: m.has(k) — but the member expr itself
+    // returns the Fn type. Test the full call chain.
+    let typed = check_src("fn f(m: Map<Address, u128>, k: Address) { let b = m.has(k) }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_bool = typed.expr_types.values().any(|t| *t == ResolvedType::Bool);
+    assert!(has_bool, "m.has(k) should be Bool");
+}
+
+#[test]
+fn infer_member_struct_field_access() {
+    // `p.x` where p: Point, Point has field x: u128 → U128
+    let typed = check_src("struct Point { x: u128, y: u128 }\nfn f(p: Point) { let v = p.x }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "p.x where Point.x: u128 should be U128");
+}
+
+#[test]
+fn infer_member_struct_unknown_field_errors() {
+    // `p.z` where Point has no field z → UnknownField
+    let result = check_src("struct Point { x: u128, y: u128 }\nfn f(p: Point) { let v = p.z }");
+    assert!(
+        result.is_err(),
+        "p.z where z not in Point should be UnknownField"
+    );
+}
+
+// ─── 3d: New expression ───────────────────────────────────────────────────────
+
+#[test]
+fn infer_new_expr_returns_named_type() {
+    // `new Counter()` → Named(counter_id, [])
+    let typed = check_src("contract Counter {}\nfn f() { let c = new Counter() }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_named = typed
+        .expr_types
+        .values()
+        .any(|t| matches!(t, ResolvedType::Named(_, _)));
+    assert!(has_named, "new Counter() should be Named(...)");
+}
+
+// ─── 3d: Built-in member methods ─────────────────────────────────────────────
+
+#[test]
+fn infer_builtin_checked_add_returns_result() {
+    // `x.checkedAdd(y)` where x: u128 → Result<U128, Unknown>
+    let typed = check_src("fn f(x: u128, y: u128) { let r = x.checkedAdd(y) }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_result = typed
+        .expr_types
+        .values()
+        .any(|t| matches!(t, ResolvedType::Result_(inner, _) if **inner == ResolvedType::U128));
+    assert!(has_result, "x.checkedAdd(y) should be Result<U128, _>");
+}
+
+#[test]
+fn infer_builtin_get_on_array_returns_option() {
+    // `arr.get(0u32)` where arr: Array<u256> → Option<U256>
+    let typed = check_src("fn f(arr: Array<u256>) { let v = arr.get(0u32) }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_option = typed
+        .expr_types
+        .values()
+        .any(|t| matches!(t, ResolvedType::Option_(inner) if **inner == ResolvedType::U256));
+    assert!(has_option, "arr.get(0) should be Option<U256>");
+}
+
+// ─── 3d: UnaryOp::Ref ────────────────────────────────────────────────────────
+
+#[test]
+fn infer_ref_returns_inner_type() {
+    // `&x` where x: u128 → U128 (transparent for 3d)
+    let typed = check_src("fn f(x: u128) { let r = &x }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "&u128 should be U128 (transparent in 3d)");
+}
+
+// ─── SF-3: Additional coverage (per CodeReviewer APPROVE WITH SUGGESTIONS) ───
+
+// Cast: signed widening (i8 as i256)
+#[test]
+fn infer_cast_signed_widening_i8_to_i256() {
+    let typed = check_src("fn f(x: i8) { let y = x as i256 }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_i256 = typed.expr_types.values().any(|t| *t == ResolvedType::I256);
+    assert!(has_i256, "i8 as i256 should widen to I256");
+}
+
+// Cast: cross-sign cast (u8 as i16) — different signedness class → error
+#[test]
+fn infer_cast_cross_sign_u8_to_i16_errors() {
+    let result = check_src("fn f(x: u8) { let y = x as i16 }");
+    assert!(
+        result.is_err(),
+        "u8 as i16 should be InvalidConversion (cross-sign class)"
+    );
+}
+
+// Built-ins: wrappingAdd returns same integer type
+#[test]
+fn infer_builtin_wrapping_add_returns_same_type() {
+    let typed = check_src("fn f(x: u128, y: u128) { let r = x.wrappingAdd(y) }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "x.wrappingAdd(y) should return U128");
+}
+
+// Built-ins: saturatingAdd returns same type
+#[test]
+fn infer_builtin_saturating_add_returns_same_type() {
+    let typed = check_src("fn f(x: u64, y: u64) { let r = x.saturatingAdd(y) }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u64 = typed.expr_types.values().any(|t| *t == ResolvedType::U64);
+    assert!(has_u64, "x.saturatingAdd(y) should return U64");
+}
+
+// Built-ins: Set.has returns bool
+#[test]
+fn infer_builtin_set_has_returns_bool() {
+    let typed = check_src("fn f(s: Set<u128>, v: u128) { let b = s.has(v) }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_bool = typed.expr_types.values().any(|t| *t == ResolvedType::Bool);
+    assert!(has_bool, "s.has(v) on Set should be Bool");
+}
+
+// Built-ins: Set.size returns u256
+#[test]
+fn infer_builtin_set_size_returns_u256() {
+    let typed =
+        check_src("fn f(s: Set<u128>) { let n = s.size }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "s.size should be U256");
+}
+
+// Built-ins: Option.isSome returns bool
+#[test]
+fn infer_builtin_option_is_some_returns_bool() {
+    let typed =
+        check_src("fn f(o: Option<u128>) { let b = o.isSome }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_bool = typed.expr_types.values().any(|t| *t == ResolvedType::Bool);
+    assert!(has_bool, "o.isSome should be Bool");
+}
+
+// Built-ins: Option.unwrap returns inner type
+#[test]
+fn infer_builtin_option_unwrap_returns_inner() {
+    let typed =
+        check_src("fn f(o: Option<u256>) { let v = o.unwrap }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "o.unwrap on Option<u256> should be U256");
+}
+
+// Built-ins: Decimal.toRaw returns u256
+#[test]
+fn infer_builtin_decimal_to_raw_returns_u256() {
+    let typed =
+        check_src("fn f(p: decimal(18)) { let r = p.toRaw }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "p.toRaw should be U256");
+}
+
+// Built-ins: Address.isZero returns bool
+#[test]
+fn infer_builtin_address_is_zero_returns_bool() {
+    let typed = check_src("fn f(addr: Address) { let b = addr.isZero }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_bool = typed.expr_types.values().any(|t| *t == ResolvedType::Bool);
+    assert!(has_bool, "addr.isZero should be Bool");
+}
+
+// Built-ins: Map.getOr returns value type (not Option<V>)
+#[test]
+fn infer_builtin_map_get_or_returns_value_type() {
+    // `m.getOr(k, 0u128)` → U128 (not Option<U128>)
+    let typed = check_src("fn f(m: Map<Address, u128>, k: Address) { let v = m.getOr(k, 0u128) }")
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "m.getOr(k, 0u128) should be U128 (not Option)");
+}
+
+// Built-ins: String.length returns u256
+#[test]
+fn infer_builtin_string_length_returns_u256() {
+    let typed =
+        check_src(r#"fn f(s: string) { let n = s.length }"#).unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
+    assert!(has_u256, "s.length should be U256");
+}

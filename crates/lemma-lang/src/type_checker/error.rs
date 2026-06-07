@@ -104,8 +104,45 @@ pub enum TypeErrorKind {
         /// The offending operand type (human-readable).
         ty: String,
     },
-    // 3d: ArityMismatch { func: String, expected: usize, found: usize },
-    //     UnknownField { ty: String, field: String }
+
+    /// An invalid type conversion: `as` used for narrowing instead of `.tryInto()`,
+    /// or `as` applied to a non-integer type.
+    InvalidConversion {
+        /// The source type (human-readable).
+        from: String,
+        /// The target type (human-readable).
+        to: String,
+    },
+
+    /// A function call has the wrong number of positional arguments.
+    ArityMismatch {
+        /// The function name (or `"fn"` for anonymous callees).
+        func: String,
+        /// The expected maximum number of positional arguments.
+        expected: usize,
+        /// The number of positional arguments actually provided.
+        found: usize,
+    },
+
+    /// A struct field access uses a field name that does not exist on the type.
+    UnknownField {
+        /// The struct type name (human-readable).
+        ty: String,
+        /// The field name that was not found.
+        field: String,
+    },
+
+    /// A call target is not callable (not a function type).
+    NotCallable {
+        /// The type of the callee expression (human-readable).
+        ty: String,
+    },
+
+    /// An index operation target does not support indexing.
+    NotIndexable {
+        /// The type of the base expression (human-readable).
+        ty: String,
+    },
     // 3e: MutationOfImmutable { name: String },
     //     ReturnTypeMismatch { func: String, expected: String, found: String },
     //     ConditionNotBool { found: String }

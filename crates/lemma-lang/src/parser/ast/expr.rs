@@ -337,6 +337,19 @@ pub enum Expr {
     /// Try operator (postfix `?`): `expr?`.
     Try_(Box<Expr>, Span),
 
+    /// A cast expression: `expr as T`.
+    ///
+    /// `as` performs **widening only** per §3.7 of the Lem language spec:
+    /// `100u128 as u256`.  Narrowing must use `.tryInto()?`.
+    Cast {
+        /// The expression being cast.
+        expr: Box<Expr>,
+        /// The target type.
+        ty: Type,
+        /// Source location of the entire cast expression.
+        span: Span,
+    },
+
     /// A lambda expression: `(x, y) => x + y` or `x => x * 2`.
     Lambda {
         params: Vec<Param>,

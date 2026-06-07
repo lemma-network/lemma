@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::lexer::token::Span;
 use crate::parser::ast::Ast;
-use crate::type_checker::types::{ResolvedType, SymbolId};
+use crate::type_checker::types::{ResolvedType, SymbolId, SymbolSig};
 
 use super::TypedAst;
 
@@ -16,7 +16,13 @@ fn empty_ast() -> Ast {
 }
 
 fn make_typed(ast: Ast) -> TypedAst {
-    TypedAst::new(ast, BTreeMap::new(), BTreeMap::new(), vec![])
+    TypedAst::new(
+        ast,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        vec![],
+        BTreeMap::<SymbolId, SymbolSig>::new(),
+    )
 }
 
 fn test_span(offset: usize) -> Span {
@@ -33,7 +39,13 @@ fn test_span(offset: usize) -> Span {
 #[test]
 fn typed_ast_constructs_with_empty_tables() {
     let ast = empty_ast();
-    let typed = TypedAst::new(ast, BTreeMap::new(), BTreeMap::new(), vec![]);
+    let typed = TypedAst::new(
+        ast,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        vec![],
+        BTreeMap::<SymbolId, SymbolSig>::new(),
+    );
     assert!(typed.expr_types.is_empty());
     assert!(typed.resolutions.is_empty());
 }
@@ -48,7 +60,13 @@ fn typed_ast_is_fully_typed_false_when_empty() {
 fn typed_ast_is_fully_typed_true_when_populated() {
     let mut expr_types = BTreeMap::new();
     expr_types.insert(test_span(0), ResolvedType::U128);
-    let typed = TypedAst::new(empty_ast(), expr_types, BTreeMap::new(), vec![]);
+    let typed = TypedAst::new(
+        empty_ast(),
+        expr_types,
+        BTreeMap::new(),
+        vec![],
+        BTreeMap::<SymbolId, SymbolSig>::new(),
+    );
     assert!(typed.is_fully_typed());
 }
 
@@ -59,7 +77,13 @@ fn type_of_returns_inserted_type() {
     let span = test_span(5);
     let mut expr_types = BTreeMap::new();
     expr_types.insert(span, ResolvedType::Bool);
-    let typed = TypedAst::new(empty_ast(), expr_types, BTreeMap::new(), vec![]);
+    let typed = TypedAst::new(
+        empty_ast(),
+        expr_types,
+        BTreeMap::new(),
+        vec![],
+        BTreeMap::<SymbolId, SymbolSig>::new(),
+    );
     assert_eq!(typed.type_of(&span), Some(&ResolvedType::Bool));
 }
 
@@ -76,7 +100,13 @@ fn type_of_distinguishes_spans_by_offset() {
     let mut expr_types = BTreeMap::new();
     expr_types.insert(span_a, ResolvedType::U128);
     expr_types.insert(span_b, ResolvedType::Bool);
-    let typed = TypedAst::new(empty_ast(), expr_types, BTreeMap::new(), vec![]);
+    let typed = TypedAst::new(
+        empty_ast(),
+        expr_types,
+        BTreeMap::new(),
+        vec![],
+        BTreeMap::<SymbolId, SymbolSig>::new(),
+    );
     assert_eq!(typed.type_of(&span_a), Some(&ResolvedType::U128));
     assert_eq!(typed.type_of(&span_b), Some(&ResolvedType::Bool));
 }
@@ -88,7 +118,13 @@ fn resolution_of_returns_inserted_symbol() {
     let span = test_span(3);
     let mut resolutions = BTreeMap::new();
     resolutions.insert(span, SymbolId(1));
-    let typed = TypedAst::new(empty_ast(), BTreeMap::new(), resolutions, vec![]);
+    let typed = TypedAst::new(
+        empty_ast(),
+        BTreeMap::new(),
+        resolutions,
+        vec![],
+        BTreeMap::<SymbolId, SymbolSig>::new(),
+    );
     assert_eq!(typed.resolution_of(&span), Some(SymbolId(1)));
 }
 

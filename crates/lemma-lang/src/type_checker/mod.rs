@@ -50,6 +50,7 @@ use crate::parser::ast::{Ast, Item};
 
 use self::error::{TypeError, TypeErrorKind};
 pub use self::typed_ast::TypedAst;
+use self::types::SymbolKind;
 pub use self::types::{ResolvedType, SymbolId};
 
 // ─── Public entry point ───────────────────────────────────────────────────────
@@ -104,17 +105,42 @@ impl Checker {
         // Pass 1 (3a): reject duplicate top-level declaration names.
         self.check_no_duplicate_top_level_names(&ast.items)?;
 
-        // Pass 2 (3b): name resolution — populates resolutions + symbols.
-        let (symbols, resolutions) = resolver::resolve(&ast)?;
+        // Pass 2 (3b/3d): name resolution + SymbolSig building.
+        let (symbols, resolutions, sigs) = resolver::resolve(&ast)?;
 
-        // Pass 3 (3c): expression typing — populates expr_types.
+        // Build flat global-type namespace for the Inferer's lower_cast_target.
+        // Maps each type-namespace symbol's name to its SymbolId.
+        let global_types: BTreeMap<String, SymbolId> = symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                matches!(
+                    s.kind,
+                    SymbolKind::Struct
+                        | SymbolKind::Enum
+                        | SymbolKind::Contract
+                        | SymbolKind::TypeAlias
+                        | SymbolKind::Interface
+                        | SymbolKind::Trait
+                )
+            })
+            .map(|(i, s)| (s.name.clone(), SymbolId((i + 1) as u32)))
+            .collect();
+
+        // Pass 3 (3c/3d): expression typing — populates expr_types.
         let mut expr_types = BTreeMap::new();
         {
-            let mut inferer = infer::Inferer::new(&symbols, &resolutions, &mut expr_types);
+            let mut inferer = infer::Inferer::new(
+                &symbols,
+                &resolutions,
+                &sigs,
+                &global_types,
+                &mut expr_types,
+            );
             inferer.walk_ast(&ast)?;
         }
 
-        Ok(TypedAst::new(ast, expr_types, resolutions, symbols))
+        Ok(TypedAst::new(ast, expr_types, resolutions, symbols, sigs))
     }
 
     /// Verify that no two top-level items share a declaration name.

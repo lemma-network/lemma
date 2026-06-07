@@ -6,7 +6,7 @@
 
 use crate::error::LangError;
 use crate::lexer::tokenize;
-use crate::parser::ast::{AssignOp, BinaryOp, CallArg, Expr, Literal, UnaryOp};
+use crate::parser::ast::{AssignOp, BinaryOp, CallArg, Expr, Literal, Type, UnaryOp};
 use crate::parser::Parser;
 
 // ── Test helper ───────────────────────────────────────────────────────────────
@@ -710,4 +710,70 @@ fn expect_identifier_accepts_from_as_param_name_in_function() {
     };
     assert_eq!(func.params[0].name, "from");
     assert_eq!(func.params[1].name, "to");
+}
+
+// ── Cast expression (Expr::Cast) ──────────────────────────────────────────────
+
+#[test]
+fn parse_cast_typed_int_to_u256() {
+    // `100u128 as u256` → Cast { IntTyped(100, "u128"), Type::U256 }
+    let expr = parse_expr_from_str("100u128 as u256").expect("parse failed");
+    match expr {
+        Expr::Cast {
+            expr: inner, ty, ..
+        } => {
+            assert!(
+                matches!(*inner, Expr::Literal(Literal::IntTyped { value: 100, ref suffix }, _) if suffix == "u128"),
+                "expected IntTyped(100, u128), got {inner:?}"
+            );
+            assert_eq!(ty, Type::U256, "expected cast target U256");
+        }
+        _ => panic!("expected Expr::Cast, got {expr:?}"),
+    }
+}
+
+#[test]
+fn parse_cast_ident_to_u128() {
+    // `x as u128` → Cast { Ident("x"), Type::U128 }
+    let expr = parse_expr_from_str("x as u128").expect("parse failed");
+    match expr {
+        Expr::Cast {
+            expr: inner, ty, ..
+        } => {
+            assert!(
+                matches!(*inner, Expr::Ident(ref n, _) if n == "x"),
+                "expected Ident(x), got {inner:?}"
+            );
+            assert_eq!(ty, Type::U128, "expected cast target U128");
+        }
+        _ => panic!("expected Expr::Cast, got {expr:?}"),
+    }
+}
+
+#[test]
+fn parse_cast_binds_tighter_than_addition() {
+    // `a + b as u256` should parse as Binary(Add, Ident("a"), Cast{Ident("b"), U256})
+    // NOT as Cast{Binary(Add, a, b), U256} — `as` is postfix, tighter than `+`.
+    let expr = parse_expr_from_str("a + b as u256").expect("parse failed");
+    match expr {
+        Expr::Binary(BinaryOp::Add, lhs, rhs, _) => {
+            assert!(
+                matches!(*lhs, Expr::Ident(ref n, _) if n == "a"),
+                "lhs should be Ident(a)"
+            );
+            match *rhs {
+                Expr::Cast {
+                    expr: inner, ty, ..
+                } => {
+                    assert!(
+                        matches!(*inner, Expr::Ident(ref n, _) if n == "b"),
+                        "cast inner should be Ident(b)"
+                    );
+                    assert_eq!(ty, Type::U256, "cast target should be U256");
+                }
+                _ => panic!("rhs should be Cast, got {rhs:?}"),
+            }
+        }
+        _ => panic!("expected Binary(Add, ...), got {expr:?}"),
+    }
 }

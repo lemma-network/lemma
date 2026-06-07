@@ -43,21 +43,35 @@ use crate::parser::ast::{
 };
 
 use super::error::{TypeError, TypeErrorKind};
-use super::types::{ResolvedType, SymbolId, SymbolInfo, SymbolKind};
+use super::types::{
+    EnumSig, FnSig, ResolvedType, StructSig, SymbolId, SymbolInfo, SymbolKind, SymbolSig,
+};
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
+/// Output of the name-resolution pass.
+///
+/// `(symbols, resolutions, sigs)`:
+/// - `symbols`     — the symbol arena (`SymbolId(n)` → `symbols[n-1]`)
+/// - `resolutions` — span → SymbolId map for every resolved identifier
+/// - `sigs`        — structured signatures for functions, structs, and enums
+pub(super) type ResolveOutput = (
+    Vec<SymbolInfo>,
+    BTreeMap<Span, SymbolId>,
+    BTreeMap<SymbolId, SymbolSig>,
+);
+
 /// Run name resolution over a parsed AST.
 ///
-/// Returns the **symbol arena** and **resolution map** on success, or the
-/// first [`LangError::Type`] encountered on failure.
-pub(super) fn resolve(ast: &Ast) -> Result<(Vec<SymbolInfo>, BTreeMap<Span, SymbolId>), LangError> {
+/// Returns the **symbol arena**, **resolution map**, and **symbol signatures**
+/// on success, or the first [`LangError::Type`] encountered on failure.
+pub(super) fn resolve(ast: &Ast) -> Result<ResolveOutput, LangError> {
     let mut r = Resolver::new();
     r.build_global_scope(ast)?;
     for item in &ast.items {
         r.resolve_item(item)?;
     }
-    Ok((r.symbols, r.resolutions))
+    Ok((r.symbols, r.resolutions, r.sigs))
 }
 
 // ─── Resolver internals ───────────────────────────────────────────────────────
@@ -67,6 +81,8 @@ struct Resolver {
     symbols: Vec<SymbolInfo>,
     /// Span → SymbolId resolution map (the output).
     resolutions: BTreeMap<Span, SymbolId>,
+    /// SymbolId → SymbolSig map (the output).
+    sigs: BTreeMap<SymbolId, SymbolSig>,
     /// Stack of value-namespace scopes (params, locals, fns, state fields).
     value_scopes: Vec<BTreeMap<String, SymbolId>>,
     /// Stack of type-namespace scopes (structs, enums, generics, etc.).
@@ -80,6 +96,7 @@ impl Resolver {
         Self {
             symbols: Vec::new(),
             resolutions: BTreeMap::new(),
+            sigs: BTreeMap::new(),
             value_scopes: Vec::new(),
             type_scopes: Vec::new(),
             in_method: false,
@@ -115,6 +132,16 @@ impl Resolver {
     /// and value symbols deferred to a later subtask).
     fn alloc(&mut self, name: impl Into<String>, decl_span: Span, kind: SymbolKind) -> SymbolId {
         self.alloc_typed(name, decl_span, kind, ResolvedType::Unknown)
+    }
+
+    /// Retroactively set the resolved type on an already-allocated symbol.
+    ///
+    /// Used to set `Function` ty = `Fn(params, ret)` after all param types
+    /// are known (i.e. after the type scope is live in `resolve_function_body`).
+    fn set_sym_ty(&mut self, id: SymbolId, ty: ResolvedType) {
+        if let Some(info) = self.symbols.get_mut((id.0 as usize).saturating_sub(1)) {
+            info.ty = ty;
+        }
     }
 
     // ── Type lowering ─────────────────────────────────────────────────────
@@ -443,6 +470,29 @@ impl Resolver {
                         self.resolve_function_body(f)?;
                     }
                 }
+                // Build StructSig — generic params are in scope so lower_type resolves correctly.
+                // Struct methods are NOT in any value scope here (they're not in global scope),
+                // so methods list is empty for 3d; deferred to 3g.
+                let fields: Vec<(String, ResolvedType)> = s
+                    .members
+                    .iter()
+                    .filter_map(|m| {
+                        if let StructMember::Field(f) = m {
+                            Some((f.name.clone(), self.lower_type(&f.ty)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if let Some(struct_id) = self.lookup_type(&s.name) {
+                    self.sigs.insert(
+                        struct_id,
+                        SymbolSig::Struct(StructSig {
+                            fields,
+                            methods: Vec::new(), // TODO(3g): populate struct method SymbolIds
+                        }),
+                    );
+                }
                 self.pop_type_scope();
             }
             Item::Enum(e) => {
@@ -452,6 +502,23 @@ impl Resolver {
                 }
                 for method in &e.methods {
                     self.resolve_function_body(method)?;
+                }
+                // Build EnumSig — generic params are in scope so lower_type resolves correctly.
+                let variants: Vec<(String, Vec<(String, ResolvedType)>)> = e
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        let fields: Vec<(String, ResolvedType)> = v
+                            .fields
+                            .iter()
+                            .map(|f| (f.name.clone(), self.lower_type(&f.ty)))
+                            .collect();
+                        (v.name.clone(), fields)
+                    })
+                    .collect();
+                if let Some(enum_id) = self.lookup_type(&e.name) {
+                    self.sigs
+                        .insert(enum_id, SymbolSig::Enum(EnumSig { variants }));
                 }
                 self.pop_type_scope();
             }
@@ -613,11 +680,37 @@ impl Resolver {
                 self.pop_value_scope();
             }
             ContractMember::Struct(s) => {
+                self.push_type_scope();
+                for gp in &s.generic_params {
+                    self.register_generic_param(gp)?;
+                }
                 for member in &s.members {
                     if let StructMember::Method(method) = member {
                         self.resolve_function_body(method)?;
                     }
                 }
+                // Build StructSig for contract-nested struct.
+                let fields: Vec<(String, ResolvedType)> = s
+                    .members
+                    .iter()
+                    .filter_map(|m| {
+                        if let StructMember::Field(f) = m {
+                            Some((f.name.clone(), self.lower_type(&f.ty)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if let Some(struct_id) = self.lookup_type(&s.name) {
+                    self.sigs.insert(
+                        struct_id,
+                        SymbolSig::Struct(StructSig {
+                            fields,
+                            methods: Vec::new(), // TODO(3g): populate struct method SymbolIds
+                        }),
+                    );
+                }
+                self.pop_type_scope();
             }
             ContractMember::Event(_)
             | ContractMember::Enum(_)
@@ -637,6 +730,41 @@ impl Resolver {
         self.push_type_scope();
         for gp in &f.generic_params {
             self.register_generic_param(gp)?;
+        }
+
+        // Compute FnSig — type scopes are live so lower_type resolves correctly.
+        // The function's SymbolId is in the OUTER value scope (global or contract body).
+        // lookup_value searches inner→outer, so it finds the function in the outer scope.
+        let param_sigs: Vec<(String, ResolvedType, bool)> = f
+            .params
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    self.lower_type(&p.ty),
+                    p.default_expr.is_some(),
+                )
+            })
+            .collect();
+        let ret_ty = f
+            .return_type
+            .as_ref()
+            .map(|t| self.lower_type(t))
+            .unwrap_or(ResolvedType::Unit);
+        let fn_ty = ResolvedType::Fn(
+            param_sigs.iter().map(|(_, t, _)| t.clone()).collect(),
+            Box::new(ret_ty.clone()),
+        );
+        // Look up this function's SymbolId in the outer value scope and update it.
+        if let Some(fn_id) = self.lookup_value(&f.name) {
+            self.set_sym_ty(fn_id, fn_ty);
+            self.sigs.insert(
+                fn_id,
+                SymbolSig::Function(FnSig {
+                    params: param_sigs,
+                    ret: ret_ty,
+                }),
+            );
         }
 
         // Params introduce value bindings.
@@ -1112,6 +1240,15 @@ impl Resolver {
                         self.resolve_expr(e)?;
                     }
                 }
+            }
+            // Cast: `expr as T` — resolve inner expression and validate target type.
+            Expr::Cast {
+                expr: inner,
+                ty,
+                span,
+            } => {
+                self.resolve_expr(inner)?;
+                self.resolve_type_ref(ty, *span)?;
             }
         }
         Ok(())

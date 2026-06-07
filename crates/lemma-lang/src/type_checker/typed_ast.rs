@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 use crate::lexer::token::Span;
 use crate::parser::ast::Ast;
 
-use super::types::{ResolvedType, SymbolId, SymbolInfo};
+use super::types::{ResolvedType, SymbolId, SymbolInfo, SymbolSig};
 
 /// The typed AST returned by [`crate::type_checker::check`].
 ///
@@ -61,7 +61,7 @@ use super::types::{ResolvedType, SymbolId, SymbolInfo};
 /// Build status per subtask:
 /// - **3a**: only `ast` populated; all maps empty.
 /// - **3b**: `resolutions` + `symbols` populated (name resolution complete).
-/// - **3c–3d**: `expr_types` populated (expression typing complete).
+/// - **3c–3d**: `expr_types` + `sigs` populated (expression typing complete).
 /// - **3g**: fully populated — ready for the Step 4 safety analyzer.
 #[derive(Debug, Clone)]
 pub struct TypedAst {
@@ -92,6 +92,14 @@ pub struct TypedAst {
     ///
     /// Populated by name resolution (subtask 3b).
     pub symbols: Vec<SymbolInfo>,
+
+    /// Structured signatures for functions, structs, and enums.
+    ///
+    /// Key: [`SymbolId`] of the declaration.
+    /// Value: [`SymbolSig`] containing param types, field types, etc.
+    ///
+    /// Populated by the resolver and inference passes (subtasks 3b/3d+).
+    pub sigs: BTreeMap<SymbolId, SymbolSig>,
 }
 
 impl TypedAst {
@@ -103,12 +111,14 @@ impl TypedAst {
         expr_types: BTreeMap<Span, ResolvedType>,
         resolutions: BTreeMap<Span, SymbolId>,
         symbols: Vec<SymbolInfo>,
+        sigs: BTreeMap<SymbolId, SymbolSig>,
     ) -> Self {
         Self {
             ast,
             expr_types,
             resolutions,
             symbols,
+            sigs,
         }
     }
 
@@ -140,6 +150,15 @@ impl TypedAst {
         }
         // SymbolId(n) is 1-based; symbols[n-1] is the entry.
         self.symbols.get((id.0 as usize) - 1)
+    }
+
+    /// Look up the structured signature for a symbol by its [`SymbolId`].
+    ///
+    /// Returns `None` if no signature has been recorded for this symbol
+    /// (e.g. imported symbols, or symbols whose sig is deferred to 3g).
+    #[must_use]
+    pub fn sig(&self, id: SymbolId) -> Option<&SymbolSig> {
+        self.sigs.get(&id)
     }
 
     /// Returns `true` if expression types have been populated (subtask 3c+).

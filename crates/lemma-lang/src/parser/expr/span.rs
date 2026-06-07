@@ -35,7 +35,8 @@ pub(crate) fn expr_span(e: &Expr) -> Span {
         | Expr::Ternary { span, .. }
         | Expr::Lambda { span, .. }
         | Expr::New { span, .. }
-        | Expr::If_ { span, .. } => *span,
+        | Expr::If_ { span, .. }
+        | Expr::Cast { span, .. } => *span,
         // Forward-compatibility fallback for future #[non_exhaustive] variants
         _ => Span::at(0, 0, 0),
     }

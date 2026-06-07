@@ -244,6 +244,56 @@ impl ResolvedType {
         }
     }
 
+    /// If this is `Array<T>` or `[T; N]`, return the element type.
+    #[must_use]
+    pub fn array_elem(&self) -> Option<&ResolvedType> {
+        match self {
+            Self::Array(inner) | Self::FixedArray(inner, _) => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// If this is `Map<K, V>` or `FastMap<K, V>`, return `(key, value)` types.
+    #[must_use]
+    pub fn map_kv(&self) -> Option<(&ResolvedType, &ResolvedType)> {
+        match self {
+            Self::Map(k, v) | Self::FastMap(k, v) => Some((k, v)),
+            _ => None,
+        }
+    }
+
+    /// If this is `Tuple(elems)`, return the element types slice.
+    #[must_use]
+    pub fn tuple_elems(&self) -> Option<&[ResolvedType]> {
+        if let Self::Tuple(elems) = self {
+            Some(elems)
+        } else {
+            None
+        }
+    }
+
+    /// If this is `Named(id, _)`, return the `SymbolId`.
+    #[must_use]
+    pub fn named_id(&self) -> Option<SymbolId> {
+        if let Self::Named(id, _) = self {
+            Some(*id)
+        } else {
+            None
+        }
+    }
+
+    /// Returns `true` if this type supports integer indexing (Array, FixedArray).
+    #[must_use]
+    pub fn is_array_type(&self) -> bool {
+        matches!(self, Self::Array(_) | Self::FixedArray(_, _))
+    }
+
+    /// Returns `true` if this type supports map-style indexing (Map, FastMap).
+    #[must_use]
+    pub fn is_map_type(&self) -> bool {
+        matches!(self, Self::Map(_, _) | Self::FastMap(_, _))
+    }
+
     /// Human-readable name for use in error messages.
     ///
     /// Not a stable serialisation format — for diagnostics only.
@@ -303,6 +353,53 @@ impl ResolvedType {
             Self::Unknown => "<unknown>".into(),
         }
     }
+}
+
+// ─── SymbolSig ────────────────────────────────────────────────────────────────
+
+/// Structured signature for a symbol — used by the expression typer (3d+)
+/// to look up function param types, struct field types, and enum variant
+/// shapes without re-walking the AST at inference time.
+///
+/// Stored in [`crate::type_checker::typed_ast::TypedAst::sigs`] keyed by [`SymbolId`].
+/// Populated during the resolver's second pass (3d).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolSig {
+    /// A function or method declaration.
+    Function(FnSig),
+    /// A struct declaration.
+    Struct(StructSig),
+    /// An enum declaration.
+    Enum(EnumSig),
+}
+
+/// Signature of a function or method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FnSig {
+    /// Parameters in declaration order: `(name, resolved_type, has_default)`.
+    pub params: Vec<(String, ResolvedType, bool)>,
+    /// Return type (`Unit` for functions with no explicit return-type annotation).
+    pub ret: ResolvedType,
+}
+
+/// Signature of a struct — its field names and types in declaration order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructSig {
+    /// Fields in declaration order: `(name, resolved_type)`.
+    pub fields: Vec<(String, ResolvedType)>,
+    /// Methods: `(name, method_symbol_id)`.
+    /// The method's full `FnSig` lives at `sigs[method_symbol_id]`.
+    pub methods: Vec<(String, SymbolId)>,
+}
+
+/// Signature of an enum — its variant names and field types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumSig {
+    /// Variants in declaration order: `(variant_name, fields)`.
+    /// Each field is `(field_name, resolved_type)`.
+    /// Positional variants use synthetic names `"_0"`, `"_1"`, … (parser convention).
+    pub variants: Vec<(String, Vec<(String, ResolvedType)>)>,
 }
 
 // ─── SymbolId ─────────────────────────────────────────────────────────────────
