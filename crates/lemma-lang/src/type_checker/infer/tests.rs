@@ -915,6 +915,30 @@ fn let_unannotated_int_literal_defaults_u256() {
     );
 }
 
+// ─── P3·Step 3e: CR-fix — annotation not back-filled by RHS ─────────────────
+
+#[test]
+fn let_annotated_type_mismatch_not_silently_accepted() {
+    // Regression for soundness fix (CR issue #1): when a `let` has an annotation
+    // that resolves to a *known* type, an incompatible RHS must still error.
+    // Before the fix, the `sym_ty == Unknown` branch could inadvertently trigger
+    // the back-fill path; now the path is gated on `ty.is_none()`.
+    //
+    // `let x: bool = 42u128` — u128 is not bool → TypeMismatch (not silent accept).
+    let result = check_src("fn f() { let x: bool = 42u128 }");
+    assert!(
+        result.is_err(),
+        "let x: bool = 42u128 must error with TypeMismatch"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::TypeMismatch { .. }),
+            "expected TypeMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
+
 // ─── P3·Step 3e: return checking ─────────────────────────────────────────────
 
 #[test]
@@ -1109,6 +1133,15 @@ fn compound_assign_numeric_passes() {
 }
 
 #[test]
+fn assign_bare_int_literal_coerces_to_lhs() {
+    // Plain assignment of a bare (un-suffixed) integer literal to a mut local
+    // with a concrete annotated type should coerce the literal, not error.
+    // `let mut x: u64 = 0u64; x = 5` — the `5` has no suffix but should coerce to u64.
+    check_src("fn f() { let mut x: u64 = 0u64\n x = 5 }")
+        .unwrap_or_else(|e| panic!("bare int literal should coerce to u64 in assignment: {e:?}"));
+}
+
+#[test]
 fn compound_assign_non_numeric_errors() {
     // `let mut x: bool = false; x += true;` → InvalidOperand (bool is not numeric).
     let result = check_src("fn f() { let mut x: bool = false\n x += true }");
@@ -1186,7 +1219,7 @@ fn match_expr_arm_type_mismatch_errors() {
 }
 
 #[test]
-fn match_expr_no_arms_returns_unknown() {
+fn match_expr_single_arm_returns_arm_type() {
     // Single-arm match returning a known type → that type.
     let typed = check_src(
         "fn g() -> u128 { return 0u128 }\nfn f(x: u128) { let v = match (x) { _ => g() } }",
@@ -1195,6 +1228,21 @@ fn match_expr_no_arms_returns_unknown() {
     // g() returns u128 — the match should unify to u128.
     let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
     assert!(has_u128, "match with single u128 arm should be U128");
+}
+
+#[test]
+fn match_expr_bool_arms_unify_to_concrete_type() {
+    // Match on bool with two arms both returning u128: the arms unify to u128.
+    // Also exercises the Unknown-propagation guard (if one arm is Unknown, the
+    // other concrete type wins); here both are concrete so the direct unify path
+    // runs. Uses bool patterns (valid Lem match patterns).
+    let typed = check_src(
+        "fn known() -> u128 { return 0u128 }\n\
+         fn f(b: bool) { let v = match (b) { true => known(), false => known() } }",
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u128 = typed.expr_types.values().any(|t| *t == ResolvedType::U128);
+    assert!(has_u128, "match with two u128 arms should unify to U128");
 }
 
 // ─── P3·Step 3e: Expr::Try_ ──────────────────────────────────────────────────

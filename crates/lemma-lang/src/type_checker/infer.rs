@@ -1476,41 +1476,57 @@ impl<'a> Inferer<'a> {
                     .map(|s| s.ty.clone())
                     .unwrap_or(ResolvedType::Unknown);
 
-                if sym_ty == ResolvedType::Unknown {
-                    // Unannotated let: back-fill symbol type from RHS.
-                    // IntLiteral defaults to u256 (DB-A27).
-                    let resolved = if rhs_ty.is_int_literal() {
-                        ResolvedType::U256
-                    } else {
-                        rhs_ty.clone()
-                    };
-                    if let Some(info) = self.symbols.get_mut((id.0 as usize).saturating_sub(1)) {
-                        if info.ty == ResolvedType::Unknown {
-                            info.ty = resolved;
+                // Decide path based on *syntactic* presence of a type annotation,
+                // NOT on whether sym_ty == Unknown (ambiguous: Unknown occurs both
+                // for genuinely unannotated lets AND for annotated lets whose type
+                // lowered to Unknown due to a forward-reference / import —
+                // P3-checker-3, deferred to 3g).
+                match _ty {
+                    None => {
+                        // Truly unannotated let: back-fill symbol type from RHS.
+                        // IntLiteral defaults to u256 when no context forces a type (DB-A27).
+                        let resolved = if rhs_ty.is_int_literal() {
+                            ResolvedType::U256
+                        } else {
+                            rhs_ty.clone()
+                        };
+                        if let Some(info) = self.symbols.get_mut((id.0 as usize).saturating_sub(1))
+                        {
+                            if info.ty == ResolvedType::Unknown {
+                                info.ty = resolved;
+                            }
                         }
                     }
-                } else {
-                    // Annotated let: check RHS matches annotation.
-                    if rhs_ty != ResolvedType::Unknown && sym_ty != ResolvedType::Unknown {
-                        // IntLiteral coerces to annotation type without error.
-                        if rhs_ty.is_int_literal() && sym_ty.is_integer() {
-                            self.expr_types.insert(expr_span(expr), sym_ty.clone());
-                        } else if rhs_ty != sym_ty {
-                            if let Some(coerced) = rhs_ty.coerce_int_literal(&sym_ty) {
-                                self.expr_types.insert(expr_span(expr), coerced.clone());
-                            } else {
-                                return Err(type_err(
-                                    TypeErrorKind::TypeMismatch {
-                                        expected: sym_ty.display_name(),
-                                        found: rhs_ty.display_name(),
-                                    },
-                                    span,
-                                    format!(
-                                        "let binding type mismatch: declared `{}`, got `{}`",
-                                        sym_ty.display_name(),
-                                        rhs_ty.display_name()
-                                    ),
-                                ));
+                    Some(_annotation) => {
+                        // Annotated let.
+                        if sym_ty == ResolvedType::Unknown {
+                            // Annotation present but lowered to Unknown: forward-reference
+                            // or imported type (P3-checker-3, deferred to 3g).
+                            // Do NOT back-fill with the RHS — the annotation is the
+                            // source of truth; overwriting it with the RHS would silently
+                            // accept `let x: ForwardStruct = 42` and type `x` as `u256`.
+                            // Leave sym_ty Unknown; P3-checker-3 will resolve in 3g.
+                        } else if rhs_ty != ResolvedType::Unknown {
+                            // Annotation resolved: check RHS type matches.
+                            if rhs_ty.is_int_literal() && sym_ty.is_integer() {
+                                self.expr_types.insert(expr_span(expr), sym_ty.clone());
+                            } else if rhs_ty != sym_ty {
+                                if let Some(coerced) = rhs_ty.coerce_int_literal(&sym_ty) {
+                                    self.expr_types.insert(expr_span(expr), coerced.clone());
+                                } else {
+                                    return Err(type_err(
+                                        TypeErrorKind::TypeMismatch {
+                                            expected: sym_ty.display_name(),
+                                            found: rhs_ty.display_name(),
+                                        },
+                                        span,
+                                        format!(
+                                            "let binding type mismatch: declared `{}`, got `{}`",
+                                            sym_ty.display_name(),
+                                            rhs_ty.display_name()
+                                        ),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1645,11 +1661,16 @@ impl<'a> Inferer<'a> {
             }
         }
 
+        // Note: only bare Ident LHS is checked for mutability above.
+        // Index LHS (`arr[i] = x`) and Member LHS (`self.field = x`) mutability
+        // are deferred to 3g when full collection/state-access context is available.
+        // TODO(3g): check mutability for Index and Member assignment targets.
+
         // For compound assignment ops (+=, -=, *=, /=, %=):
         // LHS must be numeric (or Unknown).
         let is_compound = !matches!(op, AssignOp::Assign);
         if is_compound && lhs_ty != ResolvedType::Unknown {
-            self.require_int_or_literal(&lhs_ty, &format!("{op:?}"), span)?;
+            self.require_int_or_literal(&lhs_ty, assign_op_str(op), span)?;
         }
 
         // RHS must match LHS (with IntLiteral coercion).
@@ -1895,6 +1916,21 @@ fn type_err(kind: TypeErrorKind, span: Span, message: impl Into<String>) -> Lang
 }
 
 // ─── Operator name strings ────────────────────────────────────────────────────
+
+/// Map an [`AssignOp`] to its human-readable Lem operator string.
+///
+/// Used in error messages instead of Rust's `{op:?}` Debug format (which would
+/// emit `AddAssign` instead of `+=`), per AGENTS §10 Lemma-native naming.
+fn assign_op_str(op: &AssignOp) -> &'static str {
+    match op {
+        AssignOp::Assign => "=",
+        AssignOp::Add => "+=",
+        AssignOp::Sub => "-=",
+        AssignOp::Mul => "*=",
+        AssignOp::Div => "/=",
+        AssignOp::Rem => "%=",
+    }
+}
 
 fn binary_op_str(op: &BinaryOp) -> &'static str {
     match op {
