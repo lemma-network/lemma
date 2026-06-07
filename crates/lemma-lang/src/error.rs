@@ -2,8 +2,8 @@
 //!
 //! [`LangError`] is the top-level error enum for all Lem language processing
 //! stages. The lexer stage uses [`LangError::Lex`]; the parser stage uses
-//! [`LangError::Parse`]. Type, Safety, and Codegen variants will be added
-//! by later build steps.
+//! [`LangError::Parse`]; the type checker uses [`LangError::Type`].
+//! Safety and Codegen variants will be added by later build steps.
 //!
 //! ## Usage
 //!
@@ -24,12 +24,15 @@ use thiserror::Error;
 
 use crate::lexer::token::Span;
 use crate::parser::error::ParseError;
+use crate::type_checker::error::TypeError;
 
 /// Top-level error type for all Lem language processing stages.
 ///
-/// Each variant corresponds to a compiler stage. The `Lex` variant is
-/// populated by the lexer; `Parse` by the parser; later stages add
-/// `Type`, `Safety`, `Codegen`.
+/// Each variant corresponds to a compiler stage:
+/// - `Lex`   — lexer (tokenization)
+/// - `Parse` — parser (AST construction)
+/// - `Type`  — type checker (type inference + name resolution)
+/// - `Safety`, `Codegen` — planned for Steps 4 + 6
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LangError {
@@ -47,6 +50,12 @@ pub enum LangError {
     /// A parse error encountered while building the AST from the token stream.
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
+
+    /// A type error encountered while type-checking the AST.
+    // Delegate display entirely to TypeError — avoids "type error: type error at …"
+    // double-printing when TypeError's own #[error] already includes "type error at".
+    #[error("{0}")]
+    Type(#[from] TypeError),
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
