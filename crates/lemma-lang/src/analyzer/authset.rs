@@ -103,8 +103,22 @@ pub fn auth_set(func: &ContractFunction<'_>) -> BTreeSet<Guard> {
 /// `EffAuth(callee, entry)` = `Auth(entry)` ∪ `Auth(fn1)` ∪ … ∪ `Auth(callee)`
 /// for every internal function on the call path from `entry` to `callee`.
 ///
-/// Uses BFS over the call graph; cycles are handled by tracking visited nodes.
-/// Returns `BTreeMap<fn_name, effective_guards>` for every reachable function.
+/// ## Multi-path semantics (soundness)
+///
+/// When a callee is reachable via **multiple paths** (e.g. a diamond call graph:
+/// `entry → A → helper` and `entry → B → helper`), the effective guard set is
+/// the **intersection** of per-path sets — the weakest guarantee across all
+/// paths.  This is the sound conservative value for "is this mutation
+/// adequately guarded?" queries (SAFETY-001/002/009): if any path to the node
+/// is unguarded, the node is reachable without the guard.
+///
+/// ## Algorithm
+///
+/// Monotone fixpoint iteration over a worklist.  The guard-set lattice is
+/// ordered by ⊆; the merge operator is ∩ (meet).  Since intersection is
+/// monotonically decreasing and guard sets are finite, the algorithm always
+/// terminates.  Cycles (recursion) are handled naturally: a function is
+/// re-added to the worklist only when its guard set shrinks.
 #[must_use]
 pub fn compute_eff_auth(
     entry_fn: &str,
@@ -112,28 +126,42 @@ pub fn compute_eff_auth(
     call_graph: &CallGraph,
 ) -> BTreeMap<String, BTreeSet<Guard>> {
     let mut result: BTreeMap<String, BTreeSet<Guard>> = BTreeMap::new();
-    let mut visited: BTreeSet<String> = BTreeSet::new();
-    // Queue: (fn_name, accumulated_guards_so_far)
-    let mut queue: Vec<(String, BTreeSet<Guard>)> = Vec::new();
+    // Worklist: (fn_name, accumulated_guards_from_caller)
+    let mut worklist: std::collections::VecDeque<(String, BTreeSet<Guard>)> =
+        std::collections::VecDeque::new();
 
-    let entry_guards = fn_guards.get(entry_fn).cloned().unwrap_or_default();
-    queue.push((entry_fn.to_owned(), entry_guards));
+    let entry_own = fn_guards.get(entry_fn).cloned().unwrap_or_default();
+    worklist.push_back((entry_fn.to_owned(), entry_own));
 
-    while let Some((fn_name, accumulated)) = queue.pop() {
-        if !visited.insert(fn_name.clone()) {
-            continue; // Already processed — cycle guard.
-        }
-        result.insert(fn_name.clone(), accumulated.clone());
+    while let Some((fn_name, incoming)) = worklist.pop_front() {
+        // EffAuth at fn_name = incoming (from caller) ∪ own guards.
+        let own = fn_guards.get(&fn_name).cloned().unwrap_or_default();
+        let new_guards: BTreeSet<Guard> = incoming.union(&own).cloned().collect();
 
-        if let Some(callees) = call_graph.get(&fn_name) {
-            for callee in callees {
-                if !visited.contains(callee) {
-                    // EffAuth(callee) = accumulated ∪ Auth(callee)
-                    let mut callee_guards = accumulated.clone();
-                    if let Some(own) = fn_guards.get(callee) {
-                        callee_guards.extend(own.iter().cloned());
-                    }
-                    queue.push((callee.clone(), callee_guards));
+        let changed = match result.get(&fn_name) {
+            None => {
+                result.insert(fn_name.clone(), new_guards.clone());
+                true
+            }
+            Some(existing) => {
+                // Multi-path merge: intersect to get weakest guarantee.
+                // If any path carries fewer guards, the intersection shrinks.
+                let merged: BTreeSet<Guard> = existing.intersection(&new_guards).cloned().collect();
+                if &merged == existing {
+                    false // Fixpoint reached for this function.
+                } else {
+                    result.insert(fn_name.clone(), merged);
+                    true
+                }
+            }
+        };
+
+        // Re-queue callees only when the effective guard set changed.
+        if changed {
+            if let Some(callees) = call_graph.get(&fn_name) {
+                let fn_eff = result.get(&fn_name).cloned().unwrap_or_default();
+                for callee in callees {
+                    worklist.push_back((callee.clone(), fn_eff.clone()));
                 }
             }
         }
@@ -170,9 +198,15 @@ pub fn requires_owner_only(guards: &BTreeSet<Guard>) -> bool {
     guards.contains(&Guard::OnlyOwner)
 }
 
-/// Returns `true` if the guard set is completely open (no access restrictions).
+/// Returns `true` if the guard set has **no access-restriction** guards.
+///
+/// Access-restriction guards are `OnlyOwner` and `OnlyRole`.  `WhenNotPaused`,
+/// `WhenPaused`, and `NonReentrant` are operational guards, not access
+/// restrictions, and do **not** count toward being "restricted."
+///
+/// Used by SAFETY-001/009 to detect publicly callable state-mutating functions.
 #[must_use]
-pub fn is_unguarded(guards: &BTreeSet<Guard>) -> bool {
+pub fn is_access_unrestricted(guards: &BTreeSet<Guard>) -> bool {
     !guards.contains(&Guard::OnlyOwner) && !guards.iter().any(|g| matches!(g, Guard::OnlyRole(_)))
 }
 

@@ -1,9 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{check, parse, tokenize};
 
 use super::{
-    all_auth_sets, auth_set, compute_eff_auth, is_unguarded, requires_governance,
+    all_auth_sets, auth_set, compute_eff_auth, is_access_unrestricted, requires_governance,
     requires_owner_only, Guard,
 };
 use crate::analyzer::cfg::build_call_graph;
@@ -61,7 +61,7 @@ fn auth_set_has_when_not_paused_guard() {
     let guards = auth_set(&fns[0]);
     assert!(guards.contains(&Guard::WhenNotPaused));
     assert!(
-        is_unguarded(&guards),
+        is_access_unrestricted(&guards),
         "whenNotPaused alone is not an access-restriction guard"
     );
 }
@@ -184,14 +184,56 @@ fn requires_governance_true_only_for_governance_role() {
 }
 
 #[test]
-fn is_unguarded_true_for_empty_set() {
+fn is_access_unrestricted_true_for_empty_set() {
     let guards: BTreeSet<Guard> = BTreeSet::new();
-    assert!(is_unguarded(&guards));
+    assert!(is_access_unrestricted(&guards));
 }
 
 #[test]
-fn is_unguarded_false_for_onlyowner() {
+fn is_access_unrestricted_false_for_onlyowner() {
     let mut guards = BTreeSet::new();
     guards.insert(Guard::OnlyOwner);
-    assert!(!is_unguarded(&guards));
+    assert!(!is_access_unrestricted(&guards));
+}
+
+#[test]
+fn eff_auth_intersection_for_diamond_call_graph() {
+    // Diamond pattern: entry1 (@onlyOwner) → helper, entry2 (unguarded) → helper.
+    // EffAuth(helper from entry1) = {OnlyOwner}
+    // EffAuth(helper from entry2) = {}
+    // Across-path intersection → {} (weakest guarantee wins — helper is
+    // reachable without any guard via entry2).
+    let mut fn_guards: BTreeMap<String, BTreeSet<Guard>> = BTreeMap::new();
+
+    let mut entry1_guards = BTreeSet::new();
+    entry1_guards.insert(Guard::OnlyOwner);
+    fn_guards.insert("entry1".to_owned(), entry1_guards);
+
+    fn_guards.insert("entry2".to_owned(), BTreeSet::new());
+    fn_guards.insert("helper".to_owned(), BTreeSet::new());
+
+    let mut cg = super::super::cfg::CallGraph::new();
+    cg.insert(
+        "entry1".to_owned(),
+        ["helper".to_owned()].into_iter().collect(),
+    );
+    cg.insert(
+        "entry2".to_owned(),
+        ["helper".to_owned()].into_iter().collect(),
+    );
+    cg.insert("helper".to_owned(), BTreeSet::new());
+
+    // From entry1 alone, helper has {OnlyOwner}
+    let eff1 = compute_eff_auth("entry1", &fn_guards, &cg);
+    assert!(
+        eff1["helper"].contains(&Guard::OnlyOwner),
+        "helper via entry1 should have OnlyOwner"
+    );
+
+    // From entry2 alone, helper has no guards
+    let eff2 = compute_eff_auth("entry2", &fn_guards, &cg);
+    assert!(
+        eff2["helper"].is_empty(),
+        "helper via entry2 should have no guards (diamond weakest-path)"
+    );
 }
