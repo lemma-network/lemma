@@ -18,7 +18,7 @@ use crate::lexer::token::Span;
 /// The enum is `#[non_exhaustive]` so that adding new SAFETY rules (e.g. the
 /// Phase 3 agent rules SAFETY-014…019) is not a breaking change for consumers.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SafetyError {
     // ── SAFETY-001 — Anti-Honeypot Symmetry ──────────────────────────────────
     /// A token with `antiHoneypot: true` has no sell path symmetric to its

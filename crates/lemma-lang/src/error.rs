@@ -37,7 +37,7 @@ use crate::type_checker::error::TypeError;
 /// - `Safety` — safety analyzer (SAFETY-001…013 token rules)
 /// - `Codegen` — planned for Step 6
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LangError {
     /// A lexical error encountered while tokenizing Lem source code.
     ///
