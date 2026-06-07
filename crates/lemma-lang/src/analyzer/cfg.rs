@@ -1,10 +1,4 @@
 //! Control-flow graph, call-graph, and external-call analysis.
-//
-// Justified `dead_code` (entire module): all pub(crate) APIs are called by the
-// SAFETY-rule modules (4d–4f), the state-access analyzer (Step 5), and by
-// `cfg/tests.rs`.  No production caller outside tests is wired until 4d.
-// Remove this allow once 4d lands (the first rule caller will suppress it).
-#![allow(dead_code)]
 //!
 //! ## Purpose
 //!
@@ -100,6 +94,9 @@ pub(crate) fn walk_function(func: &ContractFunction<'_>) -> FnWalk {
 // ─── Public analysis functions ────────────────────────────────────────────────
 
 /// Build the intra-contract call graph for all functions in a contract.
+// Justified: consumed by dataflow.rs (4c) and batch 2/3 rules (4e/4f).
+// Not yet called by batch 1 rules (4d). Remove once a production caller lands.
+#[allow(dead_code)]
 #[must_use]
 pub fn build_call_graph(contract: &TypedContract<'_>) -> CallGraph {
     contract

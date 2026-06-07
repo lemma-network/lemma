@@ -47,6 +47,7 @@ pub(crate) mod authset;
 pub(crate) mod cfg;
 pub(crate) mod dataflow;
 pub mod error;
+pub(crate) mod rules;
 pub(crate) mod safety;
 
 pub use error::SafetyError;
