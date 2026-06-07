@@ -1818,7 +1818,8 @@ fn infer_type_args_simple_typeparam() {
     // param: T, arg: U128 → subst = {T: U128}
     let generic_params = vec![("T".to_owned(), None)];
     let param_types = vec![ResolvedType::TypeParam("T".to_owned())];
-    let arg_types = vec![ResolvedType::U128];
+    let u128_ty = ResolvedType::U128;
+    let arg_types: Vec<&ResolvedType> = vec![&u128_ty];
     let subst = infer_type_args(&param_types, &arg_types, &generic_params);
     assert_eq!(subst.get("T"), Some(&ResolvedType::U128));
 }
@@ -1830,7 +1831,8 @@ fn infer_type_args_array_of_typeparam() {
     let param_types = vec![ResolvedType::Array(Box::new(ResolvedType::TypeParam(
         "T".to_owned(),
     )))];
-    let arg_types = vec![ResolvedType::Array(Box::new(ResolvedType::U64))];
+    let arr_u64 = ResolvedType::Array(Box::new(ResolvedType::U64));
+    let arg_types: Vec<&ResolvedType> = vec![&arr_u64];
     let subst = infer_type_args(&param_types, &arg_types, &generic_params);
     assert_eq!(subst.get("T"), Some(&ResolvedType::U64));
 }
@@ -1840,7 +1842,45 @@ fn infer_type_args_no_typeparams_returns_empty() {
     // Non-generic function: no TypeParams → empty subst.
     let generic_params: Vec<(String, Option<SymbolId>)> = vec![];
     let param_types = vec![ResolvedType::U128];
-    let arg_types = vec![ResolvedType::U128];
+    let u128_ty = ResolvedType::U128;
+    let arg_types: Vec<&ResolvedType> = vec![&u128_ty];
     let subst = infer_type_args(&param_types, &arg_types, &generic_params);
     assert!(subst.is_empty());
+}
+
+#[test]
+fn infer_type_args_conflicting_bindings_first_wins() {
+    // fn f<T>(a: T, b: T) called with (U128, Bool) → T bound to U128 (first wins).
+    // The per-arg type check will later catch the mismatch; inference is forward-only.
+    let generic_params = vec![("T".to_owned(), None)];
+    let param_types = vec![
+        ResolvedType::TypeParam("T".to_owned()),
+        ResolvedType::TypeParam("T".to_owned()),
+    ];
+    let u128_ty = ResolvedType::U128;
+    let bool_ty = ResolvedType::Bool;
+    let arg_types: Vec<&ResolvedType> = vec![&u128_ty, &bool_ty];
+    let subst = infer_type_args(&param_types, &arg_types, &generic_params);
+    // First binding wins: T = U128.
+    assert_eq!(subst.get("T"), Some(&ResolvedType::U128));
+}
+
+#[test]
+fn trait_bound_with_typeparam_concrete_skips_check() {
+    // When T is instantiated with another unresolved TypeParam (generic calling generic),
+    // check_trait_bounds must NOT emit a false TraitBoundViolation.
+    // Here: `fn outer<U: Comparable>(x: U) -> U { return inner(x) }` where
+    // `inner<T: Comparable>(y: T) -> T` — at the call to `inner(x)`, `T` is
+    // inferred to `TypeParam("U")` (not a concrete type), so the bound check
+    // must skip it.
+    let result = check_src(
+        "interface Comparable {}\n\
+         fn inner<T: Comparable>(y: T) -> T { return y }\n\
+         fn outer<U: Comparable>(x: U) -> U { return inner(x) }",
+    );
+    // Must not error with TraitBoundViolation — TypeParam is not a violation.
+    assert!(
+        result.is_ok(),
+        "generic calling generic with TypeParam should not produce TraitBoundViolation: {result:?}"
+    );
 }

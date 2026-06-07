@@ -1267,25 +1267,27 @@ impl<'a> Inferer<'a> {
                 // Clone it to avoid lifetime issues with the `sigs` borrow.
                 let generic_params_owned: Vec<(String, Option<SymbolId>)> = generic_params.to_vec();
 
-                let subst = if generic_params_owned.is_empty() {
-                    BTreeMap::new()
-                } else {
-                    infer_type_args(param_types, arg_types, &generic_params_owned)
-                };
-
-                // Trait-bound checking (3f name-level).
-                if !subst.is_empty() {
-                    self.check_trait_bounds(&subst, &generic_params_owned, span)?;
-                }
-
-                // Per-arg type check against substituted param types.
-                // Only check positional args (named args deferred to 3g).
+                // Filter to positional args ONCE — both inference and checking
+                // must use the same positional-only view so param_types[i] aligns
+                // with arg_types[i] in both passes.
+                // TODO(3g): named-arg reordering (match by name, not position).
                 let positional_args: Vec<&ResolvedType> = arg_types
                     .iter()
                     .zip(args.iter())
                     .filter(|(_, a)| matches!(a, CallArg::Positional(_)))
                     .map(|(t, _)| t)
                     .collect();
+
+                let subst = if generic_params_owned.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    infer_type_args(param_types, &positional_args, &generic_params_owned)
+                };
+
+                // Trait-bound checking (3f name-level).
+                if !subst.is_empty() {
+                    self.check_trait_bounds(&subst, &generic_params_owned, span)?;
+                }
                 for (i, (param_ty, arg_ty)) in
                     param_types.iter().zip(positional_args.iter()).enumerate()
                 {
@@ -1362,8 +1364,11 @@ impl<'a> Inferer<'a> {
             let Some(concrete) = subst.get(param_name) else {
                 continue; // Not inferred — skip.
             };
-            if *concrete == ResolvedType::Unknown {
-                continue; // Cannot prove violation for Unknown.
+            // Skip abstract types — cannot prove a violation for Unknown or for
+            // an unsubstituted TypeParam (e.g. generic calling generic where the
+            // outer T has not yet been resolved to a concrete type).
+            if !concrete.is_concrete() {
+                continue;
             }
 
             // Get the bound trait name for the error message.
@@ -2214,9 +2219,14 @@ pub(super) fn substitute(
 ///
 /// Forward-only (from args to return) — correct for 3f.
 /// Uses `BTreeMap` for determinism (AGENTS §7.1).
+/// Infer generic type arguments from positional argument types.
+///
+/// `arg_types` must be pre-filtered to positional args only so that
+/// `param_types[i]` and `arg_types[i]` refer to the same parameter.
+/// Named-arg reordering is deferred to 3g. (TODO(3g))
 pub(super) fn infer_type_args(
     param_types: &[ResolvedType],
-    arg_types: &[ResolvedType],
+    arg_types: &[&ResolvedType],
     generic_params: &[(String, Option<SymbolId>)],
 ) -> BTreeMap<String, ResolvedType> {
     let mut subst: BTreeMap<String, ResolvedType> = BTreeMap::new();
@@ -2231,6 +2241,7 @@ pub(super) fn infer_type_args(
 }
 
 /// Recursively collect `TypeParam → concrete` bindings from a `(param_ty, arg_ty)` pair.
+/// `arg_ty` is `&ResolvedType` (caller dereferences the `&&` from the positional-args slice).
 fn collect_type_args(
     param_ty: &ResolvedType,
     arg_ty: &ResolvedType,
