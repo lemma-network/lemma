@@ -3,6 +3,20 @@
 //! Detects unchecked arithmetic (`+`, `-`, `*`) inside `unchecked {}` blocks
 //! that flows into a state field assignment (`self.field = ...`).
 //!
+//! ## Scope: deliberate over-approximation
+//!
+//! Spec §3 SAFETY-012 scopes the prohibition to arithmetic flowing into
+//! "value-bearing quantities" (balances, `totalSupply`, value transfers).
+//! This implementation flags unchecked arithmetic on **any** state field, not
+//! just value-bearing ones. For example, `unchecked { self.nonceCounter = ... }`
+//! is flagged even though `nonceCounter` is not a token amount.
+//!
+//! This is **sound** (no false negatives — every value-bearing field is a state
+//! field). The false-positive rate on non-value fields is the known trade-off,
+//! intentional for 4d. Narrowing to value-bearing fields requires value-path
+//! taint from `dataflow::taint_propagate` — tracked as a living-notes item to
+//! refine in 4e when taint consumers are added.
+//!
 //! **Foundation**: direct AST walk — no CFG needed.
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-012`.
 
@@ -51,6 +65,8 @@ fn check_stmts_for_unchecked(stmts: &[Stmt], violations: &mut Vec<SafetyError>) 
                         MatchBody::Block(stmts) => {
                             check_stmts_for_unchecked(stmts, violations);
                         }
+                        // `unchecked {}` is a statement block — it cannot appear
+                        // as a single expression arm. Intentionally not recursed.
                         MatchBody::Expr(_) => {}
                     }
                 }

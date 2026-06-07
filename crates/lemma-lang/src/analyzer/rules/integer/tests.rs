@@ -1,4 +1,15 @@
 //! Tests for SAFETY-012 — Integer Safety rule.
+//!
+//! ## Inconclusive coverage (spec §5.2)
+//!
+//! SAFETY-012 is **decidable-exact** — `Stmt::Unchecked` is a syntactic marker
+//! that is either present or absent. There is no `Inconclusive` path; all
+//! contracts either pass (no unchecked arithmetic on state fields) or fail
+//! (exact `UncheckedArithmetic` variant). No `Inconclusive→reject` case needed.
+//!
+//! ## Cross-rule interaction and fuzz tests
+//!
+//! Deferred to **P3·Step 4g**. Intentional deferral; tracked in living-notes.
 
 use crate::analyzer::error::SafetyError;
 use crate::{check, parse, tokenize};

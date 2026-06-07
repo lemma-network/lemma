@@ -1,8 +1,18 @@
 //! SAFETY-008 — Hook Sandboxing rule.
 //!
-//! Detects `#[onTransfer]` hooks that make external calls.
-//! Transfer hooks must have `Ext(hook) = ∅` — they may only access own-contract
-//! state and must not call out to other contracts.
+//! Spec §3 SAFETY-008 has **two** clauses:
+//! 1. `Ext(hook) = ∅` — no external calls from a hook.
+//! 2. State-access set ⊆ own-contract's `state {}` keys.
+//!
+//! **Clause 1 is enforced here** via `cfg::ext_calls(func)`.
+//!
+//! **Clause 2 is trivially satisfied** in single-contract analysis: every
+//! `CfgNode::StateWrite` recorded by `cfg::walk_function` is, by construction,
+//! a write to the same contract's state (cross-contract state writes appear as
+//! external calls, not as `StateWrite` nodes). There is no false negative — a
+//! hook writing another contract's state can only do so via an external call,
+//! which clause 1 catches. Clause 2 becomes non-trivial in Phase 4 multi-
+//! contract analysis; it is tracked as a living-notes item.
 //!
 //! **Foundation**: `cfg::ext_calls(func)`.
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-008`.

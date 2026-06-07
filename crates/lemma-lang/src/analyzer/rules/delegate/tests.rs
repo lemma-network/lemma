@@ -1,4 +1,14 @@
 //! Tests for SAFETY-011 — Delegate Restriction rule.
+//!
+//! ## Inconclusive coverage (spec §5.2)
+//!
+//! SAFETY-011 is **decidable-exact** (sound over-approximation for the
+//! `@std` allow-list). The `self.<field>.<method>()` pattern is either present
+//! or absent. There is no `Inconclusive` path. No `Inconclusive→reject` needed.
+//!
+//! ## Cross-rule interaction and fuzz tests
+//!
+//! Deferred to **P3·Step 4g**. Intentional deferral; tracked in living-notes.
 
 use crate::analyzer::error::SafetyError;
 use crate::{check, parse, tokenize};

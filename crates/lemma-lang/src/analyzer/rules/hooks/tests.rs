@@ -1,4 +1,13 @@
 //! Tests for SAFETY-008 — Hook Sandboxing rule.
+//!
+//! ## Inconclusive coverage (spec §5.2)
+//!
+//! SAFETY-008 is **decidable-exact** — `Ext(f)` is either empty or non-empty.
+//! There is no `Inconclusive` path. No `Inconclusive→reject` case needed.
+//!
+//! ## Cross-rule interaction and fuzz tests
+//!
+//! Deferred to **P3·Step 4g**. Intentional deferral; tracked in living-notes.
 
 use crate::analyzer::error::SafetyError;
 use crate::{check, parse, tokenize};

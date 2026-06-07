@@ -1,4 +1,17 @@
 //! Tests for SAFETY-004 — Reentrancy rule.
+//!
+//! ## Inconclusive coverage (spec §5.2)
+//!
+//! SAFETY-004 is **decidable-exact** — the CFG-node sequence is a sound
+//! over-approximation (all branch paths merged) that never produces an
+//! inconclusive result. There is no `Inconclusive` path; all contracts either
+//! pass (empty `Vec`) or fail (one `StateAfterCall` per function). No
+//! `Inconclusive→reject` test case exists or is needed.
+//!
+//! ## Cross-rule interaction and fuzz tests (spec §5.2)
+//!
+//! Deferred to **P3·Step 4g** (integration + fuzz + full pipeline wiring), as
+//! stated in `analyzer/mod.rs`. Intentional deferral; tracked in living-notes.
 
 use crate::analyzer::error::SafetyError;
 use crate::{check, parse, tokenize};
