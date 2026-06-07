@@ -127,6 +127,115 @@ self.bal = self.bal - amount
     );
 }
 
+// ─── Transitive write via internal callee ─────────────────────────────────────
+
+#[test]
+fn reentrancy_state_write_via_helper_callee_after_ext_call_rejected() {
+    // The canonical one-hop evasion: external call in pub fn, then delegate to
+    // an internal helper that writes state — still a CEI violation.
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 }
+pub fn withdraw(target: Address, amount: u128) {
+let _ = target.transfer(amount)
+self.applyDebit(amount)
+}
+fn applyDebit(amount: u128) {
+self.bal = self.bal - amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = reentrancy_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "helper-via-indirection after ext call must be SAFETY-004 violation; got {violations:?}"
+    );
+    assert!(
+        matches!(&violations[0], SafetyError::StateAfterCall { func, .. } if func == "withdraw"),
+        "violation must be on withdraw; got {:?}",
+        violations[0]
+    );
+}
+
+#[test]
+fn reentrancy_helper_called_before_ext_call_passes() {
+    // Safe: state-writing helper called BEFORE the external call (correct CEI).
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 }
+pub fn safeWithdraw(target: Address, amount: u128) {
+self.applyDebit(amount)
+let _ = target.transfer(amount)
+}
+fn applyDebit(amount: u128) {
+self.bal = self.bal - amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = reentrancy_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "state-writing helper called before ext call must pass SAFETY-004; got {violations:?}"
+    );
+}
+
+#[test]
+fn reentrancy_internal_helper_with_no_state_write_after_ext_call_passes() {
+    // Safe: calling a helper that does NOT write state after an external call is fine.
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 }
+pub fn notify(target: Address, amount: u128) {
+let _ = target.transfer(amount)
+self.logEvent(amount)
+}
+view fn logEvent(amount: u128) -> u128 {
+return amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = reentrancy_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "calling a non-state-writing helper after ext call must pass SAFETY-004; got {violations:?}"
+    );
+}
+
+// ─── Loop back-edge tests ─────────────────────────────────────────────────────
+
+#[test]
+fn reentrancy_loop_write_before_call_back_edge_rejected() {
+    // Write precedes call within one iteration, but the back-edge of the loop
+    // means iteration N's call is followed by iteration N+1's write — violation.
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 }
+pub fn badLoop(target: Address, amount: u128) {
+loop {
+self.bal = self.bal - amount
+let _ = target.transfer(amount)
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = reentrancy_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "loop with write-before-call must be flagged (back-edge); got {violations:?}"
+    );
+    assert!(
+        matches!(&violations[0], SafetyError::StateAfterCall { func, .. } if func == "badLoop"),
+        "violation must be on badLoop; got {:?}",
+        violations[0]
+    );
+}
+
 // ─── Boundary tests ───────────────────────────────────────────────────────────
 
 #[test]

@@ -63,6 +63,19 @@ pub enum CfgNode {
         /// Source location of the call expression.
         span: Span,
     },
+    /// An intra-contract call (to a `self` method or a free function in the
+    /// same compilation unit).
+    ///
+    /// Emitted in the ordered CFG node sequence so that SAFETY-004 can detect
+    /// reentrancy via indirection: `external_call → self.helper()` where
+    /// `helper` transitively writes state is a CEI violation.
+    InternalCall {
+        /// The callee name (method name for `self.method(…)`, function name
+        /// for a bare `fn_name(…)` call).
+        callee: String,
+        /// Source location of the call expression.
+        span: Span,
+    },
 }
 
 // ─── FnWalk — single-pass collection result ───────────────────────────────────
@@ -91,12 +104,24 @@ pub(crate) fn walk_function(func: &ContractFunction<'_>) -> FnWalk {
     acc
 }
 
+/// Walk a bare statement slice and collect all analysis results in one pass.
+///
+/// Equivalent to [`walk_function`] but operates on a statement slice directly —
+/// used by SAFETY-004 to analyse loop bodies independently from their
+/// enclosing function (back-edge detection).
+#[must_use]
+pub(crate) fn walk_stmts_fn_walk(stmts: &[Stmt]) -> FnWalk {
+    let mut acc = FnWalk::default();
+    walk_stmts(stmts, &mut acc);
+    acc
+}
+
 // ─── Public analysis functions ────────────────────────────────────────────────
 
 /// Build the intra-contract call graph for all functions in a contract.
-// Justified: consumed by dataflow.rs (4c) and batch 2/3 rules (4e/4f).
-// Not yet called by batch 1 rules (4d). Remove once a production caller lands.
-#[allow(dead_code)]
+///
+/// Consumed by `dataflow::state_write_reachability` (4c) and by the
+/// SAFETY-004 reentrancy rule (4d) for transitive-write detection.
 #[must_use]
 pub fn build_call_graph(contract: &TypedContract<'_>) -> CallGraph {
     contract
@@ -218,6 +243,12 @@ fn walk_expr(expr: &Expr, acc: &mut FnWalk) {
                 // self.method(…) — internal call
                 Expr::Member(obj, method, _) if is_self(obj) => {
                     acc.internal_calls.insert(method.clone());
+                    // Also emit an ordered InternalCall node so SAFETY-004 can
+                    // detect reentrancy-via-indirection (call-then-state-writing-helper).
+                    acc.cfg_nodes.push(CfgNode::InternalCall {
+                        callee: method.clone(),
+                        span: *span,
+                    });
                 }
                 // External method call on another contract instance
                 Expr::Member(obj, method, _) if !is_self(obj) => {
@@ -230,6 +261,11 @@ fn walk_expr(expr: &Expr, acc: &mut FnWalk) {
                 // Free function call — internal if name matches a fn in same contract
                 Expr::Ident(name, _) => {
                     acc.internal_calls.insert(name.clone());
+                    // Same ordered-node emit as for self.method() — see note above.
+                    acc.cfg_nodes.push(CfgNode::InternalCall {
+                        callee: name.clone(),
+                        span: *span,
+                    });
                 }
                 _ => {}
             }
