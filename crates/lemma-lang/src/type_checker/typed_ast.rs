@@ -104,18 +104,36 @@ pub struct TypedAst {
 
     /// Maps struct/contract/enum [`SymbolId`] → declared interface + trait names.
     ///
-    /// Populated by the resolver (3f) from `Contract.implements` + `Contract.uses`.
+    /// Populated by the resolver from `Contract.implements` + `Contract.uses`.
     /// Structs and enums get an empty vec (they don't implement interfaces in Lem).
-    ///
-    /// Used by 3f trait-bound checking (name-level only; structural checking
-    /// deferred to Step 4 — P3-checker-8).
     pub struct_traits: BTreeMap<SymbolId, Vec<String>>,
+
+    /// Maps trait [`SymbolId`] → required method names (P3-checker-8).
+    ///
+    /// Populated by the resolver from `Item::Trait` member functions.  Enables
+    /// structural trait-bound checking in [`check_trait_bounds`]: verifying the
+    /// concrete type actually has all methods the trait requires, not just that
+    /// the type name-declares it implements the trait.
+    pub trait_methods: BTreeMap<SymbolId, Vec<String>>,
+
+    /// Maps contract/token [`SymbolId`] → declared function names (P3-checker-8).
+    ///
+    /// Populated by the resolver from contract/token function members.
+    /// Contracts do not get a `SymbolSig::Struct` entry (unlike struct types),
+    /// so this table is used by `check_trait_bounds` to verify structural
+    /// method presence for contract types that declare `implements Trait`.
+    pub contract_methods: BTreeMap<SymbolId, Vec<String>>,
 }
 
 impl TypedAst {
     /// Construct a [`TypedAst`] from an AST and populated side tables.
     ///
     /// Normally called only by the type checker internals.
+    // Justified: TypedAst holds 7 distinct side-tables each with a separate
+    // semantic role (expr types, resolutions, symbol arena, sigs, struct/trait/
+    // contract metadata).  All are produced by different resolver/inference
+    // passes and cannot meaningfully be merged.  Called from one site only.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ast: Ast,
         expr_types: BTreeMap<Span, ResolvedType>,
@@ -123,6 +141,8 @@ impl TypedAst {
         symbols: Vec<SymbolInfo>,
         sigs: BTreeMap<SymbolId, SymbolSig>,
         struct_traits: BTreeMap<SymbolId, Vec<String>>,
+        trait_methods: BTreeMap<SymbolId, Vec<String>>,
+        contract_methods: BTreeMap<SymbolId, Vec<String>>,
     ) -> Self {
         Self {
             ast,
@@ -131,6 +151,8 @@ impl TypedAst {
             symbols,
             sigs,
             struct_traits,
+            trait_methods,
+            contract_methods,
         }
     }
 

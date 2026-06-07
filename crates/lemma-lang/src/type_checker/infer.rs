@@ -54,8 +54,20 @@ pub(super) struct Inferer<'a> {
     /// Used by `lower_cast_target` to resolve `Type::Named` in cast targets.
     global_types: &'a BTreeMap<String, SymbolId>,
     /// Maps struct/contract/enum SymbolId → declared interface + trait names.
-    /// Used by 3f trait-bound checking (name-level only; P3-checker-8 deferred).
+    /// Used by trait-bound checking (name-level check).
     struct_traits: &'a BTreeMap<SymbolId, Vec<String>>,
+    /// Maps trait SymbolId → required method names (P3-checker-8).
+    ///
+    /// Used by `check_trait_bounds` to verify the concrete type has all
+    /// methods required by the bound trait (structural check), not just that
+    /// the type name-declares the trait (name-level check).
+    trait_methods: &'a BTreeMap<SymbolId, Vec<String>>,
+    /// Maps contract/token SymbolId → declared function names (P3-checker-8).
+    ///
+    /// Contracts do not get a `SymbolSig::Struct` entry, so this separate
+    /// table is used by `check_trait_bounds` to verify structural method
+    /// presence for contract types that declare `implements Trait`.
+    contract_methods: &'a BTreeMap<SymbolId, Vec<String>>,
     expr_types: &'a mut BTreeMap<Span, ResolvedType>,
     /// Return type of the innermost enclosing function, set in `walk_function`.
     ///
@@ -71,12 +83,21 @@ pub(super) struct Inferer<'a> {
 }
 
 impl<'a> Inferer<'a> {
+    // Justified: the Inferer borrows 8 distinct side-tables produced by the
+    // resolver and type-checker passes.  Each is a separate semantic concern
+    // (symbols, resolutions, sigs, global types, struct/trait/contract metadata,
+    // and the mutable expr-types output).  Grouping them into a struct would
+    // require either cloning or a lifetimed wrapper — more complexity for no
+    // gain.  The constructor is called from exactly one site (check_program).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         symbols: &'a mut Vec<SymbolInfo>,
         resolutions: &'a BTreeMap<Span, SymbolId>,
         sigs: &'a BTreeMap<SymbolId, SymbolSig>,
         global_types: &'a BTreeMap<String, SymbolId>,
         struct_traits: &'a BTreeMap<SymbolId, Vec<String>>,
+        trait_methods: &'a BTreeMap<SymbolId, Vec<String>>,
+        contract_methods: &'a BTreeMap<SymbolId, Vec<String>>,
         expr_types: &'a mut BTreeMap<Span, ResolvedType>,
     ) -> Self {
         Self {
@@ -85,6 +106,8 @@ impl<'a> Inferer<'a> {
             sigs,
             global_types,
             struct_traits,
+            trait_methods,
+            contract_methods,
             expr_types,
             current_fn_ret: None,
             current_contract_id: None,
@@ -1648,12 +1671,13 @@ impl<'a> Inferer<'a> {
 
             match concrete {
                 ResolvedType::Named(struct_id, _) => {
-                    // Check if the struct/contract declares this trait.
-                    let satisfies = self
+                    // ── Name-level check ─────────────────────────────────────
+                    // Does the type declare it implements/uses this trait?
+                    let satisfies_name_level = self
                         .struct_traits
                         .get(struct_id)
                         .is_some_and(|traits| traits.iter().any(|t| t == bound_name));
-                    if !satisfies {
+                    if !satisfies_name_level {
                         return Err(type_err(
                             TypeErrorKind::TraitBoundViolation {
                                 param: param_name.clone(),
@@ -1667,6 +1691,51 @@ impl<'a> Inferer<'a> {
                                 concrete.display_name()
                             ),
                         ));
+                    }
+
+                    // ── Structural check (P3-checker-8) ──────────────────────
+                    // Does the type actually have all methods required by the
+                    // trait?  Uses the method index built in 4b.
+                    if let Some(required_methods) = self.trait_methods.get(bound_id) {
+                        // Collect the type's own method names from its StructSig
+                        // (struct types) or from the contract_methods table
+                        // (contract/token types, which have no SymbolSig::Struct).
+                        let struct_methods: std::collections::BTreeSet<&str> = self
+                            .sigs
+                            .get(struct_id)
+                            .and_then(|sig| {
+                                if let SymbolSig::Struct(s) = sig {
+                                    Some(s.methods.iter().map(|(name, _)| name.as_str()).collect())
+                                } else {
+                                    None
+                                }
+                            })
+                            .or_else(|| {
+                                // Fallback for contract/token types.
+                                self.contract_methods
+                                    .get(struct_id)
+                                    .map(|methods| methods.iter().map(|n| n.as_str()).collect())
+                            })
+                            .unwrap_or_default();
+
+                        for method_name in required_methods {
+                            if !struct_methods.contains(method_name.as_str()) {
+                                return Err(type_err(
+                                    TypeErrorKind::TraitBoundViolation {
+                                        param: param_name.clone(),
+                                        bound: bound_name.to_owned(),
+                                        found: concrete.display_name(),
+                                    },
+                                    span,
+                                    format!(
+                                        "type `{}` for `{param_name}` claims to implement \
+                                         `{bound_name}` but is missing required method \
+                                         `{method_name}`",
+                                        concrete.display_name()
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
                 // Primitives have no traits — always a violation.

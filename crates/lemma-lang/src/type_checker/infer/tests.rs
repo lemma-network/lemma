@@ -2262,3 +2262,68 @@ fn generic_type_arg_count_validated_in_interface_method_param() {
         );
     }
 }
+
+// ─── P3-checker-8: Structural trait bounds ───────────────────────────────────
+
+#[test]
+fn structural_bound_rejects_type_missing_required_trait_method() {
+    // Contract claims to implement Runnable but lacks the run() method.
+    // P3-checker-8 must catch this: name-level passes (implements Runnable),
+    // but structural check fails (missing method).
+    let result = check_src(
+        r#"
+        trait Runnable {
+            fn run() -> bool
+        }
+        contract BadRunner implements Runnable {
+            state { x: u128 }
+        }
+        fn execute<T: Runnable>(runner: T) -> bool {
+            return true
+        }
+        fn trigger(r: BadRunner) -> bool {
+            return execute(r)
+        }
+        "#,
+    );
+    assert!(
+        result.is_err(),
+        "type missing required trait method must be rejected"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::TraitBoundViolation { .. }),
+            "expected TraitBoundViolation, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn structural_bound_accepts_type_with_all_required_methods() {
+    // Contract implements Runnable AND has the run() method.
+    // P3-checker-8 must not reject this: both name-level and structural pass.
+    let result = check_src(
+        r#"
+        trait Runnable {
+            fn run() -> bool
+        }
+        contract GoodRunner implements Runnable {
+            state { x: u128 }
+            pub fn run() -> bool {
+                return true
+            }
+        }
+        fn execute<T: Runnable>(runner: T) -> bool {
+            return true
+        }
+        fn trigger(r: GoodRunner) -> bool {
+            return execute(r)
+        }
+        "#,
+    );
+    assert!(
+        result.is_ok(),
+        "type with all required methods must pass structural bound check; got: {result:?}"
+    );
+}

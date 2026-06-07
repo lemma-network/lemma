@@ -43,6 +43,8 @@
 //! - **4f**: rules batch 3 — SAFETY-005/009/001/007/010.
 //! - **4g**: integration + fuzz + pipeline wiring + docs closeout.
 
+pub(crate) mod authset;
+pub(crate) mod cfg;
 pub mod error;
 pub(crate) mod safety;
 

@@ -126,7 +126,8 @@ impl Checker {
         self.check_no_duplicate_top_level_names(&ast.items)?;
 
         // Pass 2 (3b/3d): name resolution + SymbolSig building.
-        let (mut symbols, resolutions, sigs, struct_traits) = resolver::resolve(&ast)?;
+        let (mut symbols, resolutions, sigs, struct_traits, trait_methods, contract_methods) =
+            resolver::resolve(&ast)?;
 
         // Build flat global-type namespace for the Inferer's lower_cast_target.
         // Maps each type-namespace symbol's name to its SymbolId.
@@ -161,6 +162,8 @@ impl Checker {
                 &sigs,
                 &global_types,
                 &struct_traits,
+                &trait_methods,
+                &contract_methods,
                 &mut expr_types,
             );
             inferer.walk_ast(&ast)?;
@@ -177,6 +180,8 @@ impl Checker {
             symbols,
             sigs,
             struct_traits,
+            trait_methods,
+            contract_methods,
         ))
     }
 

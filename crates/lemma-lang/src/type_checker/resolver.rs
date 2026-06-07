@@ -51,15 +51,19 @@ use super::types::{
 
 /// Output of the name-resolution pass.
 ///
-/// `(symbols, resolutions, sigs, struct_traits)`:
-/// - `symbols`       — the symbol arena (`SymbolId(n)` → `symbols[n-1]`)
-/// - `resolutions`   — span → SymbolId map for every resolved identifier
-/// - `sigs`          — structured signatures for functions, structs, and enums
-/// - `struct_traits` — struct/contract SymbolId → declared interface+trait names
+/// `(symbols, resolutions, sigs, struct_traits, trait_methods, contract_methods)`:
+/// - `symbols`          — the symbol arena (`SymbolId(n)` → `symbols[n-1]`)
+/// - `resolutions`      — span → SymbolId map for every resolved identifier
+/// - `sigs`             — structured signatures for functions, structs, and enums
+/// - `struct_traits`    — struct/contract SymbolId → declared interface+trait names
+/// - `trait_methods`    — trait SymbolId → required method names (P3-checker-8)
+/// - `contract_methods` — contract SymbolId → declared function names (P3-checker-8)
 pub(super) type ResolveOutput = (
     Vec<SymbolInfo>,
     BTreeMap<Span, SymbolId>,
     BTreeMap<SymbolId, SymbolSig>,
+    BTreeMap<SymbolId, Vec<String>>,
+    BTreeMap<SymbolId, Vec<String>>,
     BTreeMap<SymbolId, Vec<String>>,
 );
 
@@ -80,7 +84,14 @@ pub(super) fn resolve(ast: &Ast) -> Result<ResolveOutput, LangError> {
     // forward-reference miss during Pass 1.  All type-namespace symbols are now
     // registered, so lower_type will succeed for previously-unseen names.
     r.re_lower_forward_refs();
-    Ok((r.symbols, r.resolutions, r.sigs, r.struct_traits))
+    Ok((
+        r.symbols,
+        r.resolutions,
+        r.sigs,
+        r.struct_traits,
+        r.trait_methods,
+        r.contract_methods,
+    ))
 }
 
 // ─── Resolver internals ───────────────────────────────────────────────────────
@@ -103,10 +114,23 @@ struct Resolver {
     /// Populated during `build_global_scope` for `Item::Contract` (which has
     /// `implements` + `uses` fields).  Structs and enums get an empty vec
     /// (they don't implement interfaces in Lem — only contracts do).
-    ///
-    /// Used by 3f trait-bound checking (name-level only; structural checking
-    /// deferred to Step 4 — P3-checker-8).
     struct_traits: BTreeMap<SymbolId, Vec<String>>,
+    /// Maps trait SymbolId → required method names (P3-checker-8).
+    ///
+    /// Populated during `build_global_scope` for `Item::Trait`.  Enables
+    /// structural trait-bound checking: verifying that a concrete type
+    /// implements all methods required by the bound trait (not just that
+    /// the type *declares* it implements the trait, which is name-level only).
+    trait_methods: BTreeMap<SymbolId, Vec<String>>,
+    /// Maps contract/token SymbolId → declared function names (P3-checker-8).
+    ///
+    /// Populated during `resolve_item` for `Item::Contract` and `Item::Token_`.
+    /// Used by `check_trait_bounds` structural check to verify a contract
+    /// that `implements Trait` actually has all the trait's required methods.
+    ///
+    /// Contracts do not get a `SymbolSig::Struct` entry (unlike struct types),
+    /// so a dedicated table is necessary for method-name lookup.
+    contract_methods: BTreeMap<SymbolId, Vec<String>>,
 }
 
 impl Resolver {
@@ -119,6 +143,8 @@ impl Resolver {
             type_scopes: Vec::new(),
             in_method: false,
             struct_traits: BTreeMap::new(),
+            trait_methods: BTreeMap::new(),
+            contract_methods: BTreeMap::new(),
         }
     }
 
@@ -494,6 +520,21 @@ impl Resolver {
                 Item::Trait(t) => {
                     let id = self.alloc(&t.name, t.span, SymbolKind::Trait);
                     self.define_type_or_err(&t.name, id, t.span)?;
+                    // P3-checker-8: collect required method names from trait body
+                    // so check_trait_bounds can do structural (not just name-level)
+                    // verification.
+                    let methods: Vec<String> = t
+                        .members
+                        .iter()
+                        .filter_map(|m| {
+                            if let crate::parser::TraitMember::Function(f) = m {
+                                Some(f.name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    self.trait_methods.insert(id, methods);
                 }
                 Item::Library(l) => {
                     let id = self.alloc(&l.name, l.span, SymbolKind::Library);
@@ -576,9 +617,40 @@ impl Resolver {
         match item {
             Item::Contract(c) => {
                 self.resolve_contract_body(&c.members, c.span)?;
+                // P3-checker-8: collect contract function names for structural
+                // trait-bound checking (contracts don't get a SymbolSig::Struct).
+                if let Some(id) = self.lookup_type(&c.name) {
+                    let methods: Vec<String> = c
+                        .members
+                        .iter()
+                        .filter_map(|m| {
+                            if let ContractMember::Function(f) = m {
+                                Some(f.name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    self.contract_methods.insert(id, methods);
+                }
             }
             Item::Token_(t) => {
                 self.resolve_contract_body(&t.members, t.span)?;
+                // P3-checker-8: same as Item::Contract above.
+                if let Some(id) = self.lookup_type(&t.name) {
+                    let methods: Vec<String> = t
+                        .members
+                        .iter()
+                        .filter_map(|m| {
+                            if let ContractMember::Function(f) = m {
+                                Some(f.name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    self.contract_methods.insert(id, methods);
+                }
             }
             Item::Struct(s) => {
                 self.push_type_scope();
