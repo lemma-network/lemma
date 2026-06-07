@@ -315,6 +315,27 @@ impl Parser {
             self.advance();
         }
     }
+
+    /// Consume the separator between items in a **block declaration**.
+    ///
+    /// ## Canonical policy (DB-A35) — applies to ALL block declarations:
+    /// `state {}`, `struct {}`, `enum {}`, `event {}`, `error {}`,
+    /// `config {}`, `metadata {}`.
+    ///
+    /// Pola B: **newline OR comma, trailing separator permitted.**
+    /// ```text
+    /// field1: u128          ← newline-only
+    /// field2: bool,         ← comma (optional trailing)
+    /// field3: Address,      ← comma + newline
+    /// ```
+    ///
+    /// Inline lists (params, tuples, arrays, call args) use comma-required
+    /// (Pola A) and are NOT affected by this helper.
+    pub(crate) fn consume_block_sep(&mut self) {
+        self.skip_newlines(); // allow newline before comma
+        self.advance_if(&Token::Comma); // optional comma
+        self.skip_newlines(); // allow newlines after
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

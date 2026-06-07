@@ -111,14 +111,15 @@ return self.snapshots[holder]
 /// instead, which exercises the same Map-indexing and state-mutation paths.
 #[test]
 fn check_contract_dex_amm_accepts() {
+    // state block uses comma style (DB-A35: Pola B).
     let result = pipeline(
         r#"contract SimpleAMM {
 state {
-pub reserves0: u128
-pub reserves1: u128
-pub totalLiquidity: u128
-liquidity: Map<Address, u128>
-pub paused: bool
+pub reserves0: u128,
+pub reserves1: u128,
+pub totalLiquidity: u128,
+liquidity: Map<Address, u128>,
+pub paused: bool,
 }
 @nonReentrant
 @whenNotPaused

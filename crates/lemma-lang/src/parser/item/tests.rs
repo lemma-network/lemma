@@ -268,12 +268,46 @@ fn parse_item_error_with_fields() {
     assert_eq!(e.fields[1].name, "need");
 }
 
+#[test]
+fn parse_item_error_multiline_newline_separated() {
+    // Regression test: before DB-A35 the error parser used comma-required (Pola A),
+    // which silently stopped at the first field when a newline was the separator.
+    // Both fields must now be collected.
+    let item = parse_item("error TxFailed {\n    reason: string\n    code: u64\n}");
+    let Item::ErrorDecl(e) = item else {
+        panic!("expected ErrorDecl");
+    };
+    assert_eq!(e.name, "TxFailed");
+    assert_eq!(
+        e.fields.len(),
+        2,
+        "newline-separated error fields were silently dropped before DB-A35 fix"
+    );
+    assert_eq!(e.fields[0].name, "reason");
+    assert_eq!(e.fields[1].name, "code");
+}
+
+#[test]
+fn parse_item_error_trailing_comma() {
+    // Trailing comma inside error block is now valid (Pola B).
+    let item = parse_item("error E { a: u128, b: u128, }");
+    let Item::ErrorDecl(e) = item else {
+        panic!("expected ErrorDecl");
+    };
+    assert_eq!(
+        e.fields.len(),
+        2,
+        "trailing comma must not produce a phantom field"
+    );
+}
+
 // ─── Contract member wiring tests ─────────────────────────────────────────────
 
 #[test]
 fn parse_decl_contract_with_struct() {
+    // Converted to comma style (Pola B — both styles are valid per DB-A35).
     let member =
-        parse_contract_member_from_str("struct Point { x: u128\n y: u128 }").expect("parse failed");
+        parse_contract_member_from_str("struct Point { x: u128, y: u128 }").expect("parse failed");
     assert!(matches!(member, ContractMember::Struct(_)));
     let ContractMember::Struct(s) = member else {
         unreachable!()
@@ -284,8 +318,9 @@ fn parse_decl_contract_with_struct() {
 
 #[test]
 fn parse_decl_contract_with_enum() {
-    let member = parse_contract_member_from_str("enum Status {\n  Active\n  Inactive\n}")
-        .expect("parse failed");
+    // Converted to comma style (Pola B — DB-A35).
+    let member =
+        parse_contract_member_from_str("enum Status { Active, Inactive }").expect("parse failed");
     assert!(matches!(member, ContractMember::Enum(_)));
     let ContractMember::Enum(e) = member else {
         unreachable!()
@@ -296,7 +331,8 @@ fn parse_decl_contract_with_enum() {
 
 #[test]
 fn parse_decl_contract_with_event() {
-    let member = parse_contract_member_from_str("event Mint {\n  to: Address\n  amount: u128\n}")
+    // Converted to comma style (Pola B — DB-A35).
+    let member = parse_contract_member_from_str("event Mint { to: Address, amount: u128 }")
         .expect("parse failed");
     assert!(matches!(member, ContractMember::Event(_)));
     let ContractMember::Event(ev) = member else {

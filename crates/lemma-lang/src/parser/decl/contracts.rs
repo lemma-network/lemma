@@ -180,7 +180,7 @@ impl Parser {
                 default,
                 span: fs,
             });
-            self.skip_newlines();
+            self.consume_block_sep();
         }
         let end = self.expect(&Token::RBrace, "\"}\"")?;
         Ok(StateBlock {
@@ -346,10 +346,9 @@ impl Parser {
             self.expect(&Token::Colon, "\":\"")?;
             let value = self.parse_config_value()?;
             entries.push(ConfigEntry { key, value, span });
-            // Accept both comma (inline objects: `{ k: v, k: v }`) and newline
-            // (multi-line objects) as entry separators — the §24 spec uses both.
-            self.advance_if(&Token::Comma);
-            self.skip_newlines();
+            // Pola B (DB-A35): newline-or-comma, trailing OK — same policy as all
+            // block declarations; §24 spec uses both comma and newline forms.
+            self.consume_block_sep();
         }
         Ok(entries)
     }

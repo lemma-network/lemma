@@ -52,9 +52,7 @@ impl Parser {
                 }));
             }
 
-            self.skip_newlines();
-            self.advance_if(&Token::Comma);
-            self.skip_newlines();
+            self.consume_block_sep();
         }
 
         let end = self.expect(&Token::RBrace, "\"}\"")?;
@@ -105,9 +103,7 @@ impl Parser {
                 variants.push(self.parse_enum_variant()?);
             }
 
-            self.skip_newlines();
-            self.advance_if(&Token::Comma);
-            self.skip_newlines();
+            self.consume_block_sep();
         }
 
         let end = self.expect(&Token::RBrace, "\"}\"")?;
@@ -149,8 +145,7 @@ impl Parser {
                     ty,
                     span: fs,
                 });
-                self.advance_if(&Token::Comma);
-                self.skip_newlines();
+                self.consume_block_sep();
             }
             self.expect(&Token::RBrace, "\"}\"")?;
             fields

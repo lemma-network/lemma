@@ -68,9 +68,7 @@ impl Parser {
                 });
             }
 
-            self.skip_newlines();
-            self.advance_if(&Token::Comma);
-            self.skip_newlines();
+            self.consume_block_sep();
         }
 
         let end = self.expect(&Token::RBrace, "\"}\"")?;
@@ -109,10 +107,9 @@ impl Parser {
                     ty,
                     span: fs,
                 });
-                if !self.advance_if(&Token::Comma) {
-                    break;
-                }
-                self.skip_newlines();
+                // Pola B (DB-A35): was comma-required (bug: silently dropped
+                // fields when newline-separated). Fixed — newline-or-comma.
+                self.consume_block_sep();
             }
             self.expect(&Token::RBrace, "\"}\"")?;
             fields

@@ -250,8 +250,10 @@ fn parse_decl_contract_with_uses() {
 
 #[test]
 fn parse_decl_contract_with_state_block() {
-    let item =
-        parse_item("contract Foo {\n  state {\n    balance: u128\n    pub owner: Address\n  }\n}");
+    // Converted to comma style (DB-A35: Pola B — newline-or-comma).
+    let item = parse_item(
+        "contract Foo {\n  state {\n    balance: u128,\n    pub owner: Address,\n  }\n}",
+    );
     let Item::Contract(c) = item else {
         panic!("expected Contract");
     };
@@ -264,6 +266,56 @@ fn parse_decl_contract_with_state_block() {
     assert!(!sb.fields[0].pub_);
     assert_eq!(sb.fields[1].name, "owner");
     assert!(sb.fields[1].pub_);
+}
+
+#[test]
+fn parse_decl_state_block_comma_separator() {
+    // Pola B: inline comma-separated state fields — `state { a: u128, b: bool }`.
+    // Was a parse error before DB-A35; must now produce 2 fields.
+    let item = parse_item("contract C { state { x: u128, y: bool } }");
+    let Item::Contract(c) = item else {
+        panic!("expected Contract");
+    };
+    let ContractMember::State(sb) = &c.members[0] else {
+        panic!("expected State");
+    };
+    assert_eq!(sb.fields.len(), 2);
+    assert_eq!(sb.fields[0].name, "x");
+    assert_eq!(sb.fields[1].name, "y");
+}
+
+#[test]
+fn parse_decl_state_block_trailing_comma() {
+    // Trailing comma before `}` is permitted (Pola B).
+    let item = parse_item("contract C {\n  state {\n    a: u128,\n    b: bool,\n  }\n}");
+    let Item::Contract(c) = item else {
+        panic!("expected Contract");
+    };
+    let ContractMember::State(sb) = &c.members[0] else {
+        panic!("expected State");
+    };
+    assert_eq!(
+        sb.fields.len(),
+        2,
+        "trailing comma must not produce a phantom field"
+    );
+}
+
+#[test]
+fn parse_decl_state_block_mixed_comma_and_newline() {
+    // Mixed: comma on some fields, newline-only on others — all valid.
+    let item =
+        parse_item("contract C {\n  state {\n    a: u128,\n    b: bool\n    c: Address,\n  }\n}");
+    let Item::Contract(c) = item else {
+        panic!("expected Contract");
+    };
+    let ContractMember::State(sb) = &c.members[0] else {
+        panic!("expected State");
+    };
+    assert_eq!(sb.fields.len(), 3);
+    assert_eq!(sb.fields[0].name, "a");
+    assert_eq!(sb.fields[1].name, "b");
+    assert_eq!(sb.fields[2].name, "c");
 }
 
 #[test]

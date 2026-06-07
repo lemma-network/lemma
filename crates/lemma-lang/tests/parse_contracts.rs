@@ -645,13 +645,14 @@ self.totalLiquidity = self.totalLiquidity - shares
 /// Proves: `import { X } from "path"` followed by contract parses as two items.
 #[test]
 fn contract_dex_with_import() {
+    // state block uses comma style (DB-A35: Pola B — newline-or-comma).
     let items = run(r#"import { IToken } from "@std/interfaces"
 contract PairV2 {
 state {
-pub token0: Address
-pub token1: Address
-pub reserve0: u128
-pub reserve1: u128
+pub token0: Address,
+pub token1: Address,
+pub reserve0: u128,
+pub reserve1: u128,
 }
 pub view fn getReserves() -> u128 {
 return self.reserve0
@@ -784,11 +785,12 @@ return self.stakes[staker]
 /// Proves: `contract Foo implements IStaking, IOwnable` parses both implements names.
 #[test]
 fn contract_staking_with_implements() {
+    // state block uses comma + trailing comma style (DB-A35).
     let items = run(r#"contract ManagedStaking implements IStaking {
 state {
-pub owner: Address
-pub totalStaked: u128
-stakes: Map<Address, u128>
+pub owner: Address,
+pub totalStaked: u128,
+stakes: Map<Address, u128>,
 }
 pub fn stake(amount: u128) {
 self.stakes[msg.sender] = self.stakes[msg.sender] + amount
