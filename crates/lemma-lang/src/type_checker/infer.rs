@@ -462,10 +462,7 @@ impl<'a> Inferer<'a> {
                 Ok(ResolvedType::Tuple(types?))
             }
             Expr::New {
-                ty: type_name,
-                args,
-                span,
-                ..
+                ty: type_name, args, ..
             } => {
                 for arg in args {
                     match arg {
@@ -476,19 +473,11 @@ impl<'a> Inferer<'a> {
                 }
                 // Return the Named type for the constructed value.
                 if let Some(&type_id) = self.global_types.get(type_name.as_str()) {
-                    // 3f: validate type argument count for generic structs.
-                    if let Some(SymbolSig::Struct(sig)) = self.sigs.get(&type_id) {
-                        let expected = sig.generic_params.len();
-                        // `new Foo(args)` has no explicit type args in the AST —
-                        // type args are inferred from constructor args (3f forward-only).
-                        // `WrongTypeArgCount` is only emitted when explicit type args
-                        // are provided and the count mismatches.  For now, the AST
-                        // `Expr::New` carries no explicit type args (the `ty` field is
-                        // just the name string), so we skip the count check here.
-                        // TODO(3g): when the parser threads explicit type args through
-                        // `Expr::New`, add the count check here.
-                        let _ = (expected, span); // suppress unused warnings
-                    }
+                    // `new Foo(args)` carries NO type args in Lem — type args live in
+                    // the type annotation (`let q: Queue<u128> = new Queue()`), never on
+                    // the constructor (spec §12). Generic arg-count validation belongs to
+                    // annotation lowering (P3-checker-12), NOT here. The constructor's
+                    // type args are inferred from the annotation context.
                     Ok(ResolvedType::Named(type_id, vec![]))
                 } else {
                     Ok(ResolvedType::Unknown) // Unresolved (import, deferred)
