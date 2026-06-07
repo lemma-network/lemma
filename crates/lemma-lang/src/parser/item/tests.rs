@@ -763,3 +763,325 @@ fn parse_item_interface_trait_library_malformed_never_panic() {
         });
     }
 }
+
+// ── Token config / metadata (subtask 2g) ──────────────────────────────────────
+
+#[cfg(test)]
+mod token_config {
+    use crate::lexer::tokenize;
+    use crate::parser::ast::{Config, ConfigValue, ContractMember, Item, Metadata, UnitKind};
+    use crate::parser::Parser;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    fn parse_token(src: &str) -> Result<Item, crate::error::LangError> {
+        let tokens = tokenize(src)?;
+        let mut p = Parser::new(tokens);
+        p.parse_top_level_item()
+    }
+
+    fn token_members(src: &str) -> Vec<ContractMember> {
+        match parse_token(src).expect("parse failed") {
+            Item::Token_(decl) => decl.members,
+            other => panic!("expected Token_ item, got: {other:?}"),
+        }
+    }
+
+    fn single_config(src: &str) -> Config {
+        let members = token_members(src);
+        assert_eq!(members.len(), 1, "expected exactly one member");
+        match members.into_iter().next().unwrap() {
+            ContractMember::Config(c) => c,
+            other => panic!("expected Config member, got: {other:?}"),
+        }
+    }
+
+    fn single_metadata(src: &str) -> Metadata {
+        let members = token_members(src);
+        assert_eq!(members.len(), 1, "expected exactly one member");
+        match members.into_iter().next().unwrap() {
+            ContractMember::Metadata(m) => m,
+            other => panic!("expected Metadata member, got: {other:?}"),
+        }
+    }
+
+    // ── ConfigValue::Str ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_config_str_value() {
+        let cfg = single_config(
+            r#"token T extends Token {
+config {
+name: "Example Token"
+symbol: "EXT"
+}
+}"#,
+        );
+        assert_eq!(cfg.entries.len(), 2);
+        assert_eq!(cfg.entries[0].key, "name");
+        assert_eq!(
+            cfg.entries[0].value,
+            ConfigValue::Str("Example Token".into())
+        );
+        assert_eq!(cfg.entries[1].key, "symbol");
+        assert_eq!(cfg.entries[1].value, ConfigValue::Str("EXT".into()));
+    }
+
+    // ── ConfigValue::Int ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_config_int_value() {
+        let cfg = single_config(
+            "token T extends Token {\nconfig {\ndecimals: 18\nmaxSupply: 1000000000\n}\n}",
+        );
+        assert_eq!(cfg.entries.len(), 2);
+        assert_eq!(cfg.entries[0].key, "decimals");
+        assert_eq!(cfg.entries[0].value, ConfigValue::Int(18));
+        assert_eq!(cfg.entries[1].key, "maxSupply");
+        assert_eq!(cfg.entries[1].value, ConfigValue::Int(1_000_000_000));
+    }
+
+    // ── ConfigValue::Bool ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_config_bool_value() {
+        let cfg = single_config(
+            "token T extends Token {\nconfig {\nantiHoneypot: true\nmintable: false\n}\n}",
+        );
+        assert_eq!(cfg.entries.len(), 2);
+        assert_eq!(cfg.entries[0].value, ConfigValue::Bool(true));
+        assert_eq!(cfg.entries[1].value, ConfigValue::Bool(false));
+    }
+
+    // ── ConfigValue::Percent ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_config_percent_value() {
+        let cfg = single_config(
+            "token T extends Token {\nconfig {\nteamShare: 15%\ninvestorShare: 10%\n}\n}",
+        );
+        assert_eq!(cfg.entries.len(), 2);
+        assert_eq!(cfg.entries[0].key, "teamShare");
+        assert_eq!(cfg.entries[0].value, ConfigValue::Percent(15));
+        assert_eq!(cfg.entries[1].value, ConfigValue::Percent(10));
+    }
+
+    // ── ConfigValue::Unit — hours / seconds / months ──────────────────────────
+
+    #[test]
+    fn parse_config_unit_hours() {
+        let cfg =
+            single_config("token T extends Token {\nconfig {\napprovalExpiry: 24.hours\n}\n}");
+        assert_eq!(cfg.entries[0].key, "approvalExpiry");
+        assert_eq!(cfg.entries[0].value, ConfigValue::Unit(24, UnitKind::Hours));
+    }
+
+    #[test]
+    fn parse_config_unit_seconds() {
+        let cfg = single_config(
+            "token T extends Token {\nconfig {\ncooldownBetweenBuys: 30.seconds\n}\n}",
+        );
+        assert_eq!(
+            cfg.entries[0].value,
+            ConfigValue::Unit(30, UnitKind::Seconds)
+        );
+    }
+
+    #[test]
+    fn parse_config_unit_months() {
+        let cfg = single_config("token T extends Token {\nconfig {\ncliff: 6.months\n}\n}");
+        assert_eq!(cfg.entries[0].value, ConfigValue::Unit(6, UnitKind::Months));
+    }
+
+    // ── ConfigValue::Object (nested block) ────────────────────────────────────
+
+    #[test]
+    fn parse_config_nested_object() {
+        let cfg = single_config(
+            r#"token T extends Token {
+config {
+fairLaunch: {
+enabled: true
+maxBuyPerWallet: 10000
+cooldownBetweenBuys: 30.seconds
+antiSnipeBlocks: 3
+}
+}
+}"#,
+        );
+        assert_eq!(cfg.entries.len(), 1);
+        assert_eq!(cfg.entries[0].key, "fairLaunch");
+        match &cfg.entries[0].value {
+            ConfigValue::Object(inner) => {
+                assert_eq!(inner.len(), 4);
+                assert_eq!(inner[0].key, "enabled");
+                assert_eq!(inner[0].value, ConfigValue::Bool(true));
+                assert_eq!(inner[1].key, "maxBuyPerWallet");
+                assert_eq!(inner[1].value, ConfigValue::Int(10000));
+                assert_eq!(inner[2].key, "cooldownBetweenBuys");
+                assert_eq!(inner[2].value, ConfigValue::Unit(30, UnitKind::Seconds));
+                assert_eq!(inner[3].key, "antiSnipeBlocks");
+                assert_eq!(inner[3].value, ConfigValue::Int(3));
+            }
+            other => panic!("expected Object, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_config_deeply_nested_object() {
+        // vesting: { team: { amount: 15%, cliff: 6.months, linear: 24.months } }
+        let cfg = single_config(
+            r#"token T extends Token {
+config {
+vesting: {
+team: { amount: 15%, cliff: 6.months, linear: 24.months }
+}
+}
+}"#,
+        );
+        assert_eq!(cfg.entries[0].key, "vesting");
+        let vesting = match &cfg.entries[0].value {
+            ConfigValue::Object(v) => v,
+            other => panic!("expected Object, got: {other:?}"),
+        };
+        assert_eq!(vesting.len(), 1);
+        assert_eq!(vesting[0].key, "team");
+        let team = match &vesting[0].value {
+            ConfigValue::Object(t) => t,
+            other => panic!("expected Object, got: {other:?}"),
+        };
+        assert_eq!(team.len(), 3);
+        assert_eq!(team[0].value, ConfigValue::Percent(15));
+        assert_eq!(team[1].value, ConfigValue::Unit(6, UnitKind::Months));
+        assert_eq!(team[2].value, ConfigValue::Unit(24, UnitKind::Months));
+    }
+
+    // ── Metadata block ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_metadata_block() {
+        let meta = single_metadata(
+            r#"token T extends Token {
+metadata {
+image: "ipfs://Qm..."
+website: "https://example.com"
+}
+}"#,
+        );
+        assert_eq!(meta.entries.len(), 2);
+        assert_eq!(meta.entries[0].key, "image");
+        assert_eq!(
+            meta.entries[0].value,
+            ConfigValue::Str("ipfs://Qm...".into())
+        );
+        assert_eq!(meta.entries[1].key, "website");
+        assert_eq!(
+            meta.entries[1].value,
+            ConfigValue::Str("https://example.com".into())
+        );
+    }
+
+    #[test]
+    fn parse_metadata_nested_socials() {
+        let meta = single_metadata(
+            r#"token T extends Token {
+metadata {
+socials: { twitter: "@example", telegram: "t.me/example" }
+}
+}"#,
+        );
+        assert_eq!(meta.entries[0].key, "socials");
+        match &meta.entries[0].value {
+            ConfigValue::Object(inner) => {
+                assert_eq!(inner.len(), 2);
+                assert_eq!(inner[0].key, "twitter");
+                assert_eq!(inner[0].value, ConfigValue::Str("@example".into()));
+                assert_eq!(inner[1].key, "telegram");
+                assert_eq!(inner[1].value, ConfigValue::Str("t.me/example".into()));
+            }
+            other => panic!("expected Object, got: {other:?}"),
+        }
+    }
+
+    // ── Full §24 example: config + metadata in one token ─────────────────────
+
+    #[test]
+    fn parse_full_token_standard_example() {
+        // Abridged §24 example — all config value forms + metadata in one token.
+        let src = r#"token MyToken extends Token {
+config {
+name: "Example Token"
+symbol: "EXT"
+decimals: 18
+antiHoneypot: true
+approvalExpiry: 24.hours
+fairLaunch: {
+enabled: true
+maxBuyPerWallet: 10000
+cooldownBetweenBuys: 30.seconds
+}
+vesting: {
+team: { amount: 15%, cliff: 6.months, linear: 24.months }
+}
+}
+metadata {
+image: "ipfs://Qm..."
+website: "https://example.com"
+}
+}"#;
+        let members = token_members(src);
+        assert_eq!(members.len(), 2, "expected Config + Metadata members");
+        assert!(matches!(members[0], ContractMember::Config(_)));
+        assert!(matches!(members[1], ContractMember::Metadata(_)));
+
+        let cfg = match &members[0] {
+            ContractMember::Config(c) => c,
+            _ => unreachable!(),
+        };
+        // Spot-check config entries
+        assert_eq!(cfg.entries[0].key, "name");
+        assert_eq!(cfg.entries[2].key, "decimals");
+        assert_eq!(cfg.entries[2].value, ConfigValue::Int(18));
+        assert_eq!(cfg.entries[4].value, ConfigValue::Unit(24, UnitKind::Hours));
+    }
+
+    // ── Error cases ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_config_rejects_missing_brace() {
+        let result = parse_token("token T extends Token {\nconfig\n}");
+        assert!(
+            result.is_err(),
+            "expected parse error for config without brace"
+        );
+    }
+
+    #[test]
+    fn parse_config_rejects_missing_colon() {
+        let result = parse_token("token T extends Token {\nconfig {\nname \"oops\"\n}\n}");
+        assert!(
+            result.is_err(),
+            "expected parse error for missing colon in config entry"
+        );
+    }
+
+    // ── Fuzz safety ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_token_config_metadata_malformed_never_panic() {
+        let malformed = [
+            "token T extends Token { config",
+            "token T extends Token { config {",
+            "token T extends Token { config { name: }",
+            "token T extends Token { metadata",
+            "token T extends Token { metadata {",
+            "token T extends Token { config { nested: { }",
+        ];
+        for src in malformed {
+            let _ = tokenize(src).and_then(|tokens| {
+                let mut p = Parser::new(tokens);
+                p.parse_top_level_item()
+            });
+        }
+    }
+}

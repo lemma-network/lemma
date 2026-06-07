@@ -4,14 +4,14 @@
 //! - `contract IDENT implements? uses? { member* }`
 //! - `token IDENT extends IDENT { member* }`
 //! - All contract member forms: state, const, immutable, fn, modifier,
-//!   receive, fallback
+//!   receive, fallback, config, metadata
 
 use crate::error::LangError;
 use crate::lexer::token::Token;
 
 use super::super::ast::{
-    Contract, ContractMember, Fallback_, Immutable, Item, ModifierDef, Receive, StateBlock,
-    StateField, TokenDecl,
+    Config, ConfigEntry, ConfigValue, Contract, ContractMember, Fallback_, Immutable, Item,
+    Metadata, ModifierDef, Receive, StateBlock, StateField, TokenDecl, UnitKind,
 };
 use super::super::expr::MergeSpan;
 use super::super::Parser;
@@ -139,6 +139,14 @@ impl Parser {
             Token::Enum => Ok(ContractMember::Enum(self.parse_enum_decl()?)),
             Token::Event => Ok(ContractMember::Event(self.parse_event_decl(annotations)?)),
             Token::Error => Ok(ContractMember::ErrorDecl(self.parse_error_decl()?)),
+            // Token standard blocks (subtask 2g) — `config` and `metadata` are
+            // context-sensitive identifiers, not reserved keywords.
+            Token::Identifier(ref s) if s == "config" => {
+                Ok(ContractMember::Config(self.parse_config_block()?))
+            }
+            Token::Identifier(ref s) if s == "metadata" => {
+                Ok(ContractMember::Metadata(self.parse_metadata_block()?))
+            }
             tok => Err(self.error_expected(
                 vec!["contract member".into()],
                 format!("unexpected contract member token: {tok:?}"),
@@ -277,5 +285,133 @@ impl Parser {
             body,
             span: start.merge_with(end),
         })
+    }
+
+    // ── Config block ──────────────────────────────────────────────────────────
+
+    /// Parse `config { key: value ... }` inside a token declaration.
+    ///
+    /// `config` is a context-sensitive identifier, not a reserved keyword.
+    /// The caller has already verified the current token is `Identifier("config")`
+    /// via a match guard, so we consume it with `advance()`.
+    pub(crate) fn parse_config_block(&mut self) -> Result<Config, LangError> {
+        let start = self.peek_span();
+        self.advance(); // consume `config` identifier
+        self.expect(&Token::LBrace, "\"{\"")?;
+        self.skip_newlines();
+        let entries = self.parse_config_entries()?;
+        let end = self.expect(&Token::RBrace, "\"}\"")?;
+        Ok(Config {
+            entries,
+            span: start.merge_with(end),
+        })
+    }
+
+    // ── Metadata block ────────────────────────────────────────────────────────
+
+    /// Parse `metadata { key: value ... }` inside a token declaration.
+    ///
+    /// Same structure as `config { }` — shares `parse_config_entries` to avoid
+    /// duplication (DRY: AGENTS §2).
+    pub(crate) fn parse_metadata_block(&mut self) -> Result<Metadata, LangError> {
+        let start = self.peek_span();
+        self.advance(); // consume `metadata` identifier
+        self.expect(&Token::LBrace, "\"{\"")?;
+        self.skip_newlines();
+        let entries = self.parse_config_entries()?;
+        let end = self.expect(&Token::RBrace, "\"}\"")?;
+        Ok(Metadata {
+            entries,
+            span: start.merge_with(end),
+        })
+    }
+
+    // ── Config entries (shared by config, metadata, and nested objects) ───────
+
+    /// Parse a sequence of `key: value` entries until a `}` is reached.
+    ///
+    /// Entries are newline-separated (Lem uses significant whitespace — no commas).
+    /// This function is called by `parse_config_block`, `parse_metadata_block`,
+    /// and recursively by `parse_config_value` for nested objects.
+    fn parse_config_entries(&mut self) -> Result<Vec<ConfigEntry>, LangError> {
+        let mut entries = Vec::new();
+        while !self.check(&Token::RBrace) && !self.at_end() {
+            // Capture the start of the entry for span tracking.
+            // (Same convention as parse_state_block — start span only.)
+            let span = self.peek_span();
+            let key = self.expect_identifier("config entry key")?;
+            self.expect(&Token::Colon, "\":\"")?;
+            let value = self.parse_config_value()?;
+            entries.push(ConfigEntry { key, value, span });
+            // Accept both comma (inline objects: `{ k: v, k: v }`) and newline
+            // (multi-line objects) as entry separators — the §24 spec uses both.
+            self.advance_if(&Token::Comma);
+            self.skip_newlines();
+        }
+        Ok(entries)
+    }
+
+    // ── Config value ──────────────────────────────────────────────────────────
+
+    /// Parse a single config value.
+    ///
+    /// Value forms (all from §24 token standard spec):
+    /// - `"text"`          → `ConfigValue::Str`
+    /// - `true` / `false`  → `ConfigValue::Bool`
+    /// - `42`              → `ConfigValue::Int` (plain integer)
+    /// - `15%`             → `ConfigValue::Percent` (integer followed by `%`)
+    /// - `24.hours`        → `ConfigValue::Unit`  (integer followed by unit suffix)
+    /// - `{ key: val... }` → `ConfigValue::Object` (nested block; recursive)
+    /// - `SomeIdent`       → `ConfigValue::Ident`
+    fn parse_config_value(&mut self) -> Result<ConfigValue, LangError> {
+        match self.peek().clone() {
+            Token::StringLiteral(s) => {
+                self.advance();
+                Ok(ConfigValue::Str(s))
+            }
+            Token::BoolLiteral(b) => {
+                self.advance();
+                Ok(ConfigValue::Bool(b))
+            }
+            Token::IntLiteral(n) => {
+                self.advance();
+                // Integer followed by `%` → Percent
+                if self.advance_if(&Token::Percent) {
+                    return Ok(ConfigValue::Percent(n));
+                }
+                // Integer followed by a unit suffix token → Unit
+                let unit = match self.peek() {
+                    Token::UnitEther => Some(UnitKind::Ether),
+                    Token::UnitGwei => Some(UnitKind::Gwei),
+                    Token::UnitMinutes => Some(UnitKind::Minutes),
+                    Token::UnitHours => Some(UnitKind::Hours),
+                    Token::UnitDays => Some(UnitKind::Days),
+                    Token::UnitSeconds => Some(UnitKind::Seconds),
+                    Token::UnitMonths => Some(UnitKind::Months),
+                    _ => None,
+                };
+                if let Some(kind) = unit {
+                    self.advance();
+                    return Ok(ConfigValue::Unit(n, kind));
+                }
+                Ok(ConfigValue::Int(n))
+            }
+            Token::LBrace => {
+                // Nested object — reuse parse_config_entries (recursive)
+                self.advance(); // consume `{`
+                self.skip_newlines();
+                let entries = self.parse_config_entries()?;
+                self.expect(&Token::RBrace, "\"}\"")?;
+                Ok(ConfigValue::Object(entries))
+            }
+            Token::Identifier(s) => {
+                self.advance();
+                Ok(ConfigValue::Ident(s))
+            }
+            tok => Err(self.error_expected(
+                vec!["config value".into()],
+                format!("expected config value, found: {tok:?}"),
+            )),
+        }
     }
 }
