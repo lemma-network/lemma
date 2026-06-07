@@ -10,7 +10,9 @@ use super::super::Parser;
 impl Parser {
     // ── Event ─────────────────────────────────────────────────────────────────
 
-    /// Parse `event IDENT { (@indexed)? field?: Type, ... | fn method() { ... } }`.
+    /// Parse `event IDENT { (@indexed)? field?: Type ... | fn method() { ... } }`.
+    ///
+    /// Fields are separated by newline or comma (Pola B — DB-A35).
     ///
     /// The `@anonymous` flag is determined from the `annotations` vec collected
     /// by the caller before dispatching here. This avoids re-parsing annotations

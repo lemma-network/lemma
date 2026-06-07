@@ -354,6 +354,21 @@ fn parse_decl_contract_with_error() {
     assert_eq!(e.fields.len(), 1);
 }
 
+#[test]
+fn parse_item_event_trailing_comma() {
+    // Symmetry with state/error: trailing comma in event block is permitted (Pola B — DB-A35).
+    let member = parse_contract_member_from_str("event Transfer { from: Address, to: Address, }")
+        .expect("parse failed");
+    let ContractMember::Event(ev) = member else {
+        panic!("expected Event");
+    };
+    assert_eq!(
+        ev.fields.len(),
+        2,
+        "trailing comma must not produce a phantom field"
+    );
+}
+
 // ─── Event computed-field (method) tests ─────────────────────────────────────
 
 #[test]

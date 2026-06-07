@@ -320,7 +320,9 @@ impl Parser {
     ///
     /// ## Canonical policy (DB-A35) — applies to ALL block declarations:
     /// `state {}`, `struct {}`, `enum {}`, `event {}`, `error {}`,
-    /// `config {}`, `metadata {}`.
+    /// `config {}`, `metadata {}` (the latter two are covered transitively:
+    /// both delegate to `parse_config_entries` which calls this helper — there
+    /// is no separate `metadata` call-site; grep for `parse_config_entries`).
     ///
     /// Pola B: **newline OR comma, trailing separator permitted.**
     /// ```text
