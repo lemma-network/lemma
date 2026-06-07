@@ -237,3 +237,97 @@ fn eff_auth_intersection_for_diamond_call_graph() {
         "helper via entry2 should have no guards (diamond weakest-path)"
     );
 }
+
+#[test]
+fn eff_auth_intersects_within_entry_diamond() {
+    // Within ONE analysis: root(unguarded) → guarded(@onlyOwner) → merge
+    //                       root            → plain(unguarded)    → merge
+    // EffAuth(merge from root) must be {} — merge is reachable unguarded via
+    // `plain`, so the intersection across both paths drops OnlyOwner. This
+    // exercises the multi-path merge branch (the whole point of the fix).
+    let mut fn_guards: BTreeMap<String, BTreeSet<Guard>> = BTreeMap::new();
+    let mut g = BTreeSet::new();
+    g.insert(Guard::OnlyOwner);
+    fn_guards.insert("guarded".to_owned(), g);
+    for f in ["root", "plain", "merge"] {
+        fn_guards.entry(f.to_owned()).or_default();
+    }
+
+    let mut cg = super::super::cfg::CallGraph::new();
+    cg.insert(
+        "root".to_owned(),
+        ["guarded".to_owned(), "plain".to_owned()]
+            .into_iter()
+            .collect(),
+    );
+    cg.insert(
+        "guarded".to_owned(),
+        ["merge".to_owned()].into_iter().collect(),
+    );
+    cg.insert(
+        "plain".to_owned(),
+        ["merge".to_owned()].into_iter().collect(),
+    );
+    cg.insert("merge".to_owned(), BTreeSet::new());
+
+    let eff = compute_eff_auth("root", &fn_guards, &cg);
+    assert!(
+        eff["merge"].is_empty(),
+        "merge is reachable unguarded via `plain`; intersection must drop OnlyOwner; got {:?}",
+        eff["merge"]
+    );
+    // The guarded path itself still carries OnlyOwner.
+    assert!(eff["guarded"].contains(&Guard::OnlyOwner));
+    // The plain path carries nothing.
+    assert!(eff["plain"].is_empty());
+}
+
+#[test]
+fn eff_auth_diamond_result_is_order_independent() {
+    // Same diamond as above but both worklist orderings must converge to the
+    // same meet-over-paths value (determinism guard, AGENTS §7.1). We assert
+    // the merge node is {} regardless of which path is explored first.
+    let mut fn_guards: BTreeMap<String, BTreeSet<Guard>> = BTreeMap::new();
+    let mut g = BTreeSet::new();
+    g.insert(Guard::OnlyOwner);
+    // Make the FIRST-iterated callee the guarded one to force the
+    // "first-visit records strong, later path shrinks it" code path.
+    fn_guards.insert("aGuarded".to_owned(), g);
+    for f in ["root", "zPlain", "merge", "leaf"] {
+        fn_guards.entry(f.to_owned()).or_default();
+    }
+
+    let mut cg = super::super::cfg::CallGraph::new();
+    cg.insert(
+        "root".to_owned(),
+        ["aGuarded".to_owned(), "zPlain".to_owned()]
+            .into_iter()
+            .collect(),
+    );
+    cg.insert(
+        "aGuarded".to_owned(),
+        ["merge".to_owned()].into_iter().collect(),
+    );
+    cg.insert(
+        "zPlain".to_owned(),
+        ["merge".to_owned()].into_iter().collect(),
+    );
+    // merge has a downstream child to prove the shrink re-propagates.
+    cg.insert(
+        "merge".to_owned(),
+        ["leaf".to_owned()].into_iter().collect(),
+    );
+    cg.insert("leaf".to_owned(), BTreeSet::new());
+
+    let eff = compute_eff_auth("root", &fn_guards, &cg);
+    assert!(
+        eff["merge"].is_empty(),
+        "merge must be {{}} after intersection; got {:?}",
+        eff["merge"]
+    );
+    assert!(
+        eff["leaf"].is_empty(),
+        "leaf must inherit the shrunk {{}} from merge (re-propagation on shrink); got {:?}",
+        eff["leaf"]
+    );
+}

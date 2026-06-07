@@ -157,6 +157,9 @@ pub fn compute_eff_auth(
         };
 
         // Re-queue callees only when the effective guard set changed.
+        // Self-recursion terminates: the second visit yields merged == existing
+        // (intersecting a set with itself), so `changed` is false and no
+        // re-queue happens — fixpoint reached.
         if changed {
             if let Some(callees) = call_graph.get(&fn_name) {
                 let fn_eff = result.get(&fn_name).cloned().unwrap_or_default();
