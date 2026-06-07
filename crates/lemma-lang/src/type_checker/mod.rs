@@ -18,23 +18,31 @@
 //! - `types`     — [`ResolvedType`] (semantic types) and [`SymbolId`]
 //! - `typed_ast` — [`TypedAst`] (the span-keyed typed output)
 //!
-//! ## Implementation status (P3·Step 3a — foundation)
+//! ## Implementation status (P3·Step 3 — COMPLETE as of 3h)
 //!
-//! 3a ships the architectural foundation:
-//! - Error contract: [`TypeError`] + [`crate::error::LangError::Type`]
-//! - Output contract: [`TypedAst`] (the side-table typed AST)
-//! - Semantic type model: [`ResolvedType`]
-//! - Public entry point: [`check`]
-//! - First real check: duplicate top-level declaration names
+//! The type checker is fully implemented across subtasks 3a–3h:
 //!
-//! Subsequent subtasks fill in the actual type inference and checking:
-//! - 3b: name resolution + symbol tables
-//! - 3c: expression typing (literals, operators, conversions)
-//! - 3d: calls, member access, index, struct/tuple expressions
-//! - 3e: statement checking (let inference, return types, conditions)
-//! - 3f: generics + trait bounds
-//! - 3g: declaration walk → fully-populated TypedAst
-//! - 3h: integration + docs closeout
+//! - **3a**: Error contract ([`TypeError`]/[`TypeErrorKind`]), [`TypedAst`]
+//!   skeleton, [`ResolvedType`] (23 variants), duplicate top-level name check.
+//! - **3b**: Name resolution — symbol arena, [`SymbolId`], [`ScopeStack`],
+//!   `lower_type` (AST `Type` → [`ResolvedType`]), `UndefinedName`/`UndefinedType`.
+//! - **3c**: Expression typing — all literals, unary/binary/ternary/nullish ops,
+//!   `IntLiteral` coercion marker (DB-A27), `TypeMismatch`/`InvalidOperand`.
+//! - **3d**: Calls, member access, index, struct/array/tuple literals, `Expr::Cast`.
+//! - **3e**: Statement checking — `let` inference + back-fill, return types,
+//!   condition `bool`, mutability (`SymbolInfo.mutable`), assignment LHS/RHS,
+//!   `If_`/`Match_` branch unification, `Try_` unwrap, `for..in` range bounds.
+//! - **3f**: Generics + trait bounds — `lower_type_with` (DB-A34/DRY),
+//!   `TypeCompatibility`/`types_compatible` (DB-A35), lambda `Fn` typing,
+//!   destructuring `let` back-fill, compound cast targets, `substitute`/
+//!   `infer_type_args`, `check_trait_bounds` (name-level).
+//! - **3g**: Declaration walk → fully-populated [`TypedAst`] — forward-ref
+//!   re-lowering (`pending_ann`), `StructSig.methods`, `EnumSig.generic_params`,
+//!   [`TypedContract`](typed_contract::TypedContract) projection, named-arg
+//!   alignment, generic arg-count validation at all annotation sites.
+//! - **3h**: Integration proof — full tokenize→parse→check pipeline verified
+//!   against realistic token, DEX, and staking contracts; [`TypedContract`]
+//!   projection asserted correct for the Step 4 safety analyzer input contract.
 
 pub mod error;
 pub(crate) mod infer;
@@ -64,18 +72,25 @@ pub use self::types::{ResolvedType, SymbolId};
 /// (consumed by the Step 4 safety analyzer) or `Err(LangError::Type(...))`
 /// on the first type violation found.
 ///
-/// ## Current coverage (P3·Step 3e)
+/// ## Coverage (P3·Step 3 COMPLETE — 3a through 3h)
 ///
 /// - Duplicate top-level declaration names (3a)
 /// - Name resolution — every identifier linked to its declaration (3b)
 /// - Expression typing — literals, operators, ternary, nullish (3c)
-/// - Calls, member access, index, struct/array/tuple literals (3d)
+/// - Calls, member access, index, struct/array/tuple literals, cast (3d)
 /// - Statement checking — let inference, return types, mutability,
-///   conditions, assignment, if/match/try expressions (3e)
+///   conditions, assignment, if/match/try expressions, for..in (3e)
+/// - Generics + trait bounds — substitution, type-arg inference,
+///   name-level bound checking, lambda Fn typing (3f)
+/// - Declaration walk → fully-populated [`TypedAst`] with
+///   [`TypedContract`](typed_contract::TypedContract) projection (3g)
+/// - Integration proof: full pipeline verified on realistic contracts;
+///   [`TypedContract`] projection validated for the Step 4 safety analyzer (3h)
 ///
-/// Deferred to later subtasks:
-/// - Generics + trait bounds → 3f
-/// - Declaration walk → fully-populated TypedAst → 3g
+/// ## Open (Step 4+)
+///
+/// - `msg` / `block` built-in globals (wired in at node-integration layer, Step 7)
+/// - Structural trait bound checking (name-level only here; Step 4, P3-checker-8)
 ///
 /// # Examples
 ///
