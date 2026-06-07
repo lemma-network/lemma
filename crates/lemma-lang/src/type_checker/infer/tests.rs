@@ -1273,6 +1273,38 @@ fn try_expr_on_unknown_propagates_unknown() {
     let _ = typed;
 }
 
+#[test]
+fn try_expr_on_non_result_errors() {
+    // `?` applied to a concrete non-Result type (u128) must be a type error,
+    // not a silent Unknown. (Closes the 3e leniency soundness gap.)
+    let result = check_src("fn f(x: u128) -> u128 { return x? }");
+    assert!(
+        result.is_err(),
+        "`?` on a non-Result type should be a type error"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::InvalidTry { .. }),
+            "expected InvalidTry, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn try_expr_on_bool_errors() {
+    // A second concrete non-Result type (bool) to prove it is not Result-specific.
+    let result = check_src("fn f(b: bool) { let y = b? }");
+    assert!(result.is_err(), "`?` on a bool should be a type error");
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::InvalidTry { .. }),
+            "expected InvalidTry, got {:?}",
+            e.kind
+        );
+    }
+}
+
 // ─── P3·Step 3e: struct missing field — P3-checker-5 ─────────────────────────
 
 #[test]

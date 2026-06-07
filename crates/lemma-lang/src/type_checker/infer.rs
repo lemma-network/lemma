@@ -601,15 +601,26 @@ impl<'a> Inferer<'a> {
                 self.check_assign(target, op, val, *span)?;
                 Ok(ResolvedType::Unit)
             }
-            Expr::Try_(inner, _) => {
+            Expr::Try_(inner, span) => {
                 let inner_ty = self.infer_expr(inner)?;
-                // `?` unwraps Result<T,E> → T. Unknown is propagated.
+                // `?` unwraps Result<T,E> → T.
                 match &inner_ty {
                     ResolvedType::Result_(ok_ty, _) => Ok(*ok_ty.clone()),
+                    // Unknown is propagated — the inner type could not be resolved
+                    // (e.g. a forward-referenced call); erroring here would be a
+                    // false positive. The real type, when known, is checked elsewhere.
                     ResolvedType::Unknown => Ok(ResolvedType::Unknown),
-                    // In 3e: be lenient for non-Result types (could be deferred call return).
-                    // Full check in 3f when all types are resolved.
-                    _ => Ok(ResolvedType::Unknown),
+                    // `?` on any concrete non-Result type is a type error.
+                    other => Err(type_err(
+                        TypeErrorKind::InvalidTry {
+                            found: other.display_name(),
+                        },
+                        *span,
+                        format!(
+                            "the `?` operator can only be applied to `Result`, not `{}`",
+                            other.display_name()
+                        ),
+                    )),
                 }
             }
         }

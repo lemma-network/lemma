@@ -204,6 +204,17 @@ pub enum TypeErrorKind {
         /// The number of type arguments actually provided.
         found: usize,
     },
+
+    /// The `?` (try) operator applied to a non-`Result` expression.
+    ///
+    /// `?` may only unwrap a `Result<T, E>`.  Applying it to any other type
+    /// (e.g. `let x: u128 = 1; x?`) is a type error.
+    ///
+    /// Example: `let y: u128 = 1; y?` — `u128` is not a `Result`.
+    InvalidTry {
+        /// The type the `?` operator was applied to (human-readable).
+        found: String,
+    },
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
