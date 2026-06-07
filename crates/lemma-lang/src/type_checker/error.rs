@@ -66,7 +66,23 @@ pub enum TypeErrorKind {
         /// The duplicated identifier.
         name: String,
     },
-    // 3b: UndefinedName(String), UndefinedType(String)
+
+    /// An identifier used in a value position does not name any known declaration.
+    ///
+    /// Examples: `let x = unknown`, `unknown()`.
+    /// Note: type-position unknown names → [`TypeErrorKind::UndefinedType`].
+    UndefinedName {
+        /// The unresolved identifier.
+        name: String,
+    },
+
+    /// A name used in a type position does not refer to any known type.
+    ///
+    /// Examples: `let x: Unknown`, `struct Foo { field: NoSuchType }`.
+    UndefinedType {
+        /// The unresolved type name.
+        name: String,
+    },
     // 3c: TypeMismatch { expected: String, found: String },
     //     InvalidOperandTypes { op: String, lhs: String, rhs: String }
     // 3d: ArityMismatch { func: String, expected: usize, found: usize },

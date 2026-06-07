@@ -1,6 +1,8 @@
-//! Tests for [`ResolvedType`] and [`SymbolId`].
+//! Tests for [`ResolvedType`], [`SymbolId`], [`SymbolInfo`], and [`SymbolKind`].
 
-use super::{ResolvedType, SymbolId};
+use crate::lexer::token::Span;
+
+use super::{ResolvedType, SymbolId, SymbolInfo, SymbolKind};
 
 // ── ResolvedType construction ──────────────────────────────────────────────────
 
@@ -160,4 +162,83 @@ fn symbol_id_same_values_are_equal() {
 #[test]
 fn symbol_id_different_values_not_equal() {
     assert_ne!(SymbolId(1), SymbolId(2));
+}
+
+// ── SymbolInfo ─────────────────────────────────────────────────────────────────
+
+fn test_span() -> Span {
+    Span::at(1, 1, 0)
+}
+
+#[test]
+fn symbol_info_constructs_with_all_fields() {
+    let info = SymbolInfo {
+        name: "transfer".into(),
+        decl_span: test_span(),
+        kind: SymbolKind::Function,
+    };
+    assert_eq!(info.name, "transfer");
+    assert!(matches!(info.kind, SymbolKind::Function));
+}
+
+#[test]
+fn symbol_info_clones_equal() {
+    let info = SymbolInfo {
+        name: "owner".into(),
+        decl_span: test_span(),
+        kind: SymbolKind::StateField,
+    };
+    assert_eq!(info.clone(), info);
+}
+
+#[test]
+fn symbol_info_different_names_not_equal() {
+    let a = SymbolInfo {
+        name: "a".into(),
+        decl_span: test_span(),
+        kind: SymbolKind::Local,
+    };
+    let b = SymbolInfo {
+        name: "b".into(),
+        decl_span: test_span(),
+        kind: SymbolKind::Local,
+    };
+    assert_ne!(a, b);
+}
+
+// ── SymbolKind ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn symbol_kind_all_variants_construct() {
+    let _: Vec<SymbolKind> = vec![
+        SymbolKind::Function,
+        SymbolKind::Const,
+        SymbolKind::Immutable,
+        SymbolKind::StateField,
+        SymbolKind::Param,
+        SymbolKind::Local,
+        SymbolKind::SelfBinding,
+        SymbolKind::Contract,
+        SymbolKind::Struct,
+        SymbolKind::Enum,
+        SymbolKind::TypeAlias,
+        SymbolKind::Interface,
+        SymbolKind::Trait,
+        SymbolKind::Library,
+        SymbolKind::ErrorDecl,
+        SymbolKind::GenericParam,
+        SymbolKind::Imported,
+    ];
+}
+
+#[test]
+fn symbol_kind_clones_equal() {
+    let k = SymbolKind::Param;
+    assert_eq!(k.clone(), k);
+}
+
+#[test]
+fn symbol_kind_different_variants_not_equal() {
+    assert_ne!(SymbolKind::Function, SymbolKind::Local);
+    assert_ne!(SymbolKind::Struct, SymbolKind::Enum);
 }

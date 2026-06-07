@@ -51,15 +51,18 @@ use std::collections::BTreeMap;
 use crate::lexer::token::Span;
 use crate::parser::ast::Ast;
 
-use super::types::{ResolvedType, SymbolId};
+use super::types::{ResolvedType, SymbolId, SymbolInfo};
 
 /// The typed AST returned by [`crate::type_checker::check`].
 ///
 /// Wraps the original `Ast` and attaches type/resolution information
 /// as span-keyed side tables (see module-level documentation for rationale).
 ///
-/// Fully populated by subtask 3g; after 3a only `ast` is meaningful
-/// (the maps are empty).
+/// Build status per subtask:
+/// - **3a**: only `ast` populated; all maps empty.
+/// - **3b**: `resolutions` + `symbols` populated (name resolution complete).
+/// - **3c–3d**: `expr_types` populated (expression typing complete).
+/// - **3g**: fully populated — ready for the Step 4 safety analyzer.
 #[derive(Debug, Clone)]
 pub struct TypedAst {
     /// The original untyped AST from the parser.
@@ -80,6 +83,15 @@ pub struct TypedAst {
     ///
     /// Populated by name resolution (subtask 3b).
     pub resolutions: BTreeMap<Span, SymbolId>,
+
+    /// Symbol arena — metadata for every symbol declared in the program.
+    ///
+    /// Indexed by [`SymbolId`]: `symbol(id)` retrieves the [`SymbolInfo`]
+    /// for that ID.  `SymbolId(0)` is the `UNRESOLVED` sentinel and has
+    /// no corresponding entry.
+    ///
+    /// Populated by name resolution (subtask 3b).
+    pub symbols: Vec<SymbolInfo>,
 }
 
 impl TypedAst {
@@ -90,11 +102,13 @@ impl TypedAst {
         ast: Ast,
         expr_types: BTreeMap<Span, ResolvedType>,
         resolutions: BTreeMap<Span, SymbolId>,
+        symbols: Vec<SymbolInfo>,
     ) -> Self {
         Self {
             ast,
             expr_types,
             resolutions,
+            symbols,
         }
     }
 
@@ -115,14 +129,31 @@ impl TypedAst {
         self.resolutions.get(span).copied()
     }
 
-    /// Returns `true` if the type tables have been populated.
+    /// Look up the [`SymbolInfo`] for a [`SymbolId`].
     ///
-    /// Returns `false` after subtask 3a (skeleton pass — tables are empty).
-    /// Used in tests and assertions to distinguish the skeleton from a fully
-    /// checked result.
+    /// Returns `None` for [`SymbolId::UNRESOLVED`] or for IDs that do not
+    /// correspond to any entry in the symbol arena.
+    #[must_use]
+    pub fn symbol(&self, id: SymbolId) -> Option<&SymbolInfo> {
+        if id.is_unresolved() {
+            return None;
+        }
+        // SymbolId(n) is 1-based; symbols[n-1] is the entry.
+        self.symbols.get((id.0 as usize) - 1)
+    }
+
+    /// Returns `true` if expression types have been populated (subtask 3c+).
+    ///
+    /// Returns `false` after 3b (name resolution done, but typing not yet).
     #[must_use]
     pub fn is_fully_typed(&self) -> bool {
         !self.expr_types.is_empty()
+    }
+
+    /// Returns `true` if name resolution has been performed (subtask 3b+).
+    #[must_use]
+    pub fn has_name_resolution(&self) -> bool {
+        !self.symbols.is_empty()
     }
 }
 

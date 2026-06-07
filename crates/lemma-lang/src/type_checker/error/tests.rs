@@ -112,6 +112,7 @@ fn duplicate_declaration_kind_stores_name() {
     };
     match kind {
         TypeErrorKind::DuplicateDeclaration { name } => assert_eq!(name, "MyContract"),
+        other => panic!("expected DuplicateDeclaration, got: {other:?}"),
     }
 }
 
@@ -133,4 +134,78 @@ fn duplicate_declaration_different_names_are_not_equal() {
     let a = TypeErrorKind::DuplicateDeclaration { name: "X".into() };
     let b = TypeErrorKind::DuplicateDeclaration { name: "Y".into() };
     assert_ne!(a, b);
+}
+
+// ── UndefinedName ──────────────────────────────────────────────────────────────
+
+#[test]
+fn undefined_name_kind_stores_name() {
+    let kind = TypeErrorKind::UndefinedName { name: "foo".into() };
+    match &kind {
+        TypeErrorKind::UndefinedName { name } => assert_eq!(name, "foo"),
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn undefined_name_kind_clones_equal() {
+    let k = TypeErrorKind::UndefinedName { name: "bar".into() };
+    assert_eq!(k.clone(), k);
+}
+
+#[test]
+fn undefined_name_differs_from_duplicate_declaration() {
+    let a = TypeErrorKind::UndefinedName { name: "X".into() };
+    let b = TypeErrorKind::DuplicateDeclaration { name: "X".into() };
+    assert_ne!(a, b);
+}
+
+#[test]
+fn undefined_name_in_type_error_displays_name() {
+    let err = TypeError {
+        kind: TypeErrorKind::UndefinedName {
+            name: "missing".into(),
+        },
+        span: test_span(),
+        message: "undefined name: 'missing'".into(),
+    };
+    assert!(err.to_string().contains("missing"), "display: {}", err);
+}
+
+// ── UndefinedType ──────────────────────────────────────────────────────────────
+
+#[test]
+fn undefined_type_kind_stores_name() {
+    let kind = TypeErrorKind::UndefinedType {
+        name: "NoSuchType".into(),
+    };
+    match &kind {
+        TypeErrorKind::UndefinedType { name } => assert_eq!(name, "NoSuchType"),
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn undefined_type_kind_clones_equal() {
+    let k = TypeErrorKind::UndefinedType { name: "T".into() };
+    assert_eq!(k.clone(), k);
+}
+
+#[test]
+fn undefined_type_differs_from_undefined_name() {
+    let a = TypeErrorKind::UndefinedType { name: "X".into() };
+    let b = TypeErrorKind::UndefinedName { name: "X".into() };
+    assert_ne!(a, b);
+}
+
+#[test]
+fn undefined_type_in_type_error_displays_type_name() {
+    let err = TypeError {
+        kind: TypeErrorKind::UndefinedType {
+            name: "BadType".into(),
+        },
+        span: test_span(),
+        message: "undefined type: 'BadType'".into(),
+    };
+    assert!(err.to_string().contains("BadType"), "display: {}", err);
 }

@@ -37,6 +37,7 @@
 //! - 3h: integration + docs closeout
 
 pub mod error;
+pub(crate) mod resolver;
 pub mod typed_ast;
 pub mod types;
 
@@ -95,10 +96,13 @@ struct Checker;
 
 impl Checker {
     fn check_program(&mut self, ast: Ast) -> Result<TypedAst, LangError> {
-        // 3a: program-level invariants only.
-        // 3b–3g will add passes here (name resolution, expr typing, etc.).
+        // Pass 1 (3a): reject duplicate top-level declaration names.
         self.check_no_duplicate_top_level_names(&ast.items)?;
-        Ok(TypedAst::new(ast, BTreeMap::new(), BTreeMap::new()))
+
+        // Pass 2 (3b): name resolution — populates resolutions + symbols.
+        let (symbols, resolutions) = resolver::resolve(&ast)?;
+
+        Ok(TypedAst::new(ast, BTreeMap::new(), resolutions, symbols))
     }
 
     /// Verify that no two top-level items share a declaration name.

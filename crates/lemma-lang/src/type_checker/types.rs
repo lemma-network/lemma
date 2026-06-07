@@ -187,6 +187,74 @@ impl SymbolId {
     }
 }
 
+// ─── SymbolInfo ───────────────────────────────────────────────────────────────
+
+/// Metadata for a resolved symbol — stored in the symbol arena
+/// [`crate::type_checker::typed_ast::TypedAst::symbols`].
+///
+/// Indexed by [`SymbolId`]: `TypedAst::symbol(id)` returns the [`SymbolInfo`]
+/// for that ID.  Downstream stages (safety analyzer, codegen) look up symbol
+/// metadata here after receiving a [`SymbolId`] from `TypedAst::resolutions`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolInfo {
+    /// The declared name of this symbol.
+    pub name: String,
+    /// Source location of the declaration site.
+    pub decl_span: crate::lexer::token::Span,
+    /// The kind of declaration this symbol represents.
+    pub kind: SymbolKind,
+}
+
+/// The kind of declaration a [`SymbolInfo`] describes.
+///
+/// Used by downstream passes to distinguish function symbols from type symbols,
+/// mutable locals from immutable params, etc.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolKind {
+    // ── Value-namespace kinds ─────────────────────────────────────────────
+    /// A top-level or contract-member `fn` declaration.
+    Function,
+    /// A `const NAME: T = expr` declaration.
+    Const,
+    /// An `immutable NAME: T` declaration (set once in `init`).
+    Immutable,
+    /// A field inside a `state { }` block.
+    StateField,
+    /// A function parameter.
+    Param,
+    /// A local variable introduced by `let`, `for`, `match`, or `catch`.
+    Local,
+    /// The synthetic `self` binding inside a method body.
+    SelfBinding,
+
+    // ── Type-namespace kinds ──────────────────────────────────────────────
+    /// A `contract Foo { }` or `token Foo extends T { }` declaration.
+    Contract,
+    /// A `struct Foo { }` declaration.
+    Struct,
+    /// An `enum Foo { }` declaration.
+    Enum,
+    /// A `type Alias = T` declaration.
+    TypeAlias,
+    /// An `interface Foo { }` declaration.
+    Interface,
+    /// A `trait Foo { }` declaration.
+    Trait,
+    /// A `library Foo { }` declaration.
+    Library,
+    /// An `error Foo { }` declaration.
+    ErrorDecl,
+    /// A generic type parameter (e.g. `T` in `fn foo<T>(…)`).
+    GenericParam,
+
+    // ── Import ────────────────────────────────────────────────────────────
+    /// A name registered by an `import { X } from "path"` statement.
+    /// Treated as opaque in 3b; resolved to concrete kinds when the standard
+    /// library is available (P3·Step 8).
+    Imported,
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
