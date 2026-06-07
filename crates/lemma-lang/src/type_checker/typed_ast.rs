@@ -100,6 +100,15 @@ pub struct TypedAst {
     ///
     /// Populated by the resolver and inference passes (subtasks 3b/3d+).
     pub sigs: BTreeMap<SymbolId, SymbolSig>,
+
+    /// Maps struct/contract/enum [`SymbolId`] → declared interface + trait names.
+    ///
+    /// Populated by the resolver (3f) from `Contract.implements` + `Contract.uses`.
+    /// Structs and enums get an empty vec (they don't implement interfaces in Lem).
+    ///
+    /// Used by 3f trait-bound checking (name-level only; structural checking
+    /// deferred to Step 4 — P3-checker-8).
+    pub struct_traits: BTreeMap<SymbolId, Vec<String>>,
 }
 
 impl TypedAst {
@@ -112,6 +121,7 @@ impl TypedAst {
         resolutions: BTreeMap<Span, SymbolId>,
         symbols: Vec<SymbolInfo>,
         sigs: BTreeMap<SymbolId, SymbolSig>,
+        struct_traits: BTreeMap<SymbolId, Vec<String>>,
     ) -> Self {
         Self {
             ast,
@@ -119,7 +129,17 @@ impl TypedAst {
             resolutions,
             symbols,
             sigs,
+            struct_traits,
         }
+    }
+
+    /// Look up the declared interface + trait names for a struct/contract/enum.
+    ///
+    /// Returns `None` if the symbol has no entry (e.g. primitives, generics).
+    /// Returns `Some(&[])` for structs and enums (which have no traits in Lem).
+    #[must_use]
+    pub fn traits_of(&self, id: SymbolId) -> Option<&[String]> {
+        self.struct_traits.get(&id).map(Vec::as_slice)
     }
 
     /// Look up the resolved type for an expression by its source span.

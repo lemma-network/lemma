@@ -381,6 +381,15 @@ pub struct FnSig {
     pub params: Vec<(String, ResolvedType, bool)>,
     /// Return type (`Unit` for functions with no explicit return-type annotation).
     pub ret: ResolvedType,
+    /// Generic type parameters: `(param_name, optional_bound_trait_SymbolId)`.
+    ///
+    /// Populated in 3f from `Function.generic_params`.  The bound `SymbolId`
+    /// points to the trait/interface declaration in the symbol arena; `None`
+    /// means the parameter is unbounded (e.g. `<T>` with no `: Trait`).
+    ///
+    /// Used by `infer_call` to build the substitution map `{T → concrete_type}`
+    /// and to check trait bounds at call sites.
+    pub generic_params: Vec<(String, Option<SymbolId>)>,
 }
 
 /// Signature of a struct — its field names and types in declaration order.
@@ -396,6 +405,12 @@ pub struct StructSig {
     /// Methods: `(name, method_symbol_id)`.
     /// The method's full `FnSig` lives at `sigs[method_symbol_id]`.
     pub methods: Vec<(String, SymbolId)>,
+    /// Generic type parameter names (e.g. `["T", "U"]` for `struct Pair<T, U>`).
+    ///
+    /// Populated in 3f from `Struct.generic_params`.  Bounds are checked via
+    /// the `struct_traits` side-table in `TypedAst` (name-level only in 3f;
+    /// structural checking deferred to Step 4 — P3-checker-8).
+    pub generic_params: Vec<String>,
 }
 
 /// Signature of an enum — its variant names and field types.

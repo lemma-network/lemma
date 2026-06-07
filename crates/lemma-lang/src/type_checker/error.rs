@@ -179,8 +179,31 @@ pub enum TypeErrorKind {
         /// The field name that was omitted.
         field: String,
     },
-    // 3f: TraitBoundViolation { param: String, bound: String, found: String },
-    //     UnresolvedGeneric(String)
+
+    /// A type argument does not satisfy a generic parameter's trait bound.
+    ///
+    /// Example: `sort<T: Comparable>(arr: Array<T>)` called with `T = bool`
+    /// where `bool` does not implement `Comparable`.
+    TraitBoundViolation {
+        /// The generic parameter name (e.g. `"T"`).
+        param: String,
+        /// The required trait name (e.g. `"Comparable"`).
+        bound: String,
+        /// The concrete type that does not satisfy the bound (human-readable).
+        found: String,
+    },
+
+    /// Wrong number of type arguments for a generic type or function.
+    ///
+    /// Example: `new Pair<u128>()` when `Pair<A, B>` requires two type args.
+    WrongTypeArgCount {
+        /// The type or function name.
+        name: String,
+        /// The expected number of type arguments.
+        expected: usize,
+        /// The number of type arguments actually provided.
+        found: usize,
+    },
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

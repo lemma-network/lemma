@@ -51,27 +51,30 @@ use super::types::{
 
 /// Output of the name-resolution pass.
 ///
-/// `(symbols, resolutions, sigs)`:
-/// - `symbols`     — the symbol arena (`SymbolId(n)` → `symbols[n-1]`)
-/// - `resolutions` — span → SymbolId map for every resolved identifier
-/// - `sigs`        — structured signatures for functions, structs, and enums
+/// `(symbols, resolutions, sigs, struct_traits)`:
+/// - `symbols`       — the symbol arena (`SymbolId(n)` → `symbols[n-1]`)
+/// - `resolutions`   — span → SymbolId map for every resolved identifier
+/// - `sigs`          — structured signatures for functions, structs, and enums
+/// - `struct_traits` — struct/contract SymbolId → declared interface+trait names
 pub(super) type ResolveOutput = (
     Vec<SymbolInfo>,
     BTreeMap<Span, SymbolId>,
     BTreeMap<SymbolId, SymbolSig>,
+    BTreeMap<SymbolId, Vec<String>>,
 );
 
 /// Run name resolution over a parsed AST.
 ///
-/// Returns the **symbol arena**, **resolution map**, and **symbol signatures**
-/// on success, or the first [`LangError::Type`] encountered on failure.
+/// Returns the **symbol arena**, **resolution map**, **symbol signatures**,
+/// and **struct_traits side-table** on success, or the first
+/// [`LangError::Type`] encountered on failure.
 pub(super) fn resolve(ast: &Ast) -> Result<ResolveOutput, LangError> {
     let mut r = Resolver::new();
     r.build_global_scope(ast)?;
     for item in &ast.items {
         r.resolve_item(item)?;
     }
-    Ok((r.symbols, r.resolutions, r.sigs))
+    Ok((r.symbols, r.resolutions, r.sigs, r.struct_traits))
 }
 
 // ─── Resolver internals ───────────────────────────────────────────────────────
@@ -89,6 +92,15 @@ struct Resolver {
     type_scopes: Vec<BTreeMap<String, SymbolId>>,
     /// Whether we are currently inside a method body (enabling `self`).
     in_method: bool,
+    /// Maps struct/contract/enum SymbolId → declared interface + trait names.
+    ///
+    /// Populated during `build_global_scope` for `Item::Contract` (which has
+    /// `implements` + `uses` fields).  Structs and enums get an empty vec
+    /// (they don't implement interfaces in Lem — only contracts do).
+    ///
+    /// Used by 3f trait-bound checking (name-level only; structural checking
+    /// deferred to Step 4 — P3-checker-8).
+    struct_traits: BTreeMap<SymbolId, Vec<String>>,
 }
 
 impl Resolver {
@@ -100,6 +112,7 @@ impl Resolver {
             value_scopes: Vec::new(),
             type_scopes: Vec::new(),
             in_method: false,
+            struct_traits: BTreeMap::new(),
         }
     }
 
@@ -384,10 +397,16 @@ impl Resolver {
                 Item::Contract(c) => {
                     let id = self.alloc(&c.name, c.span, SymbolKind::Contract);
                     self.define_type_or_err(&c.name, id, c.span)?;
+                    // Record implements + uses for 3f trait-bound checking.
+                    let mut traits = c.implements.clone();
+                    traits.extend(c.uses.iter().cloned());
+                    self.struct_traits.insert(id, traits);
                 }
                 Item::Token_(t) => {
                     let id = self.alloc(&t.name, t.span, SymbolKind::Contract);
                     self.define_type_or_err(&t.name, id, t.span)?;
+                    // Tokens have no implements/uses in the AST — empty vec.
+                    self.struct_traits.insert(id, Vec::new());
                 }
                 Item::Interface(i) => {
                     let id = self.alloc(&i.name, i.span, SymbolKind::Interface);
@@ -404,10 +423,14 @@ impl Resolver {
                 Item::Struct(s) => {
                     let id = self.alloc(&s.name, s.span, SymbolKind::Struct);
                     self.define_type_or_err(&s.name, id, s.span)?;
+                    // Structs don't implement interfaces in Lem — empty vec.
+                    self.struct_traits.insert(id, Vec::new());
                 }
                 Item::Enum(e) => {
                     let id = self.alloc(&e.name, e.span, SymbolKind::Enum);
                     self.define_type_or_err(&e.name, id, e.span)?;
+                    // Enums don't implement interfaces in Lem — empty vec.
+                    self.struct_traits.insert(id, Vec::new());
                 }
                 Item::ErrorDecl(e) => {
                     let id = self.alloc(&e.name, e.span, SymbolKind::ErrorDecl);
@@ -500,11 +523,14 @@ impl Resolver {
                     })
                     .collect();
                 if let Some(struct_id) = self.lookup_type(&s.name) {
+                    let generic_params: Vec<String> =
+                        s.generic_params.iter().map(|gp| gp.name.clone()).collect();
                     self.sigs.insert(
                         struct_id,
                         SymbolSig::Struct(StructSig {
                             fields,
                             methods: Vec::new(), // TODO(3g): populate struct method SymbolIds
+                            generic_params,
                         }),
                     );
                 }
@@ -719,11 +745,14 @@ impl Resolver {
                     })
                     .collect();
                 if let Some(struct_id) = self.lookup_type(&s.name) {
+                    let generic_params: Vec<String> =
+                        s.generic_params.iter().map(|gp| gp.name.clone()).collect();
                     self.sigs.insert(
                         struct_id,
                         SymbolSig::Struct(StructSig {
                             fields,
                             methods: Vec::new(), // TODO(3g): populate struct method SymbolIds
+                            generic_params,
                         }),
                     );
                 }
@@ -772,6 +801,25 @@ impl Resolver {
             param_sigs.iter().map(|(_, t, _)| t.clone()).collect(),
             Box::new(ret_ty.clone()),
         );
+
+        // Build generic_params list: (param_name, optional_bound_trait_SymbolId).
+        // The bound is a type reference (e.g. `Comparable`) — look it up in the
+        // type scope (which now includes the generic params themselves).
+        let generic_params: Vec<(String, Option<SymbolId>)> = f
+            .generic_params
+            .iter()
+            .map(|gp| {
+                let bound_id = gp.bound.as_ref().and_then(|b| {
+                    if let Type::Named(name, _) = b {
+                        self.lookup_type(name)
+                    } else {
+                        None
+                    }
+                });
+                (gp.name.clone(), bound_id)
+            })
+            .collect();
+
         // Look up this function's SymbolId in the outer value scope and update it.
         if let Some(fn_id) = self.lookup_value(&f.name) {
             self.set_sym_ty(fn_id, fn_ty);
@@ -780,6 +828,7 @@ impl Resolver {
                 SymbolSig::Function(FnSig {
                     params: param_sigs,
                     ret: ret_ty,
+                    generic_params,
                 }),
             );
         }

@@ -53,6 +53,9 @@ pub(super) struct Inferer<'a> {
     /// Flat global-type namespace: type-declaration name → SymbolId.
     /// Used by `lower_cast_target` to resolve `Type::Named` in cast targets.
     global_types: &'a BTreeMap<String, SymbolId>,
+    /// Maps struct/contract/enum SymbolId → declared interface + trait names.
+    /// Used by 3f trait-bound checking (name-level only; P3-checker-8 deferred).
+    struct_traits: &'a BTreeMap<SymbolId, Vec<String>>,
     expr_types: &'a mut BTreeMap<Span, ResolvedType>,
     /// Return type of the innermost enclosing function, set in `walk_function`.
     ///
@@ -67,6 +70,7 @@ impl<'a> Inferer<'a> {
         resolutions: &'a BTreeMap<Span, SymbolId>,
         sigs: &'a BTreeMap<SymbolId, SymbolSig>,
         global_types: &'a BTreeMap<String, SymbolId>,
+        struct_traits: &'a BTreeMap<SymbolId, Vec<String>>,
         expr_types: &'a mut BTreeMap<Span, ResolvedType>,
     ) -> Self {
         Self {
@@ -74,6 +78,7 @@ impl<'a> Inferer<'a> {
             resolutions,
             sigs,
             global_types,
+            struct_traits,
             expr_types,
             current_fn_ret: None,
         }
@@ -420,7 +425,13 @@ impl<'a> Inferer<'a> {
                 {
                     return Ok(callee_ty);
                 }
-                self.infer_call(&callee_ty, args, &arg_types, *span)
+                // Extract callee_fn_id for generic substitution (3f):
+                // when the callee is a bare Ident, look up its SymbolId.
+                let callee_fn_id = match callee.as_ref() {
+                    Expr::Ident(_, ident_span) => self.resolutions.get(ident_span).copied(),
+                    _ => None,
+                };
+                self.infer_call(&callee_ty, callee_fn_id, args, &arg_types, *span)
             }
             Expr::Member(base, name, span) => {
                 let base_ty = self.infer_expr(base)?;
@@ -453,6 +464,7 @@ impl<'a> Inferer<'a> {
             Expr::New {
                 ty: type_name,
                 args,
+                span,
                 ..
             } => {
                 for arg in args {
@@ -464,6 +476,19 @@ impl<'a> Inferer<'a> {
                 }
                 // Return the Named type for the constructed value.
                 if let Some(&type_id) = self.global_types.get(type_name.as_str()) {
+                    // 3f: validate type argument count for generic structs.
+                    if let Some(SymbolSig::Struct(sig)) = self.sigs.get(&type_id) {
+                        let expected = sig.generic_params.len();
+                        // `new Foo(args)` has no explicit type args in the AST —
+                        // type args are inferred from constructor args (3f forward-only).
+                        // `WrongTypeArgCount` is only emitted when explicit type args
+                        // are provided and the count mismatches.  For now, the AST
+                        // `Expr::New` carries no explicit type args (the `ty` field is
+                        // just the name string), so we skip the count check here.
+                        // TODO(3g): when the parser threads explicit type args through
+                        // `Expr::New`, add the count check here.
+                        let _ = (expected, span); // suppress unused warnings
+                    }
                     Ok(ResolvedType::Named(type_id, vec![]))
                 } else {
                     Ok(ResolvedType::Unknown) // Unresolved (import, deferred)
@@ -471,25 +496,31 @@ impl<'a> Inferer<'a> {
             }
 
             // ── 3e: now implemented (if/match/assign/try) ─────────────────────────────
-            // ── 3f: deferred ──────────────────────────────────────────────────────────
-            // Lambda: fn(…) → … requires inference + generics (3f).
+            // ── 3f: Lambda Fn type inference (P3-checker-9) ───────────────────────────
             Expr::Lambda { params, body, .. } => {
+                // Walk param defaults first (side effects — record their types).
                 for p in params {
                     if let Some(d) = &p.default_expr {
                         self.infer_expr(d)?;
                     }
                 }
-                match body {
-                    LambdaBody::Expr(e) => {
-                        self.infer_expr(e)?;
-                    }
-                    LambdaBody::Block(stmts) => {
-                        for s in stmts {
-                            self.walk_stmt(s)?;
+                // Infer param types: annotated → lower; `_` placeholder → Unknown.
+                let param_types: Vec<ResolvedType> = params
+                    .iter()
+                    .map(|p| {
+                        match &p.ty {
+                            // `_` is the parser's placeholder for unannotated lambda params.
+                            Type::Named(n, _) if n == "_" => ResolvedType::Unknown,
+                            ty => self.lower_cast_target(ty),
                         }
-                    }
-                }
-                Ok(ResolvedType::Unknown) // TODO(3f): infer lambda Fn type
+                    })
+                    .collect();
+                // Infer return type from body.
+                let ret_type = match body {
+                    LambdaBody::Expr(e) => self.infer_expr(e)?,
+                    LambdaBody::Block(stmts) => self.infer_block_type(stmts)?,
+                };
+                Ok(ResolvedType::Fn(param_types, Box::new(ret_type)))
             }
             Expr::Match_(scrutinee, arms, span) => {
                 self.infer_expr(scrutinee)?;
@@ -1083,79 +1114,39 @@ impl<'a> Inferer<'a> {
 
     // ── 3d: cast, call, member, index, array, struct helpers ─────────────
 
-    /// Lower a cast target `Type` to `ResolvedType`.
+    /// Lower a cast target [`Type`] to a [`ResolvedType`].
     ///
-    /// Uses `global_types` for Named types; handles all primitives directly.
+    /// Uses `global_types` for Named types; handles all primitives and compound
+    /// types via the shared [`super::lower::lower_type_with`] helper (P3-checker-4).
+    ///
     /// The Inferer does not have the full resolver scope stack, so only
     /// globally-registered type names resolve; others return `Unknown`
-    /// (will be refined in 3f when full scope info is available).
-    /// Lower a cast target `Type` to `ResolvedType`.
+    /// (imports and forward-references — deferred to 3g, P3-checker-3).
     ///
-    /// Uses `global_types` for Named types; handles all primitives directly.
-    /// The Inferer does not have the full resolver scope stack, so only
-    /// globally-registered type names resolve; others return `Unknown`
-    /// (will be refined in 3f when full scope info is available).
-    ///
-    /// # DRY note
-    ///
-    /// The primitive and compound arms below duplicate `Resolver::lower_type`.
-    /// The two differ only in scope source (`self.lookup_type` vs `global_types`),
-    /// making a shared generic helper worthwhile once 3f adds a third caller.
-    ///
-    /// TODO(3f): extract `lower_type_with<F: Fn(&str, Vec<ResolvedType>) → ResolvedType>`
-    /// so all callers share the primitive/compound mapping and inject only the
-    /// name-resolution strategy. Tracked in living-notes Technical Debt as
-    /// **P3-checker-4**. Catch-all `_ => Unknown` below silently skips new
-    /// `Type` variants — the 3f extraction will make this exhaustive.
+    /// Compound cast targets (`x as Array<u8>`, `x as Option<u128>`) are now
+    /// fully handled — the previous `_ => Unknown` catch-all is gone (P3-checker-11).
     fn lower_cast_target(&self, ty: &crate::parser::ast::Type) -> ResolvedType {
-        use crate::parser::ast::Type as T;
-        match ty {
-            T::U8 => ResolvedType::U8,
-            T::U16 => ResolvedType::U16,
-            T::U32 => ResolvedType::U32,
-            T::U64 => ResolvedType::U64,
-            T::U128 => ResolvedType::U128,
-            T::U256 => ResolvedType::U256,
-            T::I8 => ResolvedType::I8,
-            T::I16 => ResolvedType::I16,
-            T::I32 => ResolvedType::I32,
-            T::I64 => ResolvedType::I64,
-            T::I128 => ResolvedType::I128,
-            T::I256 => ResolvedType::I256,
-            T::Bool => ResolvedType::Bool,
-            T::StringTy => ResolvedType::StringTy,
-            T::CharTy => ResolvedType::CharTy,
-            T::AddressTy => ResolvedType::AddressTy,
-            T::HashTy => ResolvedType::HashTy,
-            T::Bytes => ResolvedType::Bytes,
-            T::BytesN(n) => ResolvedType::BytesN(*n),
-            T::Decimal(n) => ResolvedType::Decimal(*n),
-            T::Named(name, args) => {
-                if name == "_" {
-                    return ResolvedType::Unknown;
-                }
-                let lowered_args: Vec<_> = args.iter().map(|a| self.lower_cast_target(a)).collect();
-                match self.global_types.get(name.as_str()) {
-                    Some(&id) => {
-                        // Generic params keep their name for 3f instantiation.
-                        let is_generic = self
-                            .symbols
-                            .get((id.0 as usize).saturating_sub(1))
-                            .is_some_and(|s| s.kind == SymbolKind::GenericParam);
-                        if is_generic {
-                            ResolvedType::TypeParam(name.clone())
-                        } else {
-                            ResolvedType::Named(id, lowered_args)
-                        }
+        // Capture `self` for the closures below.
+        let recurse = |t: &crate::parser::ast::Type| self.lower_cast_target(t);
+        let resolve_named = |name: &str, lowered_args: Vec<ResolvedType>| {
+            match self.global_types.get(name) {
+                Some(&id) => {
+                    // Generic params keep their name for 3f instantiation.
+                    let is_generic = self
+                        .symbols
+                        .get((id.0 as usize).saturating_sub(1))
+                        .is_some_and(|s| s.kind == SymbolKind::GenericParam);
+                    if is_generic {
+                        ResolvedType::TypeParam(name.to_owned())
+                    } else {
+                        ResolvedType::Named(id, lowered_args)
                     }
-                    // Not in global type namespace (import or deferred) → Unknown.
-                    None => ResolvedType::Unknown,
                 }
+                // Not in global type namespace (import or deferred) → Unknown.
+                None => ResolvedType::Unknown,
             }
-            // Compound types in cast targets are unusual; return Unknown for 3d.
-            // 3f: handle compound cast targets (Array<T> as Array<U>, etc.)
-            _ => ResolvedType::Unknown,
-        }
+        };
+        super::lower::lower_type_with(ty, &recurse, &resolve_named)
     }
 
     /// Type-check a cast expression `from_ty as to_ty`.
@@ -1224,13 +1215,16 @@ impl<'a> Inferer<'a> {
 
     /// Type-check a function call.
     ///
-    /// Checks arity (overshoot only for 3d; undershoot ok due to defaults).
-    /// Full per-param type checking is deferred to 3e.
+    /// Checks arity (overshoot only; undershoot ok due to defaults).
+    /// For generic functions, infers type arguments from the call-site arg types
+    /// and substitutes them into the return type (3f).
+    /// Checks trait bounds on inferred type arguments (3f name-level check).
     fn infer_call(
         &self,
         callee_ty: &ResolvedType,
+        callee_fn_id: Option<SymbolId>,
         args: &[CallArg],
-        _arg_types: &[ResolvedType],
+        arg_types: &[ResolvedType],
         span: Span,
     ) -> Result<ResolvedType, LangError> {
         match callee_ty {
@@ -1255,7 +1249,83 @@ impl<'a> Inferer<'a> {
                         ),
                     ));
                 }
-                Ok(*ret.clone())
+
+                // Generic substitution (3f): if the callee has generic params,
+                // infer the substitution map from the call-site arg types.
+                let generic_params: &[(String, Option<SymbolId>)] =
+                    if let Some(fn_id) = callee_fn_id {
+                        if let Some(SymbolSig::Function(sig)) = self.sigs.get(&fn_id) {
+                            &sig.generic_params // borrow from sigs — lifetime ok
+                        } else {
+                            &[]
+                        }
+                    } else {
+                        &[]
+                    };
+
+                // We need to own the generic_params slice for the duration of this call.
+                // Clone it to avoid lifetime issues with the `sigs` borrow.
+                let generic_params_owned: Vec<(String, Option<SymbolId>)> = generic_params.to_vec();
+
+                let subst = if generic_params_owned.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    infer_type_args(param_types, arg_types, &generic_params_owned)
+                };
+
+                // Trait-bound checking (3f name-level).
+                if !subst.is_empty() {
+                    self.check_trait_bounds(&subst, &generic_params_owned, span)?;
+                }
+
+                // Per-arg type check against substituted param types.
+                // Only check positional args (named args deferred to 3g).
+                let positional_args: Vec<&ResolvedType> = arg_types
+                    .iter()
+                    .zip(args.iter())
+                    .filter(|(_, a)| matches!(a, CallArg::Positional(_)))
+                    .map(|(t, _)| t)
+                    .collect();
+                for (i, (param_ty, arg_ty)) in
+                    param_types.iter().zip(positional_args.iter()).enumerate()
+                {
+                    let concrete_param = if subst.is_empty() {
+                        param_ty.clone()
+                    } else {
+                        substitute(param_ty, &subst)
+                    };
+                    match types_compatible(&concrete_param, arg_ty) {
+                        TypeCompatibility::Equal | TypeCompatibility::CoercesTo(_) => {}
+                        TypeCompatibility::Incompatible => {
+                            // Only error if both sides are concrete (not Unknown).
+                            if concrete_param != ResolvedType::Unknown
+                                && **arg_ty != ResolvedType::Unknown
+                            {
+                                return Err(type_err(
+                                    TypeErrorKind::TypeMismatch {
+                                        expected: concrete_param.display_name(),
+                                        found: arg_ty.display_name(),
+                                    },
+                                    span,
+                                    format!(
+                                        "argument {} type mismatch: expected `{}`, got `{}`",
+                                        i + 1,
+                                        concrete_param.display_name(),
+                                        arg_ty.display_name()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Apply substitution to return type.
+                let concrete_ret = if subst.is_empty() {
+                    *ret.clone()
+                } else {
+                    substitute(ret, &subst)
+                };
+                Ok(concrete_ret)
             }
             ResolvedType::Unknown => Ok(ResolvedType::Unknown),
             other => Err(type_err(
@@ -1266,6 +1336,85 @@ impl<'a> Inferer<'a> {
                 format!("type `{}` is not callable", other.display_name()),
             )),
         }
+    }
+
+    /// Check that all inferred type arguments satisfy their trait bounds.
+    ///
+    /// For each `(param_name, Some(bound_trait_id))` in `generic_params`:
+    /// - If the concrete type is `Named(struct_id, _)`: check `struct_traits`
+    ///   contains the bound trait name.
+    /// - If the concrete type is a primitive: no traits → bound violation.
+    /// - If the concrete type is `Unknown`: skip (cannot prove violation).
+    ///
+    /// This is a **name-level** check only (3f).  Structural bound checking
+    /// (verifying the type actually implements the required methods) is deferred
+    /// to Step 4 — P3-checker-8.
+    fn check_trait_bounds(
+        &self,
+        subst: &BTreeMap<String, ResolvedType>,
+        generic_params: &[(String, Option<SymbolId>)],
+        span: Span,
+    ) -> Result<(), LangError> {
+        for (param_name, bound_id_opt) in generic_params {
+            let Some(bound_id) = bound_id_opt else {
+                continue; // Unbounded generic param — no check needed.
+            };
+            let Some(concrete) = subst.get(param_name) else {
+                continue; // Not inferred — skip.
+            };
+            if *concrete == ResolvedType::Unknown {
+                continue; // Cannot prove violation for Unknown.
+            }
+
+            // Get the bound trait name for the error message.
+            let bound_name = self
+                .symbols
+                .get((bound_id.0 as usize).saturating_sub(1))
+                .map(|s| s.name.as_str())
+                .unwrap_or("<unknown>");
+
+            match concrete {
+                ResolvedType::Named(struct_id, _) => {
+                    // Check if the struct/contract declares this trait.
+                    let satisfies = self
+                        .struct_traits
+                        .get(struct_id)
+                        .is_some_and(|traits| traits.iter().any(|t| t == bound_name));
+                    if !satisfies {
+                        return Err(type_err(
+                            TypeErrorKind::TraitBoundViolation {
+                                param: param_name.clone(),
+                                bound: bound_name.to_owned(),
+                                found: concrete.display_name(),
+                            },
+                            span,
+                            format!(
+                                "type argument `{}` for `{param_name}` does not implement \
+                                 trait `{bound_name}`",
+                                concrete.display_name()
+                            ),
+                        ));
+                    }
+                }
+                // Primitives have no traits — always a violation.
+                _ => {
+                    return Err(type_err(
+                        TypeErrorKind::TraitBoundViolation {
+                            param: param_name.clone(),
+                            bound: bound_name.to_owned(),
+                            found: concrete.display_name(),
+                        },
+                        span,
+                        format!(
+                            "type argument `{}` for `{param_name}` does not implement \
+                             trait `{bound_name}` (primitive types have no traits)",
+                            concrete.display_name()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Type-check a member access `base.name`.
@@ -1533,9 +1682,64 @@ impl<'a> Inferer<'a> {
                 }
             }
         }
-        // For destructuring patterns: sub-expression types are already recorded
-        // by infer_expr above.
-        // TODO(3f): back-fill destructuring pattern binding types.
+        // ── P3-checker-10: destructuring pattern back-fill ────────────────
+        // For tuple and struct patterns, back-fill each bound identifier's type
+        // from the RHS type.  If the RHS is Unknown or patterns don't align,
+        // skip silently (leave bindings Unknown — no error).
+        match pattern {
+            Pattern::Tuple(pats, _) => {
+                if let ResolvedType::Tuple(elem_tys) = &rhs_ty {
+                    for (pat, elem_ty) in pats.iter().zip(elem_tys.iter()) {
+                        if let Pattern::Ident(_, bspan) = pat {
+                            if let Some(info) = self
+                                .symbols
+                                .iter_mut()
+                                .find(|s| s.kind == SymbolKind::Local && s.decl_span == *bspan)
+                            {
+                                if info.ty == ResolvedType::Unknown {
+                                    info.ty = elem_ty.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+                // rhs_ty Unknown or non-Tuple → skip (no error, bindings stay Unknown).
+            }
+            Pattern::Struct_ { name, fields, .. } => {
+                if let Some(&struct_id) = self.global_types.get(name.as_str()) {
+                    // Clone the field info we need to avoid borrow conflicts with
+                    // `self.symbols` (which we mutate below).
+                    let field_types: Vec<(String, ResolvedType)> =
+                        if let Some(SymbolSig::Struct(sig)) = self.sigs.get(&struct_id) {
+                            sig.fields
+                                .iter()
+                                .map(|(n, t, _)| (n.clone(), t.clone()))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                    for (field_name, pat) in fields {
+                        if let Pattern::Ident(_, bspan) = pat {
+                            if let Some((_, ft)) = field_types.iter().find(|(n, _)| n == field_name)
+                            {
+                                if let Some(info) = self
+                                    .symbols
+                                    .iter_mut()
+                                    .find(|s| s.kind == SymbolKind::Local && s.decl_span == *bspan)
+                                {
+                                    if info.ty == ResolvedType::Unknown {
+                                        info.ty = ft.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Other patterns (Wildcard, Literal, EnumVariant, Rest, Ident already
+            // handled above) — no additional back-fill needed.
+            _ => {}
+        }
         Ok(())
     }
 
@@ -1904,6 +2108,191 @@ fn int_suffix_type(suffix: &str) -> ResolvedType {
 
 // Span extraction is handled by the canonical `crate::parser::expr_span`
 // (re-exported from `parser/mod.rs`).  No local duplicate needed.
+
+// ─── P3-checker-6: TypeCompatibility ─────────────────────────────────────────
+
+/// Result of comparing two types for compatibility.
+///
+/// Used by `types_compatible` to unify the IntLiteral-coercion + TypeMismatch
+/// logic that was previously repeated across 5 call sites (P3-checker-6).
+///
+/// Callers map `Incompatible` to their specific error variant and keep their
+/// own `expr_types.insert` calls (avoiding borrow-checker issues with `&mut self`
+/// helpers that also write to `expr_types`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TypeCompatibility {
+    /// The types are equal (or both Unknown).
+    Equal,
+    /// `found` is `IntLiteral` and `expected` is a concrete integer — coercion
+    /// is valid.  The inner value is the concrete type to coerce to.
+    CoercesTo(ResolvedType),
+    /// The types are incompatible — caller should emit a type error.
+    Incompatible,
+}
+
+/// Pure type-compatibility check (no `&mut self` — no side effects).
+///
+/// Returns:
+/// - `Equal`       — types match (or either is Unknown → skip check).
+/// - `CoercesTo(T)`— `found` is `IntLiteral` and `expected` is a concrete int.
+/// - `Incompatible`— types differ and no coercion applies.
+///
+/// Callers keep their own `expr_types.insert` and error-variant construction.
+pub(super) fn types_compatible(expected: &ResolvedType, found: &ResolvedType) -> TypeCompatibility {
+    // Unknown on either side → cannot prove incompatibility.
+    if *expected == ResolvedType::Unknown || *found == ResolvedType::Unknown {
+        return TypeCompatibility::Equal;
+    }
+    if expected == found {
+        return TypeCompatibility::Equal;
+    }
+    // IntLiteral coerces to any concrete integer type.
+    if found.is_int_literal() && expected.is_integer() {
+        return TypeCompatibility::CoercesTo(expected.clone());
+    }
+    TypeCompatibility::Incompatible
+}
+
+// ─── P3·Step 3f: Generic substitution ────────────────────────────────────────
+
+/// Recursively substitute `TypeParam` occurrences in `ty` using `subst`.
+///
+/// `subst` maps generic parameter names to their concrete types.
+/// Uses `BTreeMap` for determinism (AGENTS §7.1).
+///
+/// Pure function — no panics, no side effects.
+pub(super) fn substitute(
+    ty: &ResolvedType,
+    subst: &BTreeMap<String, ResolvedType>,
+) -> ResolvedType {
+    match ty {
+        // TypeParam: replace if in subst, otherwise keep as-is.
+        ResolvedType::TypeParam(name) => subst
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| ResolvedType::TypeParam(name.clone())),
+        // Compound types: recurse into inner types.
+        ResolvedType::Named(id, args) => {
+            ResolvedType::Named(*id, args.iter().map(|a| substitute(a, subst)).collect())
+        }
+        ResolvedType::Array(inner) => ResolvedType::Array(Box::new(substitute(inner, subst))),
+        ResolvedType::FixedArray(inner, n) => {
+            ResolvedType::FixedArray(Box::new(substitute(inner, subst)), *n)
+        }
+        ResolvedType::Map(k, v) => ResolvedType::Map(
+            Box::new(substitute(k, subst)),
+            Box::new(substitute(v, subst)),
+        ),
+        ResolvedType::FastMap(k, v) => ResolvedType::FastMap(
+            Box::new(substitute(k, subst)),
+            Box::new(substitute(v, subst)),
+        ),
+        ResolvedType::Set(inner) => ResolvedType::Set(Box::new(substitute(inner, subst))),
+        ResolvedType::Option_(inner) => ResolvedType::Option_(Box::new(substitute(inner, subst))),
+        ResolvedType::Result_(ok, err) => ResolvedType::Result_(
+            Box::new(substitute(ok, subst)),
+            Box::new(substitute(err, subst)),
+        ),
+        ResolvedType::Tuple(elems) => {
+            ResolvedType::Tuple(elems.iter().map(|e| substitute(e, subst)).collect())
+        }
+        ResolvedType::Fn(params, ret) => ResolvedType::Fn(
+            params.iter().map(|p| substitute(p, subst)).collect(),
+            Box::new(substitute(ret, subst)),
+        ),
+        // All primitive/concrete types and Unknown → unchanged.
+        other => other.clone(),
+    }
+}
+
+/// Infer type arguments by unifying function parameter types against call-site
+/// argument types.
+///
+/// Walks each `(param_ty, arg_ty)` pair and collects `TypeParam(name) → arg_ty`
+/// bindings.  For compound types (e.g. `Array<T>` vs `Array<u128>`), recurses
+/// to extract `T = u128`.
+///
+/// Forward-only (from args to return) — correct for 3f.
+/// Uses `BTreeMap` for determinism (AGENTS §7.1).
+pub(super) fn infer_type_args(
+    param_types: &[ResolvedType],
+    arg_types: &[ResolvedType],
+    generic_params: &[(String, Option<SymbolId>)],
+) -> BTreeMap<String, ResolvedType> {
+    let mut subst: BTreeMap<String, ResolvedType> = BTreeMap::new();
+    // Build a set of generic param names for fast membership check.
+    let param_names: std::collections::BTreeSet<&str> =
+        generic_params.iter().map(|(n, _)| n.as_str()).collect();
+
+    for (param_ty, arg_ty) in param_types.iter().zip(arg_types.iter()) {
+        collect_type_args(param_ty, arg_ty, &param_names, &mut subst);
+    }
+    subst
+}
+
+/// Recursively collect `TypeParam → concrete` bindings from a `(param_ty, arg_ty)` pair.
+fn collect_type_args(
+    param_ty: &ResolvedType,
+    arg_ty: &ResolvedType,
+    param_names: &std::collections::BTreeSet<&str>,
+    subst: &mut BTreeMap<String, ResolvedType>,
+) {
+    match param_ty {
+        ResolvedType::TypeParam(name) if param_names.contains(name.as_str()) => {
+            // Only bind if not already bound (first occurrence wins).
+            subst.entry(name.clone()).or_insert_with(|| arg_ty.clone());
+        }
+        ResolvedType::Array(inner) => {
+            if let ResolvedType::Array(arg_inner) = arg_ty {
+                collect_type_args(inner, arg_inner, param_names, subst);
+            }
+        }
+        ResolvedType::FixedArray(inner, _) => {
+            if let ResolvedType::FixedArray(arg_inner, _) = arg_ty {
+                collect_type_args(inner, arg_inner, param_names, subst);
+            }
+        }
+        ResolvedType::Option_(inner) => {
+            if let ResolvedType::Option_(arg_inner) = arg_ty {
+                collect_type_args(inner, arg_inner, param_names, subst);
+            }
+        }
+        ResolvedType::Result_(ok, err) => {
+            if let ResolvedType::Result_(arg_ok, arg_err) = arg_ty {
+                collect_type_args(ok, arg_ok, param_names, subst);
+                collect_type_args(err, arg_err, param_names, subst);
+            }
+        }
+        ResolvedType::Map(k, v) => {
+            if let ResolvedType::Map(ak, av) = arg_ty {
+                collect_type_args(k, ak, param_names, subst);
+                collect_type_args(v, av, param_names, subst);
+            }
+        }
+        ResolvedType::FastMap(k, v) => {
+            if let ResolvedType::FastMap(ak, av) = arg_ty {
+                collect_type_args(k, ak, param_names, subst);
+                collect_type_args(v, av, param_names, subst);
+            }
+        }
+        ResolvedType::Tuple(elems) => {
+            if let ResolvedType::Tuple(arg_elems) = arg_ty {
+                for (pe, ae) in elems.iter().zip(arg_elems.iter()) {
+                    collect_type_args(pe, ae, param_names, subst);
+                }
+            }
+        }
+        ResolvedType::Named(_, args) => {
+            if let ResolvedType::Named(_, arg_args) = arg_ty {
+                for (pa, aa) in args.iter().zip(arg_args.iter()) {
+                    collect_type_args(pa, aa, param_names, subst);
+                }
+            }
+        }
+        // Primitives, Unknown, non-matching compound types → no bindings.
+        _ => {}
+    }
+}
 
 // ─── Error construction helper ────────────────────────────────────────────────
 

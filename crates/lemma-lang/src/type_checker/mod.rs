@@ -38,6 +38,7 @@
 
 pub mod error;
 pub(crate) mod infer;
+pub(crate) mod lower;
 pub(crate) mod resolver;
 pub mod typed_ast;
 pub mod types;
@@ -107,7 +108,7 @@ impl Checker {
         self.check_no_duplicate_top_level_names(&ast.items)?;
 
         // Pass 2 (3b/3d): name resolution + SymbolSig building.
-        let (mut symbols, resolutions, sigs) = resolver::resolve(&ast)?;
+        let (mut symbols, resolutions, sigs, struct_traits) = resolver::resolve(&ast)?;
 
         // Build flat global-type namespace for the Inferer's lower_cast_target.
         // Maps each type-namespace symbol's name to its SymbolId.
@@ -131,7 +132,7 @@ impl Checker {
             .map(|(i, s)| (s.name.clone(), SymbolId((i + 1) as u32)))
             .collect();
 
-        // Pass 3 (3c/3e): expression + statement typing — populates expr_types.
+        // Pass 3 (3c/3e/3f): expression + statement typing — populates expr_types.
         // `symbols` is passed mutably so the Inferer can back-fill unannotated
         // `let` binding types (DB-A27).
         let mut expr_types = BTreeMap::new();
@@ -141,12 +142,20 @@ impl Checker {
                 &resolutions,
                 &sigs,
                 &global_types,
+                &struct_traits,
                 &mut expr_types,
             );
             inferer.walk_ast(&ast)?;
         }
 
-        Ok(TypedAst::new(ast, expr_types, resolutions, symbols, sigs))
+        Ok(TypedAst::new(
+            ast,
+            expr_types,
+            resolutions,
+            symbols,
+            sigs,
+            struct_traits,
+        ))
     }
 
     /// Verify that no two top-level items share a declaration name.
