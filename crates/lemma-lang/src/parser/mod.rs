@@ -79,6 +79,16 @@ pub(crate) struct Parser {
     tokens: Vec<(Token, Span)>,
     /// Current position in the token stream.
     pos: usize,
+    /// Positions where `expect_gt` split a `Token::Shr` (`>>`) into a `Token::Gt`
+    /// by mutating the buffer in place (Technical Debt P3-parser-1).
+    ///
+    /// This is the safety net for that debt: the buffer mutation is only sound
+    /// while the parser is strictly forward-moving.  [`Parser::rewind_to`] — the
+    /// single sanctioned way to move `pos` backward — `debug_assert!`s that no
+    /// rewind crosses any of these positions.  If a future backtracking helper
+    /// rewinds past a `>>`-split point, tests will panic immediately rather than
+    /// silently misparsing.  See `living-notes.md` "P3-parser-1".
+    gt_split_positions: Vec<usize>,
 }
 
 // Cursor helpers are forward-declared here and wired into the sub-parsers
@@ -88,7 +98,11 @@ impl Parser {
     ///
     /// The stream must end with `Token::Eof` (guaranteed by the lexer).
     pub(crate) fn new(tokens: Vec<(Token, Span)>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            gt_split_positions: Vec::new(),
+        }
     }
 
     // ── Cursor helpers ────────────────────────────────────────────────────────
@@ -173,6 +187,56 @@ impl Parser {
     /// Return `true` if the current token is `Token::Eof`.
     pub(crate) fn at_end(&self) -> bool {
         matches!(self.peek(), Token::Eof)
+    }
+
+    // ── Backtracking safety net (Technical Debt P3-parser-1) ──────────────────
+
+    /// Record that `expect_gt` split a `Token::Shr` into a `Token::Gt` at the
+    /// current position by mutating the buffer.
+    ///
+    /// Called only by [`Parser::expect_gt`].  See [`Parser::rewind_to`] for the
+    /// guard that makes this mutation safe.
+    pub(crate) fn record_gt_split(&mut self, pos: usize) {
+        self.gt_split_positions.push(pos);
+    }
+
+    /// Move the cursor backward to `pos` — the ONLY sanctioned way to rewind.
+    ///
+    /// Any future backtracking / speculative-parse helper MUST route its rewind
+    /// through this method (never assign `self.pos` directly — the field is
+    /// private to this module).
+    ///
+    /// # Panics (debug builds)
+    ///
+    /// `debug_assert!`s that the rewind target does not cross any position where
+    /// `expect_gt` split a `>>` token (Technical Debt P3-parser-1).  Crossing such
+    /// a position would expose a `Gt` where the source had `Shr`, silently
+    /// misparsing.  If this fires, implement the `pending_gt` refactor (so
+    /// `expect_gt` no longer mutates the buffer) BEFORE adding the backtracking
+    /// that triggered it.  See `living-notes.md` "P3-parser-1".
+    //
+    // Justified `dead_code`: a deliberate forward-API safety net. The parser is
+    // currently strictly forward-moving (no production caller rewinds), so this is
+    // exercised only by the P3-parser-1 guard tests today. It exists so the FIRST
+    // future backtracking helper is forced through this single guarded door instead
+    // of assigning `self.pos` directly. Remove the allow once a production caller lands.
+    #[allow(dead_code)]
+    pub(crate) fn rewind_to(&mut self, pos: usize) {
+        debug_assert!(
+            !self.gt_split_positions.iter().any(|&split| split >= pos),
+            "P3-parser-1: rewind to {pos} crosses a `>>`-split position \
+             ({:?}) — the expect_gt buffer mutation is now unsound. Implement \
+             the pending_gt refactor (living-notes P3-parser-1) BEFORE adding \
+             this backtracking.",
+            self.gt_split_positions,
+        );
+        self.pos = pos;
+    }
+
+    /// Current cursor position — test-only accessor for the P3-parser-1 guard tests.
+    #[cfg(test)]
+    pub(crate) fn pos_for_test(&self) -> usize {
+        self.pos
     }
 
     // ── Error constructors ────────────────────────────────────────────────────

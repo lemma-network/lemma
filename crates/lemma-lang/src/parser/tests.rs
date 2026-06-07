@@ -57,3 +57,42 @@ fn peek_nth_returns_correct_lookahead() {
     // peek_nth(1) is the next token
     let _ = parser.peek_nth(1);
 }
+
+// ── P3-parser-1 backtracking safety net ───────────────────────────────────────
+
+#[test]
+fn nested_generic_splits_shr_and_parses() {
+    // `Map<u8, Array<u8>>` ends in `>>` (Token::Shr) which expect_gt must split.
+    // Proves the split mechanism still works and the type parses correctly.
+    let tokens = tokenize("Map<u8, Array<u8>>").expect("tokenize failed");
+    let mut parser = Parser::new(tokens);
+    let ty = parser.parse_type().expect("nested generic should parse");
+    // The outer type must be a Map (sanity that the `>>` was consumed as two `>`).
+    assert!(
+        format!("{ty:?}").contains("Map"),
+        "expected a Map type, got {ty:?}"
+    );
+}
+
+#[test]
+fn rewind_to_forward_safe_position_succeeds() {
+    // Rewinding to a position at/after any `>>`-split is sound and must not panic.
+    let tokens = tokenize("Map<u8, Array<u8>>").expect("tokenize failed");
+    let mut parser = Parser::new(tokens);
+    let _ = parser.parse_type().expect("parse");
+    let end = parser.pos_for_test();
+    // Rewind to the current (end) position — crosses nothing. Safe.
+    parser.rewind_to(end);
+}
+
+#[test]
+#[should_panic(expected = "P3-parser-1")]
+fn rewind_across_shr_split_panics() {
+    // Rewinding to position 0 after a `>>` split crossed an earlier position
+    // must trip the debug_assert guard (this is the unsound case the net catches).
+    let tokens = tokenize("Map<u8, Array<u8>>").expect("tokenize failed");
+    let mut parser = Parser::new(tokens);
+    let _ = parser.parse_type().expect("parse");
+    // Rewinding to 0 crosses the recorded split position → guard must fire.
+    parser.rewind_to(0);
+}

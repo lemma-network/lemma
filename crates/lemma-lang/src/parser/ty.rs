@@ -342,9 +342,11 @@ impl Parser {
     /// # INVARIANT
     /// This mutates `self.tokens[self.pos]` from `Shr` to `Gt` without advancing.
     /// The parser is strictly forward-moving — it NEVER rewinds `pos` across a position
-    /// where this mutation may have occurred. Any future backtracking helper in expr.rs
-    /// MUST NOT rewind past a position returned by `expect_gt`. See Technical Debt in
-    /// living-notes.md: "P3-parser-1: `expect_gt` buffer mutation → `pending_gt` flag refactor".
+    /// where this mutation may have occurred. Any future backtracking helper MUST route
+    /// its rewind through [`Parser::rewind_to`], which records `record_gt_split` positions
+    /// and `debug_assert!`s that no rewind crosses one — so a violation panics in tests
+    /// rather than silently misparsing. See Technical Debt in living-notes.md:
+    /// "P3-parser-1: `expect_gt` buffer mutation → `pending_gt` flag refactor".
     pub(crate) fn expect_gt(&mut self, ctx: &str) -> Result<Span, LangError> {
         match self.peek().clone() {
             Token::Gt => Ok(self.advance().1),
@@ -356,7 +358,11 @@ impl Parser {
                 // The span length is adjusted to 1 (the single > we're "consuming").
                 let span = self.peek_span();
                 // Replace Shr with Gt at the current position (do NOT advance)
-                self.tokens[self.pos] = (Token::Gt, Span { len: 1, ..span });
+                let split_pos = self.pos;
+                self.tokens[split_pos] = (Token::Gt, Span { len: 1, ..span });
+                // Record the split so `rewind_to` can guard against an unsound
+                // rewind across this position (Technical Debt P3-parser-1).
+                self.record_gt_split(split_pos);
                 // Return the span as if we consumed the first `>`
                 Ok(Span { len: 1, ..span })
             }
