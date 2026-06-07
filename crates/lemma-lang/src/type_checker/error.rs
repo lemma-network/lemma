@@ -83,8 +83,27 @@ pub enum TypeErrorKind {
         /// The unresolved type name.
         name: String,
     },
-    // 3c: TypeMismatch { expected: String, found: String },
-    //     InvalidOperandTypes { op: String, lhs: String, rhs: String }
+
+    /// Two types that must agree do not match.
+    ///
+    /// Examples: `true + 1` (bool vs integer), `cond ? 1u8 : 1u16` (branch types differ).
+    TypeMismatch {
+        /// The expected type (human-readable, from [`ResolvedType::display_name`]).
+        expected: String,
+        /// The actual type found.
+        found: String,
+    },
+
+    /// An operator is applied to a type that does not support it.
+    ///
+    /// Examples: `!42` (Not on integer), `"a" + "b"` (Add on strings before string
+    /// concatenation is introduced).
+    InvalidOperand {
+        /// The operator name (e.g. `"+"`, `"!"`, `"~"`).
+        op: String,
+        /// The offending operand type (human-readable).
+        ty: String,
+    },
     // 3d: ArityMismatch { func: String, expected: usize, found: usize },
     //     UnknownField { ty: String, field: String }
     // 3e: MutationOfImmutable { name: String },

@@ -5,10 +5,13 @@
 //! syntactic [`crate::parser::ast::Type`] produced by the parser:
 //!
 //! - All sub-types recursively use `ResolvedType`, not `Type`.
-//! - `Named` still carries a plain `String` in 3a; subtask 3b replaces it with
-//!   a [`SymbolId`] once name resolution is implemented.
+//! - `Named` carries a [`SymbolId`] (from name resolution in 3b/3c).
+//! - [`ResolvedType::IntLiteral`] is an unconstrained integer literal — it
+//!   coerces to any concrete integer type demanded by context (3c/3e), and
+//!   defaults to `u256` when no context constrains it (see `decisions-log.md`
+//!   DB-A27).
 //! - [`ResolvedType::TypeParam`] represents an unresolved generic parameter
-//!   (e.g. `T` in `fn first<T>(arr: Array<T>) -> T`).
+//!   (e.g. `T` in `fn first<T>(arr: Array<T>) -> T`).  Instantiated in 3f.
 //! - [`ResolvedType::Unit`] represents the void/unit return type (a function
 //!   with no `return_type` in its signature).
 //! - [`ResolvedType::Unknown`] is a placeholder during incremental checking;
@@ -17,22 +20,24 @@
 //! ## Mapping from `Type`
 //!
 //! Most variants map 1-to-1 from the AST `Type` enum (same name).
-//! Where Rust reserved words conflict, both types use the same underscore
-//! suffix convention (`Option_`, `Result_`).
+//! The `Type → ResolvedType` lowering is an exhaustive in-crate `match` (no
+//! `_` arm) in [`crate::type_checker::resolver::Resolver::lower_type`] so the
+//! compiler enforces that new `Type` variants are handled.
+//!
+//! ## `IntLiteral` coercion (DB-A27)
+//!
+//! Un-suffixed integer literals (e.g. `42`, `0xFF`) are assigned the
+//! intermediate type `IntLiteral` by the expression typer.  The typer
+//! immediately coerces them to a concrete integer type when context provides
+//! one (arithmetic expression with a typed operand, explicit type annotation).
+//! If no concrete integer context exists the literal defaults to `u256`.
+//! See `decisions-log.md` DB-A27.
 
 // ─── ResolvedType ─────────────────────────────────────────────────────────────
 
 /// The canonical, resolved type used throughout the type checker and downstream.
 ///
 /// See module-level documentation for the difference from [`crate::parser::ast::Type`].
-///
-/// # Keeping in sync with `parser::ast::Type`
-///
-/// The leaf variants of `ResolvedType` mirror those of the syntactic `Type` enum.
-/// When adding a new `Type` variant, add the corresponding `ResolvedType` variant
-/// here **and** update the `Type → ResolvedType` lowering pass in subtask 3b.
-/// The lowering is an exhaustive in-crate `match` (no `_` arm) so the compiler
-/// enforces this discipline.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedType {
@@ -63,6 +68,13 @@ pub enum ResolvedType {
     I128,
     /// `i256`
     I256,
+
+    /// An unconstrained integer literal (e.g. `42`, `0xFF`, `0b1010`).
+    ///
+    /// Un-suffixed integer literals are assigned this intermediate type by the
+    /// expression typer (3c).  They coerce to any concrete integer demanded
+    /// by context, defaulting to `u256` when unconstrained (DB-A27).
+    IntLiteral,
 
     // ── Primitives ─────────────────────────────────────────────────────────
     /// `bool`
@@ -104,11 +116,11 @@ pub enum ResolvedType {
     Fn(Vec<ResolvedType>, Box<ResolvedType>),
 
     // ── Named / generic ────────────────────────────────────────────────────
-    /// A named type (struct, enum, interface, or type alias).
+    /// A named type (struct, enum, interface, type alias, or contract).
     ///
-    /// **3a**: the name is a plain `String`; subtask 3b replaces it with a
-    /// [`SymbolId`] once name resolution walks the symbol table.
-    Named(String, Vec<ResolvedType>),
+    /// The [`SymbolId`] points to the declaration's entry in the symbol arena.
+    /// Generic arguments (if any) are fully lowered to [`ResolvedType`].
+    Named(SymbolId, Vec<ResolvedType>),
 
     /// A generic type parameter, e.g. `T` in `fn first<T>(arr: Array<T>) -> T`.
     ///
@@ -121,13 +133,14 @@ pub enum ResolvedType {
 
     /// A type that has not yet been determined.
     ///
-    /// Used as a placeholder during incremental checking.  Must not appear in
-    /// a fully type-checked program (the checker reports an error if it does).
+    /// Used as a placeholder during incremental checking or for symbol kinds
+    /// whose type is resolved in a later subtask.  Must not appear in a fully
+    /// type-checked program (the checker reports an error if it does).
     Unknown,
 }
 
 impl ResolvedType {
-    /// Returns `true` if this type is any unsigned integer.
+    /// Returns `true` if this type is any unsigned integer (not `IntLiteral`).
     #[must_use]
     pub fn is_unsigned_int(&self) -> bool {
         matches!(
@@ -136,7 +149,7 @@ impl ResolvedType {
         )
     }
 
-    /// Returns `true` if this type is any signed integer.
+    /// Returns `true` if this type is any signed integer (not `IntLiteral`).
     #[must_use]
     pub fn is_signed_int(&self) -> bool {
         matches!(
@@ -145,22 +158,150 @@ impl ResolvedType {
         )
     }
 
-    /// Returns `true` if this type is any integer (signed or unsigned).
+    /// Returns `true` if this type is a concrete integer (signed or unsigned).
+    ///
+    /// Does NOT include [`ResolvedType::IntLiteral`] — use [`Self::is_numeric`]
+    /// or [`Self::is_int_literal`] to check for the unconstrained literal type.
     #[must_use]
     pub fn is_integer(&self) -> bool {
         self.is_unsigned_int() || self.is_signed_int()
     }
 
-    /// Returns `true` if this type is a numeric type (integer or decimal).
+    /// Returns `true` if this type is the unconstrained integer-literal marker.
+    ///
+    /// Integer literals without an explicit suffix (e.g. `42`) receive this
+    /// type and are coerced to a concrete integer type by context (DB-A27).
     #[must_use]
-    pub fn is_numeric(&self) -> bool {
-        self.is_integer() || matches!(self, Self::Decimal(_))
+    pub fn is_int_literal(&self) -> bool {
+        matches!(self, Self::IntLiteral)
     }
 
-    /// Returns `true` if this is a resolved, concrete type (not Unknown or TypeParam).
+    /// Returns `true` if this type is a numeric type (any integer, any integer
+    /// literal, or decimal).
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        self.is_integer() || self.is_int_literal() || matches!(self, Self::Decimal(_))
+    }
+
+    /// Returns the bit width of a concrete integer type, or `None` for
+    /// non-integer types (including [`ResolvedType::IntLiteral`]).
+    ///
+    /// Useful for deciding which type is "wider" in an arithmetic expression.
+    #[must_use]
+    pub fn bit_width(&self) -> Option<u32> {
+        match self {
+            Self::U8 | Self::I8 => Some(8),
+            Self::U16 | Self::I16 => Some(16),
+            Self::U32 | Self::I32 => Some(32),
+            Self::U64 | Self::I64 => Some(64),
+            Self::U128 | Self::I128 => Some(128),
+            Self::U256 | Self::I256 => Some(256),
+            _ => None,
+        }
+    }
+
+    /// If `self` is [`ResolvedType::IntLiteral`] and `target` is a concrete
+    /// integer type, returns `Some(target.clone())` — the literal coerces to
+    /// `target`.  Returns `None` in all other cases.
+    #[must_use]
+    pub fn coerce_int_literal<'a>(&self, target: &'a ResolvedType) -> Option<&'a ResolvedType> {
+        if self.is_int_literal() && target.is_integer() {
+            Some(target)
+        } else {
+            None
+        }
+    }
+
+    /// Returns `true` if this is a resolved, concrete type.
+    ///
+    /// Concrete means neither [`ResolvedType::Unknown`] nor
+    /// [`ResolvedType::TypeParam`].  [`ResolvedType::IntLiteral`] is
+    /// considered concrete (it is a real type, just unconstrained).
     #[must_use]
     pub fn is_concrete(&self) -> bool {
         !matches!(self, Self::Unknown | Self::TypeParam(_))
+    }
+
+    /// Returns `true` if this is an `Option<T>` type.
+    #[must_use]
+    pub fn is_option(&self) -> bool {
+        matches!(self, Self::Option_(_))
+    }
+
+    /// Returns `true` if this is a `Result<T, E>` type.
+    #[must_use]
+    pub fn is_result(&self) -> bool {
+        matches!(self, Self::Result_(_, _))
+    }
+
+    /// If this is `Option<T>`, returns `Some(T)`.
+    #[must_use]
+    pub fn option_inner(&self) -> Option<&ResolvedType> {
+        if let Self::Option_(inner) = self {
+            Some(inner)
+        } else {
+            None
+        }
+    }
+
+    /// Human-readable name for use in error messages.
+    ///
+    /// Not a stable serialisation format — for diagnostics only.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::U8 => "u8".into(),
+            Self::U16 => "u16".into(),
+            Self::U32 => "u32".into(),
+            Self::U64 => "u64".into(),
+            Self::U128 => "u128".into(),
+            Self::U256 => "u256".into(),
+            Self::I8 => "i8".into(),
+            Self::I16 => "i16".into(),
+            Self::I32 => "i32".into(),
+            Self::I64 => "i64".into(),
+            Self::I128 => "i128".into(),
+            Self::I256 => "i256".into(),
+            Self::IntLiteral => "{integer}".into(),
+            Self::Bool => "bool".into(),
+            Self::StringTy => "string".into(),
+            Self::CharTy => "char".into(),
+            Self::AddressTy => "Address".into(),
+            Self::HashTy => "Hash".into(),
+            Self::Bytes => "bytes".into(),
+            Self::BytesN(n) => format!("bytes{n}"),
+            Self::Decimal(n) => format!("decimal({n})"),
+            Self::Array(inner) => format!("Array<{}>", inner.display_name()),
+            Self::FixedArray(inner, n) => format!("[{}; {n}]", inner.display_name()),
+            Self::Map(k, v) => format!("Map<{}, {}>", k.display_name(), v.display_name()),
+            Self::FastMap(k, v) => {
+                format!("FastMap<{}, {}>", k.display_name(), v.display_name())
+            }
+            Self::Set(inner) => format!("Set<{}>", inner.display_name()),
+            Self::Option_(inner) => format!("Option<{}>", inner.display_name()),
+            Self::Result_(ok, err) => {
+                format!("Result<{}, {}>", ok.display_name(), err.display_name())
+            }
+            Self::Tuple(elems) => {
+                let inner: Vec<_> = elems.iter().map(Self::display_name).collect();
+                format!("({})", inner.join(", "))
+            }
+            Self::Fn(params, ret) => {
+                let ps: Vec<_> = params.iter().map(Self::display_name).collect();
+                format!("fn({}) -> {}", ps.join(", "), ret.display_name())
+            }
+            Self::Named(id, args) => {
+                if args.is_empty() {
+                    format!("<named:{}>", id.0)
+                } else {
+                    let gs: Vec<_> = args.iter().map(Self::display_name).collect();
+                    format!("<named:{}><{}>", id.0, gs.join(", "))
+                }
+            }
+            Self::TypeParam(name) => name.clone(),
+            Self::Unit => "()".into(),
+            Self::Unknown => "<unknown>".into(),
+        }
     }
 }
 
@@ -195,6 +336,15 @@ impl SymbolId {
 /// Indexed by [`SymbolId`]: `TypedAst::symbol(id)` returns the [`SymbolInfo`]
 /// for that ID.  Downstream stages (safety analyzer, codegen) look up symbol
 /// metadata here after receiving a [`SymbolId`] from `TypedAst::resolutions`.
+///
+/// ## `ty` field (DB-A28)
+///
+/// `ty` carries the [`ResolvedType`] of the declared symbol, populated during
+/// the `Type → ResolvedType` lowering pass (3c).  Value-namespace symbols
+/// (params, locals, consts, state fields, immutables) get their annotated type
+/// lowered here.  Type-namespace symbols (contract, struct, enum, etc.) carry
+/// [`ResolvedType::Unknown`] until a later subtask provides the self-referential
+/// projection (3g / Step 4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolInfo {
     /// The declared name of this symbol.
@@ -203,6 +353,12 @@ pub struct SymbolInfo {
     pub decl_span: crate::lexer::token::Span,
     /// The kind of declaration this symbol represents.
     pub kind: SymbolKind,
+    /// The resolved type of this symbol (DB-A28).
+    ///
+    /// `Unknown` for type-namespace symbols and for value-namespace symbols
+    /// whose type has not yet been lowered (e.g., function return types
+    /// deferred to 3g).
+    pub ty: ResolvedType,
 }
 
 /// The kind of declaration a [`SymbolInfo`] describes.

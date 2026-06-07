@@ -4,6 +4,10 @@ use crate::lexer::token::Span;
 
 use super::{ResolvedType, SymbolId, SymbolInfo, SymbolKind};
 
+fn unknown() -> ResolvedType {
+    ResolvedType::Unknown
+}
+
 // ── ResolvedType construction ──────────────────────────────────────────────────
 
 #[test]
@@ -21,6 +25,7 @@ fn resolved_type_primitive_variants_construct() {
         ResolvedType::I64,
         ResolvedType::I128,
         ResolvedType::I256,
+        ResolvedType::IntLiteral,
         ResolvedType::Bool,
         ResolvedType::StringTy,
         ResolvedType::CharTy,
@@ -50,9 +55,64 @@ fn resolved_type_compound_variants_construct() {
 
 #[test]
 fn resolved_type_named_and_param_variants_construct() {
-    let _ = ResolvedType::Named("MyStruct".into(), vec![]);
-    let _ = ResolvedType::Named("Pair".into(), vec![ResolvedType::U128, ResolvedType::Bool]);
+    // Named now carries a SymbolId (resolved in 3b/3c) instead of a String.
+    let _ = ResolvedType::Named(SymbolId(1), vec![]);
+    let _ = ResolvedType::Named(SymbolId(2), vec![ResolvedType::U128, ResolvedType::Bool]);
     let _ = ResolvedType::TypeParam("T".into());
+}
+
+#[test]
+fn resolved_type_int_literal_constructs_and_predicates() {
+    let lit = ResolvedType::IntLiteral;
+    assert!(lit.is_int_literal());
+    assert!(lit.is_numeric());
+    assert!(!lit.is_integer());
+    assert!(!lit.is_unsigned_int());
+    assert!(!lit.is_signed_int());
+    assert!(lit.is_concrete()); // IntLiteral IS concrete (not Unknown/TypeParam)
+}
+
+#[test]
+fn resolved_type_bit_width_integers() {
+    assert_eq!(ResolvedType::U8.bit_width(), Some(8));
+    assert_eq!(ResolvedType::U128.bit_width(), Some(128));
+    assert_eq!(ResolvedType::U256.bit_width(), Some(256));
+    assert_eq!(ResolvedType::I8.bit_width(), Some(8));
+    assert_eq!(ResolvedType::I256.bit_width(), Some(256));
+    assert_eq!(ResolvedType::IntLiteral.bit_width(), None);
+    assert_eq!(ResolvedType::Bool.bit_width(), None);
+}
+
+#[test]
+fn resolved_type_coerce_int_literal_to_concrete() {
+    let lit = ResolvedType::IntLiteral;
+    assert_eq!(
+        lit.coerce_int_literal(&ResolvedType::U8),
+        Some(&ResolvedType::U8)
+    );
+    assert_eq!(
+        lit.coerce_int_literal(&ResolvedType::I128),
+        Some(&ResolvedType::I128)
+    );
+    // Non-integer target → None.
+    assert_eq!(lit.coerce_int_literal(&ResolvedType::Bool), None);
+    // Non-literal self → None.
+    assert_eq!(
+        ResolvedType::U8.coerce_int_literal(&ResolvedType::U16),
+        None
+    );
+}
+
+#[test]
+fn resolved_type_display_name_round_trips() {
+    assert_eq!(ResolvedType::U128.display_name(), "u128");
+    assert_eq!(ResolvedType::Bool.display_name(), "bool");
+    assert_eq!(ResolvedType::IntLiteral.display_name(), "{integer}");
+    assert_eq!(ResolvedType::StringTy.display_name(), "string");
+    assert_eq!(ResolvedType::BytesN(4).display_name(), "bytes4");
+    assert_eq!(ResolvedType::Decimal(18).display_name(), "decimal(18)");
+    assert_eq!(ResolvedType::Unit.display_name(), "()");
+    assert_eq!(ResolvedType::Unknown.display_name(), "<unknown>");
 }
 
 #[test]
@@ -176,9 +236,21 @@ fn symbol_info_constructs_with_all_fields() {
         name: "transfer".into(),
         decl_span: test_span(),
         kind: SymbolKind::Function,
+        ty: unknown(),
     };
     assert_eq!(info.name, "transfer");
     assert!(matches!(info.kind, SymbolKind::Function));
+}
+
+#[test]
+fn symbol_info_carries_resolved_type() {
+    let info = SymbolInfo {
+        name: "amount".into(),
+        decl_span: test_span(),
+        kind: SymbolKind::Param,
+        ty: ResolvedType::U128,
+    };
+    assert_eq!(info.ty, ResolvedType::U128);
 }
 
 #[test]
@@ -187,6 +259,7 @@ fn symbol_info_clones_equal() {
         name: "owner".into(),
         decl_span: test_span(),
         kind: SymbolKind::StateField,
+        ty: unknown(),
     };
     assert_eq!(info.clone(), info);
 }
@@ -197,11 +270,13 @@ fn symbol_info_different_names_not_equal() {
         name: "a".into(),
         decl_span: test_span(),
         kind: SymbolKind::Local,
+        ty: unknown(),
     };
     let b = SymbolInfo {
         name: "b".into(),
         decl_span: test_span(),
         kind: SymbolKind::Local,
+        ty: unknown(),
     };
     assert_ne!(a, b);
 }

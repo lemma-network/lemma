@@ -43,7 +43,7 @@ use crate::parser::ast::{
 };
 
 use super::error::{TypeError, TypeErrorKind};
-use super::types::{SymbolId, SymbolInfo, SymbolKind};
+use super::types::{ResolvedType, SymbolId, SymbolInfo, SymbolKind};
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -88,14 +88,124 @@ impl Resolver {
 
     // ── Symbol allocation ─────────────────────────────────────────────────
 
-    fn alloc(&mut self, name: impl Into<String>, decl_span: Span, kind: SymbolKind) -> SymbolId {
+    /// Allocate a symbol with an explicit resolved type.
+    ///
+    /// Used for value-namespace symbols (params, locals, consts, state fields)
+    /// whose declared type is available at allocation time.  Pass
+    /// [`ResolvedType::Unknown`] for type-namespace symbols and for value
+    /// symbols whose type is deferred (e.g. function return types in 3g).
+    fn alloc_typed(
+        &mut self,
+        name: impl Into<String>,
+        decl_span: Span,
+        kind: SymbolKind,
+        ty: ResolvedType,
+    ) -> SymbolId {
         let id = SymbolId((self.symbols.len() + 1) as u32);
         self.symbols.push(SymbolInfo {
             name: name.into(),
             decl_span,
             kind,
+            ty,
         });
         id
+    }
+
+    /// Allocate a symbol with [`ResolvedType::Unknown`] (type-namespace symbols
+    /// and value symbols deferred to a later subtask).
+    fn alloc(&mut self, name: impl Into<String>, decl_span: Span, kind: SymbolKind) -> SymbolId {
+        self.alloc_typed(name, decl_span, kind, ResolvedType::Unknown)
+    }
+
+    // ── Type lowering ─────────────────────────────────────────────────────
+
+    /// Lower a syntactic [`Type`] to a [`ResolvedType`] using the current
+    /// type-namespace scope stack.
+    ///
+    /// For primitive and compound types this is a mechanical 1-to-1 mapping.
+    /// For [`Type::Named`], the name is looked up in the current type scope:
+    /// - Generic params (`SymbolKind::GenericParam`) → `TypeParam(name)`.
+    /// - All other named declarations → `Named(SymbolId, lowered_args)`.
+    /// - Unknown names (imports and defensive fallback) → `Unknown`.
+    ///
+    /// The special placeholder `_` (un-annotated lambda params from the parser)
+    /// maps to `Unknown` — its type is inferred by the expression typer in 3c.
+    ///
+    /// This is an exhaustive in-crate `match` (no `_` arm) so the compiler
+    /// enforces that new `Type` variants added to the parser are handled here.
+    fn lower_type(&self, ty: &Type) -> ResolvedType {
+        match ty {
+            Type::U8 => ResolvedType::U8,
+            Type::U16 => ResolvedType::U16,
+            Type::U32 => ResolvedType::U32,
+            Type::U64 => ResolvedType::U64,
+            Type::U128 => ResolvedType::U128,
+            Type::U256 => ResolvedType::U256,
+            Type::I8 => ResolvedType::I8,
+            Type::I16 => ResolvedType::I16,
+            Type::I32 => ResolvedType::I32,
+            Type::I64 => ResolvedType::I64,
+            Type::I128 => ResolvedType::I128,
+            Type::I256 => ResolvedType::I256,
+            Type::Bool => ResolvedType::Bool,
+            Type::StringTy => ResolvedType::StringTy,
+            Type::CharTy => ResolvedType::CharTy,
+            Type::AddressTy => ResolvedType::AddressTy,
+            Type::HashTy => ResolvedType::HashTy,
+            Type::Bytes => ResolvedType::Bytes,
+            Type::BytesN(n) => ResolvedType::BytesN(*n),
+            Type::Decimal(n) => ResolvedType::Decimal(*n),
+            Type::Array(inner) => ResolvedType::Array(Box::new(self.lower_type(inner))),
+            Type::FixedArray(inner, n) => {
+                ResolvedType::FixedArray(Box::new(self.lower_type(inner)), *n)
+            }
+            Type::Map(k, v) => {
+                ResolvedType::Map(Box::new(self.lower_type(k)), Box::new(self.lower_type(v)))
+            }
+            Type::FastMap(k, v) => {
+                ResolvedType::FastMap(Box::new(self.lower_type(k)), Box::new(self.lower_type(v)))
+            }
+            Type::Set(inner) => ResolvedType::Set(Box::new(self.lower_type(inner))),
+            Type::Option_(inner) => ResolvedType::Option_(Box::new(self.lower_type(inner))),
+            Type::Result_(ok, err) => ResolvedType::Result_(
+                Box::new(self.lower_type(ok)),
+                Box::new(self.lower_type(err)),
+            ),
+            Type::Tuple(elems) => {
+                ResolvedType::Tuple(elems.iter().map(|e| self.lower_type(e)).collect())
+            }
+            Type::Fn(params, ret) => ResolvedType::Fn(
+                params.iter().map(|p| self.lower_type(p)).collect(),
+                Box::new(self.lower_type(ret)),
+            ),
+            Type::Named(name, args) => {
+                // `_` is the parser's inferred-type placeholder for untyped
+                // lambda params.  It is NOT a user type — inferred in 3c.
+                if name == "_" {
+                    return ResolvedType::Unknown;
+                }
+                let lowered_args: Vec<_> = args.iter().map(|a| self.lower_type(a)).collect();
+                match self.lookup_type(name) {
+                    Some(id) => {
+                        // Generic params keep their name for 3f instantiation.
+                        let is_generic = self
+                            .symbols
+                            .get((id.0 as usize).saturating_sub(1))
+                            .is_some_and(|info| info.kind == SymbolKind::GenericParam);
+                        if is_generic {
+                            ResolvedType::TypeParam(name.clone())
+                        } else {
+                            ResolvedType::Named(id, lowered_args)
+                        }
+                    }
+                    // Import or not-yet-visible name: defensive fallback.
+                    // The resolver validates names separately via resolve_type_ref;
+                    // if we reach here the name is either an import (opaque) or
+                    // an out-of-order forward reference (rare, deferred to 3g).
+                    None => ResolvedType::Unknown,
+                }
+            }
+        }
     }
 
     // ── Scope management ──────────────────────────────────────────────────
@@ -260,7 +370,11 @@ impl Resolver {
                     self.define_value_or_err(&f.name, id, f.span)?;
                 }
                 Item::Const(c) => {
-                    let id = self.alloc(&c.name, c.span, SymbolKind::Const);
+                    // Lower the const type; primitives always resolve immediately.
+                    // User-defined type references in a const annotation that appear
+                    // before the type declaration get Unknown (deferred to 3g).
+                    let ty = self.lower_type(&c.ty);
+                    let id = self.alloc_typed(&c.name, c.span, SymbolKind::Const, ty);
                     self.define_value_or_err(&c.name, id, c.span)?;
                 }
                 Item::TypeAlias(a) => {
@@ -393,16 +507,19 @@ impl Resolver {
         match member {
             ContractMember::State(s) => {
                 for field in &s.fields {
-                    let id = self.alloc(&field.name, field.span, SymbolKind::StateField);
+                    let ty = self.lower_type(&field.ty);
+                    let id = self.alloc_typed(&field.name, field.span, SymbolKind::StateField, ty);
                     self.define_value_or_err(&field.name, id, field.span)?;
                 }
             }
             ContractMember::Const(c) => {
-                let id = self.alloc(&c.name, c.span, SymbolKind::Const);
+                let ty = self.lower_type(&c.ty);
+                let id = self.alloc_typed(&c.name, c.span, SymbolKind::Const, ty);
                 self.define_value_or_err(&c.name, id, c.span)?;
             }
             ContractMember::Immutable(i) => {
-                let id = self.alloc(&i.name, i.span, SymbolKind::Immutable);
+                let ty = self.lower_type(&i.ty);
+                let id = self.alloc_typed(&i.name, i.span, SymbolKind::Immutable, ty);
                 self.define_value_or_err(&i.name, id, i.span)?;
             }
             ContractMember::Function(f) => {
@@ -461,7 +578,8 @@ impl Resolver {
             ContractMember::Modifier(m) => {
                 self.push_value_scope();
                 for p in &m.params {
-                    let id = self.alloc(&p.name, p.span, SymbolKind::Param);
+                    let ty = self.lower_type(&p.ty);
+                    let id = self.alloc_typed(&p.name, p.span, SymbolKind::Param, ty);
                     let _ = self.define_value(&p.name, id);
                     self.resolve_type_ref(&p.ty, p.span)?;
                 }
@@ -514,7 +632,8 @@ impl Resolver {
         // Params introduce value bindings.
         self.push_value_scope();
         for p in &f.params {
-            let id = self.alloc(&p.name, p.span, SymbolKind::Param);
+            let ty = self.lower_type(&p.ty);
+            let id = self.alloc_typed(&p.name, p.span, SymbolKind::Param, ty);
             // In the same function signature, duplicate param names are errors.
             self.define_value_or_err(&p.name, id, p.span)?;
             self.resolve_type_ref(&p.ty, p.span)?;
@@ -652,8 +771,18 @@ impl Resolver {
                 }
                 // Collect pattern bindings and define in current scope.
                 let bindings = collect_pattern_bindings(pattern);
-                for (name, span) in bindings {
-                    let id = self.alloc(&name, span, SymbolKind::Local);
+                for (name, bspan) in bindings {
+                    // For a simple `let x: T = expr` pattern, lower the
+                    // annotation to get the local's type.  For destructuring
+                    // or unannotated let, use Unknown (inferred in 3c/3e).
+                    let sym_ty = if matches!(pattern, Pattern::Ident(_, _)) {
+                        ty.as_ref()
+                            .map(|t| self.lower_type(t))
+                            .unwrap_or(ResolvedType::Unknown)
+                    } else {
+                        ResolvedType::Unknown
+                    };
+                    let id = self.alloc_typed(&name, bspan, SymbolKind::Local, sym_ty);
                     // Shadowing is allowed; no duplicate-error for let bindings.
                     // (Dup-error is only for same-scope-level *declarations*, not
                     // let-bindings which naturally shadow in nested scopes.)
@@ -663,7 +792,8 @@ impl Resolver {
             Stmt::Const(c) => {
                 self.resolve_type_ref(&c.ty, c.span)?;
                 self.resolve_expr(&c.value)?;
-                let id = self.alloc(&c.name, c.span, SymbolKind::Const);
+                let ty = self.lower_type(&c.ty);
+                let id = self.alloc_typed(&c.name, c.span, SymbolKind::Const, ty);
                 self.define_value_or_err(&c.name, id, c.span)?;
             }
             Stmt::Assign { target, value, .. } => {
@@ -904,7 +1034,10 @@ impl Resolver {
             Expr::Lambda { params, body, .. } => {
                 self.push_value_scope();
                 for p in params {
-                    let id = self.alloc(&p.name, p.span, SymbolKind::Param);
+                    // `_` placeholder (unannotated lambda param) lowers to Unknown;
+                    // the expression typer resolves it in 3c.
+                    let ty = self.lower_type(&p.ty);
+                    let id = self.alloc_typed(&p.name, p.span, SymbolKind::Param, ty);
                     let _ = self.define_value(&p.name, id);
                     self.resolve_type_ref(&p.ty, p.span)?;
                 }

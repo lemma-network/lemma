@@ -37,6 +37,7 @@
 //! - 3h: integration + docs closeout
 
 pub mod error;
+pub(crate) mod infer;
 pub(crate) mod resolver;
 pub mod typed_ast;
 pub mod types;
@@ -60,13 +61,17 @@ pub use self::types::{ResolvedType, SymbolId};
 /// (consumed by the Step 4 safety analyzer) or `Err(LangError::Type(...))`
 /// on the first type violation found.
 ///
-/// ## Current coverage (P3·Step 3a)
+/// ## Current coverage (P3·Step 3c)
 ///
-/// - Duplicate top-level declaration names
+/// - Duplicate top-level declaration names (3a)
+/// - Name resolution — every identifier linked to its declaration (3b)
+/// - Expression typing — literals, operators, ternary, nullish (3c)
 ///
-/// Full expression typing and name resolution land in subtasks 3b–3g.
-/// The returned [`TypedAst`] has empty `expr_types` and `resolutions` maps
-/// in 3a; they are populated in subsequent subtasks.
+/// Deferred to later subtasks:
+/// - Calls, member access, index, struct/array/tuple literals → 3d
+/// - Statement checking, return types, mutability → 3e
+/// - Generics + trait bounds → 3f
+/// - Declaration walk → fully-populated TypedAst → 3g
 ///
 /// # Examples
 ///
@@ -102,7 +107,14 @@ impl Checker {
         // Pass 2 (3b): name resolution — populates resolutions + symbols.
         let (symbols, resolutions) = resolver::resolve(&ast)?;
 
-        Ok(TypedAst::new(ast, BTreeMap::new(), resolutions, symbols))
+        // Pass 3 (3c): expression typing — populates expr_types.
+        let mut expr_types = BTreeMap::new();
+        {
+            let mut inferer = infer::Inferer::new(&symbols, &resolutions, &mut expr_types);
+            inferer.walk_ast(&ast)?;
+        }
+
+        Ok(TypedAst::new(ast, expr_types, resolutions, symbols))
     }
 
     /// Verify that no two top-level items share a declaration name.
