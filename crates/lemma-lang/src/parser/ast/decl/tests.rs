@@ -385,7 +385,7 @@ fn config_value_all_variants_construct() {
         ConfigValue::Int(42),
         ConfigValue::Bool(true),
         ConfigValue::Percent(15),
-        ConfigValue::Unit(6, UnitKind::Months),
+        ConfigValue::Unit(6, UnitKind::Days),
         ConfigValue::Object(vec![]),
         ConfigValue::Ident("TokenType".to_string()),
     ];
@@ -401,7 +401,6 @@ fn unit_kind_all_variants_construct() {
         UnitKind::Hours,
         UnitKind::Days,
         UnitKind::Seconds,
-        UnitKind::Months,
     ];
     for k in &kinds {
         assert_eq!(k.clone(), k.clone());

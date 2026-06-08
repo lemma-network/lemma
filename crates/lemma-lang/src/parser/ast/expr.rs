@@ -96,7 +96,7 @@ pub enum Literal {
     Bool(bool),
     /// Address literal: `lem1q...`
     Address(String),
-    /// Unit literal: `1.ether`, `6.months`
+    /// Unit literal: `1.ether`, `24.hours`
     Unit(Box<Expr>, UnitKind),
 }
 

@@ -389,7 +389,6 @@ impl Parser {
                     Token::UnitHours => Some(UnitKind::Hours),
                     Token::UnitDays => Some(UnitKind::Days),
                     Token::UnitSeconds => Some(UnitKind::Seconds),
-                    Token::UnitMonths => Some(UnitKind::Months),
                     _ => None,
                 };
                 if let Some(kind) = unit {

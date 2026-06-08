@@ -881,7 +881,7 @@ fn config_constructs() {
             },
             ConfigEntry {
                 key: "lockup".to_string(),
-                value: ConfigValue::Unit(6, UnitKind::Months),
+                value: ConfigValue::Unit(6, UnitKind::Days),
                 span: span(),
             },
         ],
@@ -993,7 +993,6 @@ fn unit_kind_all_variants_construct() {
         UnitKind::Hours,
         UnitKind::Days,
         UnitKind::Seconds,
-        UnitKind::Months,
     ];
     for k in &kinds {
         assert_eq!(k.clone(), k.clone());

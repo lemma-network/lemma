@@ -457,7 +457,7 @@ fn infer_nullish_inner_type_mismatch_errors() {
 
 #[test]
 fn infer_ether_unit_literal_is_u256() {
-    // `1.ether` → scaled u256 value (1e18 Drop).
+    // `1.ether` types as U256. (Numeric lowering to Drop happens at codegen, Step 6.)
     let typed = check_src("fn f() { let x = 1.ether }").unwrap_or_else(|e| panic!("{e:?}"));
     let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
     assert!(has_u256, "1.ether should be U256");
@@ -465,7 +465,7 @@ fn infer_ether_unit_literal_is_u256() {
 
 #[test]
 fn infer_days_unit_literal_is_u256() {
-    // `6.months` is not in the expression parser's unit set; `.days` is.
+    // `.days` types as U256. (Numeric lowering to seconds happens at codegen, Step 6.)
     let typed = check_src("fn f() { let x = 6.days }").unwrap_or_else(|e| panic!("{e:?}"));
     let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
     assert!(has_u256, "6.days should be U256");

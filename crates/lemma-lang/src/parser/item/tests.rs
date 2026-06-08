@@ -917,7 +917,7 @@ symbol: "EXT"
         assert_eq!(cfg.entries[1].value, ConfigValue::Percent(10));
     }
 
-    // ── ConfigValue::Unit — hours / seconds / months ──────────────────────────
+    // ── ConfigValue::Unit — hours / seconds / days ────────────────────────────
 
     #[test]
     fn parse_config_unit_hours() {
@@ -939,23 +939,24 @@ symbol: "EXT"
     }
 
     #[test]
-    fn parse_config_unit_months() {
-        let cfg = single_config("token T extends Token {\nconfig {\ncliff: 6.months\n}\n}");
-        assert_eq!(cfg.entries[0].value, ConfigValue::Unit(6, UnitKind::Months));
+    fn parse_config_unit_days() {
+        let cfg = single_config("token T extends Token {\nconfig {\nduration: 7.days\n}\n}");
+        assert_eq!(cfg.entries[0].value, ConfigValue::Unit(7, UnitKind::Days));
     }
 
     // ── ConfigValue::Object (nested block) ────────────────────────────────────
 
     #[test]
     fn parse_config_nested_object() {
+        // The real `fairLaunch` block — nested Object with Bool/Unit/Int values.
         let cfg = single_config(
             r#"token T extends Token {
 config {
 fairLaunch: {
 enabled: true
-maxBuyPerWallet: 10000
 cooldownBetweenBuys: 30.seconds
 antiSnipeBlocks: 3
+duration: 24.hours
 }
 }
 }"#,
@@ -967,44 +968,15 @@ antiSnipeBlocks: 3
                 assert_eq!(inner.len(), 4);
                 assert_eq!(inner[0].key, "enabled");
                 assert_eq!(inner[0].value, ConfigValue::Bool(true));
-                assert_eq!(inner[1].key, "maxBuyPerWallet");
-                assert_eq!(inner[1].value, ConfigValue::Int(10000));
-                assert_eq!(inner[2].key, "cooldownBetweenBuys");
-                assert_eq!(inner[2].value, ConfigValue::Unit(30, UnitKind::Seconds));
-                assert_eq!(inner[3].key, "antiSnipeBlocks");
-                assert_eq!(inner[3].value, ConfigValue::Int(3));
+                assert_eq!(inner[1].key, "cooldownBetweenBuys");
+                assert_eq!(inner[1].value, ConfigValue::Unit(30, UnitKind::Seconds));
+                assert_eq!(inner[2].key, "antiSnipeBlocks");
+                assert_eq!(inner[2].value, ConfigValue::Int(3));
+                assert_eq!(inner[3].key, "duration");
+                assert_eq!(inner[3].value, ConfigValue::Unit(24, UnitKind::Hours));
             }
             other => panic!("expected Object, got: {other:?}"),
         }
-    }
-
-    #[test]
-    fn parse_config_deeply_nested_object() {
-        // vesting: { team: { amount: 15%, cliff: 6.months, linear: 24.months } }
-        let cfg = single_config(
-            r#"token T extends Token {
-config {
-vesting: {
-team: { amount: 15%, cliff: 6.months, linear: 24.months }
-}
-}
-}"#,
-        );
-        assert_eq!(cfg.entries[0].key, "vesting");
-        let vesting = match &cfg.entries[0].value {
-            ConfigValue::Object(v) => v,
-            other => panic!("expected Object, got: {other:?}"),
-        };
-        assert_eq!(vesting.len(), 1);
-        assert_eq!(vesting[0].key, "team");
-        let team = match &vesting[0].value {
-            ConfigValue::Object(t) => t,
-            other => panic!("expected Object, got: {other:?}"),
-        };
-        assert_eq!(team.len(), 3);
-        assert_eq!(team[0].value, ConfigValue::Percent(15));
-        assert_eq!(team[1].value, ConfigValue::Unit(6, UnitKind::Months));
-        assert_eq!(team[2].value, ConfigValue::Unit(24, UnitKind::Months));
     }
 
     // ── Metadata block ────────────────────────────────────────────────────────
@@ -1068,11 +1040,8 @@ antiHoneypot: true
 approvalExpiry: 24.hours
 fairLaunch: {
 enabled: true
-maxBuyPerWallet: 10000
 cooldownBetweenBuys: 30.seconds
-}
-vesting: {
-team: { amount: 15%, cliff: 6.months, linear: 24.months }
+antiSnipeBlocks: 3
 }
 }
 metadata {

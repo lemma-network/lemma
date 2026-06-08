@@ -86,7 +86,7 @@ pub enum ConfigValue {
     Bool(bool),
     /// A percentage value: `15%` → `Percent(15)`
     Percent(u128),
-    /// A unit value: `6.months` → `Unit(6, UnitKind::Months)`
+    /// A unit value: `7.days` → `Unit(7, UnitKind::Days)`
     Unit(u128, UnitKind),
     /// A nested object: `{ key: value, ... }`
     Object(Vec<ConfigEntry>),
@@ -110,6 +110,4 @@ pub enum UnitKind {
     Days,
     /// `.seconds`
     Seconds,
-    /// `.months`
-    Months,
 }

@@ -289,8 +289,6 @@ pub enum Token {
     UnitDays,
     /// `.seconds`
     UnitSeconds,
-    /// `.months`
-    UnitMonths,
     /// `.tokens` — followed by `(N)` as separate tokens
     UnitTokens,
 

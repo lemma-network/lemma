@@ -297,7 +297,6 @@ impl<'src> Scanner<'src> {
             "hours" => Token::UnitHours,
             "days" => Token::UnitDays,
             "seconds" => Token::UnitSeconds,
-            "months" => Token::UnitMonths,
             "tokens" => Token::UnitTokens,
             _ => return None,
         };

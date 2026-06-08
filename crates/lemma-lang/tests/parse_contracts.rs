@@ -11,7 +11,7 @@
 //! ## Layout
 //!
 //! - `token_*` — token standard scenarios (non-tax, tax, flags, fairLaunch,
-//!   vesting, metadata, all unit suffixes, ident values, full-featured)
+//!   nested objects, metadata, all unit suffixes, ident values, full-featured)
 //! - `contract_dex_*` — DEX/AMM contract
 //! - `contract_staking_*` — staking contract
 //! - `no_panic_*` — fuzz/sweep: all samples must never panic
@@ -245,57 +245,6 @@ duration: 24.hours
     assert_eq!(duration.value, ConfigValue::Unit(24, UnitKind::Hours));
 }
 
-/// Scenario 6 — vesting with multiple beneficiaries (deeply nested + Percent + months).
-/// Proves: Object → Object depth-2, Percent variant, UnitKind::Months.
-#[test]
-fn token_vesting_multi_beneficiary() {
-    let decl = token_decl(
-        r#"token VestingToken extends Token {
-config {
-name: "Vesting Token"
-symbol: "VEST"
-decimals: 18
-maxSupply: 1000000000
-vesting: {
-team: { amount: 15%, cliff: 6.months, linear: 24.months }
-investors: { amount: 10%, cliff: 3.months, linear: 12.months }
-advisors: { amount: 5%, cliff: 1.months, linear: 6.months }
-}
-}
-}"#,
-    );
-    let cfg = config_of(&decl);
-    let vesting = match entry_value(cfg, "vesting") {
-        ConfigValue::Object(v) => v,
-        other => panic!("expected Object for vesting, got: {other:?}"),
-    };
-    assert_eq!(vesting.len(), 3, "expected team + investors + advisors");
-
-    // Verify team
-    let team = match &vesting[0].value {
-        ConfigValue::Object(t) => t,
-        other => panic!("expected Object for team, got: {other:?}"),
-    };
-    assert_eq!(team[0].value, ConfigValue::Percent(15));
-    assert_eq!(team[1].value, ConfigValue::Unit(6, UnitKind::Months));
-    assert_eq!(team[2].value, ConfigValue::Unit(24, UnitKind::Months));
-
-    // Verify investors
-    let investors = match &vesting[1].value {
-        ConfigValue::Object(i) => i,
-        other => panic!("expected Object for investors, got: {other:?}"),
-    };
-    assert_eq!(investors[0].value, ConfigValue::Percent(10));
-    assert_eq!(investors[1].value, ConfigValue::Unit(3, UnitKind::Months));
-
-    // Verify advisors
-    let advisors = match &vesting[2].value {
-        ConfigValue::Object(a) => a,
-        other => panic!("expected Object for advisors, got: {other:?}"),
-    };
-    assert_eq!(advisors[0].value, ConfigValue::Percent(5));
-}
-
 /// Scenario 7 — metadata block with nested socials object.
 /// Proves metadata parsed as ContractMember::Metadata, nested Object in metadata.
 #[test]
@@ -334,8 +283,8 @@ socials: { twitter: "@socialtoken", telegram: "t.me/socialtoken", discord: "disc
     );
 }
 
-/// Scenario 8 — all unit suffixes in config values.
-/// Proves: .hours .seconds .months .days .minutes all parse to correct UnitKind.
+/// Scenario 8 — all time-unit suffixes in config values.
+/// Proves: .hours .seconds .days .minutes all parse to correct UnitKind.
 #[test]
 fn token_all_unit_suffixes_in_config() {
     let decl = token_decl(
@@ -347,7 +296,6 @@ decimals: 18
 maxSupply: 100000000
 lockHours: 24.hours
 cooldown: 30.seconds
-vestMonths: 6.months
 durationDays: 7.days
 expireMinutes: 60.minutes
 }
@@ -361,10 +309,6 @@ expireMinutes: 60.minutes
     assert_eq!(
         entry_value(cfg, "cooldown"),
         &ConfigValue::Unit(30, UnitKind::Seconds)
-    );
-    assert_eq!(
-        entry_value(cfg, "vestMonths"),
-        &ConfigValue::Unit(6, UnitKind::Months)
     );
     assert_eq!(
         entry_value(cfg, "durationDays"),
@@ -424,14 +368,9 @@ freezable: false
 upgradeable: false
 fairLaunch: {
 enabled: true
-maxBuyPerWallet: 10000
 cooldownBetweenBuys: 30.seconds
 antiSnipeBlocks: 3
 duration: 24.hours
-}
-vesting: {
-team: { amount: 15%, cliff: 6.months, linear: 24.months }
-investors: { amount: 10%, cliff: 3.months, linear: 12.months }
 }
 }
 #[onTransfer]
@@ -466,11 +405,11 @@ socials: { twitter: "@example", telegram: "t.me/example" }
         entry_value(cfg, "approvalExpiry"),
         &ConfigValue::Unit(24, UnitKind::Hours)
     );
-    let vesting = match entry_value(cfg, "vesting") {
+    let fair_launch = match entry_value(cfg, "fairLaunch") {
         ConfigValue::Object(v) => v,
-        other => panic!("expected vesting Object, got: {other:?}"),
+        other => panic!("expected fairLaunch Object, got: {other:?}"),
     };
-    assert_eq!(vesting.len(), 2);
+    assert_eq!(fair_launch.len(), 4);
 
     // Hook fn
     let hook = decl.members.iter().find_map(|m| match m {
@@ -827,7 +766,7 @@ fn no_panic_on_all_realistic_samples() {
         "contract",
         "import { X } from",
         "token T extends {",
-        "token T extends Token { vesting: { team: { amount: 15% }",
+        "token T extends Token { config { fairLaunch: { enabled: true }",
     ];
     for src in &samples {
         let _ = tokenize(src).and_then(parse);

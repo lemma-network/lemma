@@ -2463,12 +2463,12 @@ fn infer_literal(lit: &Literal) -> ResolvedType {
         Literal::Bool(_) => ResolvedType::Bool,
         Literal::Address(_) => ResolvedType::AddressTy,
 
-        // Unit literals (`1.ether`, `6.months`) scale to u256 (Drop).
+        // Unit literals (`1.ether`, `24.hours`) scale to u256 (Drop/seconds).
         Literal::Unit(inner, kind) => infer_unit_literal(inner, kind),
     }
 }
 
-/// Type for a unit literal (`1.ether`, `6.months`, …).
+/// Type for a unit literal (`1.ether`, `24.hours`, …).
 ///
 /// All unit literals evaluate to a `u256` Drop value (the underlying chain
 /// denomination).  The inner numeric expression's type is noted but the
@@ -2482,8 +2482,7 @@ fn infer_unit_literal(_inner: &Expr, kind: &UnitKind) -> ResolvedType {
         | UnitKind::Minutes
         | UnitKind::Hours
         | UnitKind::Days
-        | UnitKind::Seconds
-        | UnitKind::Months => ResolvedType::U256,
+        | UnitKind::Seconds => ResolvedType::U256,
     }
 }
 
