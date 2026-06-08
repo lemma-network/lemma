@@ -38,7 +38,8 @@ use super::rules;
 /// ## Rule coverage
 ///
 /// **Batch 1 (4d)**: SAFETY-004, SAFETY-012, SAFETY-008, SAFETY-011 — active.
-/// Batch 2 (4e) and Batch 3 (4f) rules are pending.
+/// **Batch 2 (4e)**: SAFETY-002, SAFETY-003, SAFETY-006, SAFETY-013 — active.
+/// Batch 3 (4f) rules are pending.
 ///
 /// ## Caller
 ///
@@ -53,7 +54,12 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     violations.extend(rules::hooks::check(contract)); // SAFETY-008
     violations.extend(rules::delegate::check(contract)); // SAFETY-011
 
-    // Batch 2 (4e): fee/supply/approval/ticker — pending.
+    // Batch 2 (4e): config-driven + structural rules.
+    violations.extend(rules::fee_cap::check(contract)); // SAFETY-002
+    violations.extend(rules::supply_cap::check(contract)); // SAFETY-003
+    violations.extend(rules::approvals::check(contract)); // SAFETY-006
+    violations.extend(rules::ticker::check(contract)); // SAFETY-013
+
     // Batch 3 (4f): honeypot/blacklist/gate/upgrade/declared — pending.
 
     if violations.is_empty() {

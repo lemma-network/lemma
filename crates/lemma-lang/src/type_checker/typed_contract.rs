@@ -85,6 +85,19 @@ impl<'a> TypedContract<'a> {
         matches!(self.item, ContractItem::Token(_))
     }
 
+    /// Interfaces this contract declares it implements (for plain `contract` declarations).
+    ///
+    /// Always empty for `token` declarations (use [`is_token`] for those).
+    ///
+    /// Used by SAFETY-013 and 4f rules to detect `contract Foo implements IToken { ... }`.
+    #[must_use]
+    pub fn implements(&self) -> &[String] {
+        match &self.item {
+            ContractItem::Contract(c) => &c.implements,
+            ContractItem::Token(_) => &[],
+        }
+    }
+
     /// The [`SymbolId`] of this contract in the symbol arena.
     ///
     /// Finds the symbol by matching name + `SymbolKind::Contract`.

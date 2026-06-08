@@ -55,14 +55,19 @@ return self.balance
 
 #[test]
 fn minimal_token_passes() {
-    // A minimal config-only token must pass the stub.
+    // A minimal token with an unconditional registry.register in init must pass.
+    // SAFETY-013 (4e) requires the init constructor to call registry.register.
+    // SAFETY-003 (4e) requires a cap assert before totalSupply writes when maxSupply is set.
     let ast = typed_ast(
         r#"token MinimalToken extends Token {
 config {
 name: "Minimal"
 symbol: "MIN"
 decimals: 18
-maxSupply: 1000000
+}
+state { totalSupply: u128, ticker: u128 }
+init(registry: Address) {
+registry.register(self.ticker, self)
 }
 }"#,
     );
@@ -72,7 +77,7 @@ maxSupply: 1000000
     let result = super::analyze_safety(&contracts[0]);
     assert!(
         result.is_ok(),
-        "minimal token should pass analyze_safety stub: {result:?}"
+        "minimal token should pass analyze_safety: {result:?}"
     );
 }
 
