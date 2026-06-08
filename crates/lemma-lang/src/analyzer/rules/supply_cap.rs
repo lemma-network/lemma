@@ -17,11 +17,12 @@
 //!
 //! ## Scoping decision: conservative cap-assert detection
 //!
-//! The "preceding assert" check uses a linear scan and accepts any
-//! `Stmt::Assert` with a `<=` or `<` comparison before the write.  This may
-//! pass some contracts where the assert is not the right cap check
-//! (over-acceptance / false-negative risk).  The correct fix is a full
-//! dominator tree (4g work).  Documented here per AGENTS §solution-integrity.
+//! The "preceding assert" check uses a recursive linear scan.  Any
+//! `Stmt::Assert` with a `<=` or `<` comparison that provably precedes the
+//! increasing write (at the same or an enclosing scope) is treated as a cap
+//! guard.  This may accept contracts where the assert is unrelated to the
+//! supply cap (over-acceptance).  Full operand inspection and a proper
+//! dominator tree are 4g work.  Documented per AGENTS §solution-integrity.
 //!
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-003`.
 
@@ -93,17 +94,19 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
 
 // ─── Increasing write detection ───────────────────────────────────────────────
 
-/// Walk `stmts` recursively and collect all `totalSupply`-increasing writes.
-///
-/// Returns `Vec<(fn_name_hint, span)>` — the span of the write statement.
-/// The fn_name_hint is empty here; callers supply the function name.
-fn collect_increasing_supply_writes(stmts: &[Stmt]) -> Vec<((), Span)> {
+/// Walk `stmts` recursively and collect the spans of all `totalSupply`-increasing writes.
+fn collect_increasing_supply_writes(stmts: &[Stmt]) -> Vec<Span> {
     let mut out = Vec::new();
     walk_for_increasing_supply_writes(stmts, &mut out);
     out
 }
 
-fn walk_for_increasing_supply_writes(stmts: &[Stmt], out: &mut Vec<((), Span)>) {
+/// Returns `true` if `stmts` contains at least one `totalSupply`-increasing write.
+fn has_any_increasing_write(stmts: &[Stmt]) -> bool {
+    !collect_increasing_supply_writes(stmts).is_empty()
+}
+
+fn walk_for_increasing_supply_writes(stmts: &[Stmt], out: &mut Vec<Span>) {
     for stmt in stmts {
         match stmt {
             Stmt::Assign {
@@ -113,12 +116,12 @@ fn walk_for_increasing_supply_writes(stmts: &[Stmt], out: &mut Vec<((), Span)>) 
                 span,
             } => {
                 if is_increasing_supply_write(target, op, value) {
-                    out.push(((), *span));
+                    out.push(*span);
                 }
             }
             Stmt::Expr(Expr::Assign_(target, op, value, span), _) => {
                 if is_increasing_supply_write(target, op, value) {
-                    out.push(((), *span));
+                    out.push(*span);
                 }
             }
             // Recurse into control flow to find writes in nested blocks.
@@ -195,13 +198,27 @@ fn expr_contains_add_with_total_supply(expr: &Expr) -> bool {
 
 // ─── Cap assert detection ─────────────────────────────────────────────────────
 
-/// Returns `true` if `stmts` contains a cap-guarding `assert` statement
-/// **before** any `totalSupply`-increasing write.
+/// Returns `true` if every `totalSupply`-increasing write in `stmts` is
+/// **preceded** by a cap-guarding `assert` (any `<=` / `<` comparison).
 ///
-/// Conservative: any `Stmt::Assert` with a `<=` or `<` comparison before the
-/// first increasing write is treated as a cap guard.  This is an
-/// over-acceptance (might pass code with an unrelated assert before the write).
-/// Sound enough for 4e; tighter analysis in 4f/4g with full dominance trees.
+/// ## Traversal rules
+///
+/// - **Direct writes**: guarded iff a cap assert appeared earlier in the same
+///   statement list (linear scan, `saw_cap_assert` flag).
+/// - **Nested blocks** (`if`/`while`/`for`/`loop`/`match`/`try`/`unchecked`):
+///   if a nested block contains any increasing write it must be guarded by
+///   either an enclosing assert (`saw_cap_assert`) **or** by an assert that
+///   precedes the write *within* that nested block (recursive call).  A nested
+///   write with no covering assert at any level → returns `false` (unsound to
+///   accept).
+///
+/// No increasing write found anywhere → returns `true` (trivially guarded).
+///
+/// ## Known over-acceptance
+///
+/// Any assert with a `<=` / `<` comparison is treated as a cap guard,
+/// regardless of whether its operands mention `totalSupply`.  Full operand
+/// inspection is deferred to the 4g dominator-tree pass.
 fn has_cap_assert_before_write(stmts: &[Stmt]) -> bool {
     let mut saw_cap_assert = false;
     for stmt in stmts {
@@ -211,6 +228,7 @@ fn has_cap_assert_before_write(stmts: &[Stmt]) -> bool {
                     saw_cap_assert = true;
                 }
             }
+            // Direct writes at this statement level.
             Stmt::Assign {
                 target, op, value, ..
             } => {
@@ -223,21 +241,67 @@ fn has_cap_assert_before_write(stmts: &[Stmt]) -> bool {
                     return saw_cap_assert;
                 }
             }
-            // For nested control flow, check recursively.
+            // Nested blocks: if writes exist inside, they must be covered by
+            // either the enclosing assert or an internal assert.
             Stmt::If { then, else_, .. } => {
-                if has_cap_assert_before_write(then) {
-                    return true;
-                }
-                if let Some(b) = else_ {
-                    if has_cap_assert_before_write(b) {
-                        return true;
+                let then_w = has_any_increasing_write(then);
+                let else_w = else_.as_ref().is_some_and(|b| has_any_increasing_write(b));
+                if (then_w || else_w) && !saw_cap_assert {
+                    if then_w && !has_cap_assert_before_write(then) {
+                        return false;
+                    }
+                    if else_w {
+                        if let Some(b) = else_ {
+                            if !has_cap_assert_before_write(b) {
+                                return false;
+                            }
+                        }
                     }
                 }
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop { body, .. } => {
+                if has_any_increasing_write(body)
+                    && !saw_cap_assert
+                    && !has_cap_assert_before_write(body)
+                {
+                    return false;
+                }
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    if let MatchBody::Block(body) = &arm.body {
+                        if has_any_increasing_write(body)
+                            && !saw_cap_assert
+                            && !has_cap_assert_before_write(body)
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+            Stmt::Try {
+                body, catch_body, ..
+            } => {
+                for b in [body.as_slice(), catch_body.as_slice()] {
+                    if has_any_increasing_write(b)
+                        && !saw_cap_assert
+                        && !has_cap_assert_before_write(b)
+                    {
+                        return false;
+                    }
+                }
+            }
+            Stmt::Unchecked(body, _)
+                if has_any_increasing_write(body)
+                    && !saw_cap_assert
+                    && !has_cap_assert_before_write(body) =>
+            {
+                return false;
             }
             _ => {}
         }
     }
-    // No increasing write found at all → trivially guarded (no violation).
+    // No increasing write found at any depth → trivially guarded.
     true
 }
 

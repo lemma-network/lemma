@@ -19,13 +19,25 @@
 //! 3. **Non-canonical division**: any `/` expression that is NOT in the
 //!    `amount * rate / DENOM` form is also inconclusive.
 //!
-//! ## Scoping decision: state-field rate → Inconclusive
+//! ## Scoping decisions (4e)
 //!
-//! Proving that a state-field rate is bounded requires checking every writer
-//! of that field enforces `rate <= maxFeePercent`.  This is full writer-body
-//! analysis, deferred to 4f/4g.  For 4e: state-field rate → `Inconclusive`.
-//! This is **sound** (never lets a violation through) but incomplete (rejects
-//! some valid contracts).
+//! **State-field rate → Inconclusive.** Proving that a state-field rate is
+//! bounded requires checking every writer of that field enforces
+//! `rate <= maxFeePercent`.  Full writer-body analysis deferred to 4f/4g.
+//! For 4e: state-field rate → `Inconclusive` (sound, rejects on doubt).
+//!
+//! **Multiplication-only fee not caught.** A fee expressed as `self.fee =
+//! amount * feeRate` (no `/DENOM`) produces no `FeeExpr` and passes.  The
+//! spec requires canonical `amount * rate / DENOM` form; a hook with no
+//! division expression is assumed fee-free.  Extend in 4f/4g to detect
+//! multiply-only fee paths.
+//!
+//! **Rate is assumed to be the second `Mul` operand** (`amount * rate`).
+//! `rate * amount / DENOM` (operands swapped) treats `amount` as the rate
+//! and emits `Inconclusive` rather than checking the literal.  This is safe
+//! (sound — never lets a violation through) but rejects valid contracts
+//! with flipped operand order.  Document your fee hook as `amount * RATE /
+//! 10_000` to avoid this false positive.
 //!
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-002`.
 
@@ -87,12 +99,7 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
                         Expr::Literal(Literal::Int(n), _)
                         | Expr::Literal(Literal::IntTyped { value: n, .. }, _) => {
                             // Literal rate — compare against declared cap.
-                            // Safe cast: rates above u16::MAX are always > 2500.
-                            let rate_bps = if *n > u128::from(u16::MAX) {
-                                u16::MAX
-                            } else {
-                                *n as u16
-                            };
+                            let rate_bps = clamp_bps(*n);
                             if rate_bps > declared_bps {
                                 violations.push(SafetyError::FeeTooHigh {
                                     declared: declared_bps,
@@ -210,7 +217,10 @@ fn collect_fee_in_expr<'a>(expr: &'a Expr, out: &mut Vec<FeeExpr<'a>>) {
             if denom_is_fee_denom {
                 if let Expr::Binary(BinaryOp::Mul, _lhs, rhs, _) = numerator.as_ref() {
                     // Canonical: `amount * rate / FEE_DENOM`.
-                    // Treat the second operand of Mul as the rate.
+                    // The second operand of Mul is treated as the rate.
+                    // NOTE: `rate * amount / FEE_DENOM` (flipped) is treated as
+                    // Inconclusive (the `amount` param becomes the "rate").  Write
+                    // hooks as `amount * RATE / 10_000` to avoid this — see module doc.
                     out.push(FeeExpr::Canonical {
                         rate_expr: rhs.as_ref(),
                         div_span: *span,
@@ -287,6 +297,18 @@ fn collect_fee_in_expr<'a>(expr: &'a Expr, out: &mut Vec<FeeExpr<'a>>) {
 
 // ─── Config helpers ───────────────────────────────────────────────────────────
 
+/// Clamp a `u128` value to `u16::MAX`, then cast to `u16`.
+///
+/// Used for basis-point values that may exceed `u16::MAX` (all such values are
+/// already > `PROTOCOL_MAX_FEE_BPS` and will be rejected by the rule).
+fn clamp_bps(n: u128) -> u16 {
+    if n > u128::from(u16::MAX) {
+        u16::MAX
+    } else {
+        n as u16
+    }
+}
+
 /// Read a config entry as basis points.
 ///
 /// - `ConfigValue::Int(n)` → `n as u16` (already in bps)
@@ -298,22 +320,9 @@ fn get_config_bps(entries: &[crate::parser::ConfigEntry], key: &str) -> Option<u
         .iter()
         .find(|e| e.key == key)
         .and_then(|e| match &e.value {
-            ConfigValue::Int(n) => {
-                if *n > u128::from(u16::MAX) {
-                    Some(u16::MAX)
-                } else {
-                    Some(*n as u16)
-                }
-            }
-            ConfigValue::Percent(n) => {
-                // Percent(25) = "25%" = 2500 bps.  Scale: n * 100.
-                let bps = n.saturating_mul(100);
-                if bps > u128::from(u16::MAX) {
-                    Some(u16::MAX)
-                } else {
-                    Some(bps as u16)
-                }
-            }
+            ConfigValue::Int(n) => Some(clamp_bps(*n)),
+            // Percent(25) = "25%" = 2500 bps.  Scale: n * 100.
+            ConfigValue::Percent(n) => Some(clamp_bps(n.saturating_mul(100))),
             _ => None,
         })
 }

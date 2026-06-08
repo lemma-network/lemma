@@ -185,6 +185,61 @@ self.totalSupply += amount
     );
 }
 
+// ─── Nested-write tests (BLOCKER 1 regression — CR 2026-06-08) ───────────────
+
+#[test]
+fn supply_cap_max_supply_nested_write_without_assert_rejected() {
+    // Mint hidden inside an if block with no preceding cap assert → must be
+    // caught (this was the BLOCKER: has_cap_assert_before_write returned
+    // true for nested writes before the fix).
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { maxSupply: 1000000 }
+state { totalSupply: u128, enabled: bool }
+pub fn mint(amount: u128) {
+if (self.enabled) {
+self.totalSupply += amount
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = supply_cap_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "nested mint inside if with no cap assert must be SAFETY-003 violation; got {violations:?}"
+    );
+    assert!(
+        matches!(&violations[0], SafetyError::SupplyCapViolation { reason } if reason.contains("not dominated")),
+        "violation must mention missing cap check; got {:?}",
+        violations[0]
+    );
+}
+
+#[test]
+fn supply_cap_max_supply_nested_write_with_enclosing_assert_passes() {
+    // Enclosing assert (before the if) covers nested write — must pass.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { maxSupply: 1000000 }
+state { totalSupply: u128, enabled: bool }
+pub fn mint(amount: u128) {
+assert(self.totalSupply + amount <= 1000000)
+if (self.enabled) {
+self.totalSupply += amount
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = supply_cap_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "enclosing assert before if covers nested write — must pass; got {violations:?}"
+    );
+}
+
 // ─── Boundary tests ───────────────────────────────────────────────────────────
 
 #[test]
