@@ -58,6 +58,7 @@ use crate::type_checker::error::{TypeError, TypeErrorKind};
 use crate::type_checker::typed_ast::TypedAst;
 use crate::type_checker::typed_contract::TypedContract;
 use crate::type_checker::types::{ResolvedType, SymbolId, SymbolKind, SymbolSig};
+use crate::visit::{walk_expr, walk_stmt, Visitor};
 
 /// Check a fully-typed AST for well-formedness violations (WF-001…015).
 ///
@@ -1293,96 +1294,81 @@ fn check_wf007_loop_control_flow(contract: &TypedContract<'_>) -> Vec<TypeError>
         let Some(body) = func.body else {
             continue;
         };
-        // Start at loop_depth = 0 (not inside any loop).
-        check_wf007_in_stmts(body, 0, &mut violations);
+        let mut checker = Wf007Checker {
+            loop_depth: 0,
+            out: Vec::new(),
+        };
+        checker.visit_stmts(body);
+        violations.extend(checker.out);
     }
 
     // Also check modifier bodies.
     for member in contract.members() {
         if let ContractMember::Modifier(md) = member {
-            check_wf007_in_stmts(&md.body, 0, &mut violations);
+            let mut checker = Wf007Checker {
+                loop_depth: 0,
+                out: Vec::new(),
+            };
+            checker.visit_stmts(&md.body);
+            violations.extend(checker.out);
         }
     }
 
     violations
 }
 
-/// Recursively walk `stmts`, tracking `loop_depth`.
+// ─── WF-007 Visitor ──────────────────────────────────────────────────────────
+
+/// Walks a function body tracking loop nesting depth.
 ///
-/// `loop_depth` is incremented when entering a `for`/`while`/`loop` and
-/// decremented when exiting.  `Break`/`Continue` with `loop_depth == 0` → error.
-///
-/// Also descends into expression-position `Expr::If_`/`Expr::Match_` bodies via
-/// `walk_stmt_expr_bodies` so that a `break`/`continue` inside a value-position
-/// if/match is correctly detected.
-fn check_wf007_in_stmts(stmts: &[Stmt], loop_depth: usize, out: &mut Vec<TypeError>) {
-    for stmt in stmts {
+/// `loop_depth` is incremented on entry to each loop statement and decremented
+/// on exit.  [`visit_stmt`] intercepts `Break`/`Continue` to check the depth,
+/// and manages the depth counter around loop bodies.  The canonical [`walk_stmt`]
+/// handles all structural recursion including expression-position `Expr::If_`/
+/// `Expr::Match_` bodies — no separate `walk_stmt_expr_bodies` call needed.
+struct Wf007Checker {
+    loop_depth: usize,
+    out: Vec<TypeError>,
+}
+
+impl Visitor for Wf007Checker {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        // Check break/continue at current depth before recursion.
         match stmt {
-            Stmt::Break(span) => {
-                if loop_depth == 0 {
-                    out.push(TypeError {
-                        kind: TypeErrorKind::ControlFlowOutsideLoop {
-                            kind: "break".into(),
-                            span: *span,
-                        },
+            Stmt::Break(span) if self.loop_depth == 0 => {
+                self.out.push(TypeError {
+                    kind: TypeErrorKind::ControlFlowOutsideLoop {
+                        kind: "break".into(),
                         span: *span,
-                        message: "`break` used outside of a loop body".into(),
-                    });
-                }
+                    },
+                    span: *span,
+                    message: "`break` used outside of a loop body".into(),
+                });
             }
-            Stmt::Continue(span) => {
-                if loop_depth == 0 {
-                    out.push(TypeError {
-                        kind: TypeErrorKind::ControlFlowOutsideLoop {
-                            kind: "continue".into(),
-                            span: *span,
-                        },
+            Stmt::Continue(span) if self.loop_depth == 0 => {
+                self.out.push(TypeError {
+                    kind: TypeErrorKind::ControlFlowOutsideLoop {
+                        kind: "continue".into(),
                         span: *span,
-                        message: "`continue` used outside of a loop body".into(),
-                    });
-                }
-            }
-            // Entering a loop — increment depth.
-            Stmt::While { cond: _, body, .. } => {
-                check_wf007_in_stmts(body, loop_depth + 1, out);
-            }
-            Stmt::For { body, .. } => {
-                check_wf007_in_stmts(body, loop_depth + 1, out);
-            }
-            Stmt::Loop { body, .. } => {
-                check_wf007_in_stmts(body, loop_depth + 1, out);
-            }
-            // Non-loop control flow — pass current depth through.
-            Stmt::If { then, else_, .. } => {
-                check_wf007_in_stmts(then, loop_depth, out);
-                if let Some(b) = else_ {
-                    check_wf007_in_stmts(b, loop_depth, out);
-                }
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    if let MatchBody::Block(body) = &arm.body {
-                        check_wf007_in_stmts(body, loop_depth, out);
-                    }
-                }
-            }
-            Stmt::Try {
-                body, catch_body, ..
-            } => {
-                check_wf007_in_stmts(body, loop_depth, out);
-                check_wf007_in_stmts(catch_body, loop_depth, out);
-            }
-            Stmt::Unchecked(body, _) => {
-                check_wf007_in_stmts(body, loop_depth, out);
+                    },
+                    span: *span,
+                    message: "`continue` used outside of a loop body".into(),
+                });
             }
             _ => {}
         }
-        // Also descend into expression-position if/match bodies within this statement.
-        // The current loop_depth is passed through — expression-position if/match
-        // does NOT introduce a new loop scope.
-        walk_stmt_expr_bodies(stmt, &mut |body| {
-            check_wf007_in_stmts(body, loop_depth, out);
-        });
+        // Manage depth for loop statements: increment before recursion, decrement after.
+        let is_loop = matches!(
+            stmt,
+            Stmt::While { .. } | Stmt::For { .. } | Stmt::Loop { .. }
+        );
+        if is_loop {
+            self.loop_depth += 1;
+        }
+        walk_stmt(self, stmt);
+        if is_loop {
+            self.loop_depth -= 1;
+        }
     }
 }
 
@@ -3668,8 +3654,8 @@ fn config_value_matches_type(value: &ConfigValue, expected: &str) -> bool {
 /// `pure` violation: any `Expr::Member` where receiver is `self` (state read).
 /// `view` violation: any `Stmt::Assign { target: Expr::Member(self, field) }` (state write).
 ///
-/// Both violations: walk function body using the shared `walk_stmts`/
-/// `walk_expr_for_stmts` helpers (AGENTS §2 DRY).
+/// Both violations: walk function body via the canonical [`crate::visit::Visitor`]
+/// (`walk_stmt`/`walk_expr`) — the shared traversal in `visit.rs` (AGENTS §2 DRY).
 ///
 /// Mutability is read from the raw `Function.mutability` field in the AST
 /// (accessed via `contract.members()` → `ContractMember::Function(f)`).
@@ -3710,297 +3696,149 @@ fn check_wf015_effect_conformance(typed_ast: &TypedAst) -> Vec<TypeError> {
 /// Violation: any `Expr::Member` where receiver is `self` (state read).
 /// Also: `Expr::Ident("msg")` or `Expr::Ident("block")` (context reads).
 ///
-/// Uses `walk_expr_for_stmts` to descend into expression-position if/match bodies.
+/// Implemented via [`PureChecker`] using the canonical [`crate::visit::Visitor`] traversal.
 fn check_wf015_pure_violations(func: &str, stmts: &[Stmt], out: &mut Vec<TypeError>) {
-    for stmt in stmts {
-        check_wf015_pure_in_stmt(func, stmt, out);
-        // Descend into expression-position if/match bodies.
-        walk_stmt_expr_bodies(stmt, &mut |body| {
-            check_wf015_pure_violations(func, body, out);
-        });
-    }
+    let mut checker = PureChecker {
+        func,
+        out: Vec::new(),
+    };
+    checker.visit_stmts(stmts);
+    out.extend(checker.out);
 }
 
-/// Check a single statement for pure violations (state reads).
-fn check_wf015_pure_in_stmt(func: &str, stmt: &Stmt, out: &mut Vec<TypeError>) {
-    match stmt {
-        Stmt::Let { expr, .. } => check_wf015_pure_in_expr(func, expr, out),
-        Stmt::Assign { target, value, .. } => {
-            check_wf015_pure_in_expr(func, target, out);
-            check_wf015_pure_in_expr(func, value, out);
-        }
-        Stmt::Expr(expr, _) => check_wf015_pure_in_expr(func, expr, out),
-        Stmt::Return(Some(expr), _) => check_wf015_pure_in_expr(func, expr, out),
-        Stmt::Emit { fields, .. } => {
-            for (_, e) in fields {
-                check_wf015_pure_in_expr(func, e, out);
-            }
-        }
-        Stmt::Assert { cond, msg, .. } => {
-            check_wf015_pure_in_expr(func, cond, out);
-            if let Some(m) = msg {
-                check_wf015_pure_in_expr(func, m, out);
-            }
-        }
-        Stmt::Revert { msg: Some(m), .. } => check_wf015_pure_in_expr(func, m, out),
-        Stmt::If {
-            cond, then, else_, ..
-        } => {
-            check_wf015_pure_in_expr(func, cond, out);
-            check_wf015_pure_violations(func, then, out);
-            if let Some(b) = else_ {
-                check_wf015_pure_violations(func, b, out);
-            }
-        }
-        Stmt::Match { expr, arms, .. } => {
-            check_wf015_pure_in_expr(func, expr, out);
-            for arm in arms {
-                match &arm.body {
-                    MatchBody::Block(body) => check_wf015_pure_violations(func, body, out),
-                    MatchBody::Expr(e) => check_wf015_pure_in_expr(func, e, out),
-                }
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            check_wf015_pure_in_expr(func, cond, out);
-            check_wf015_pure_violations(func, body, out);
-        }
-        Stmt::For { body, .. } | Stmt::Loop { body, .. } => {
-            check_wf015_pure_violations(func, body, out);
-        }
-        Stmt::Try {
-            body, catch_body, ..
-        } => {
-            check_wf015_pure_violations(func, body, out);
-            check_wf015_pure_violations(func, catch_body, out);
-        }
-        Stmt::Unchecked(body, _) => {
-            check_wf015_pure_violations(func, body, out);
-        }
-        _ => {}
-    }
+// ─── WF-015 pure Visitor ─────────────────────────────────────────────────────
+
+/// Collects `pure` effect violations in a function body.
+///
+/// Violations: `Expr::Member(self, field)` (state read) and
+/// `Expr::Ident("msg" | "block")` (context read).
+///
+/// The canonical [`walk_stmt`] / [`walk_expr`] traversal covers all nested
+/// statement and expression bodies including expression-position `Expr::If_`
+/// and `Expr::Match_` arms — no separate `walk_stmt_expr_bodies` call needed.
+///
+/// Lambda bodies are intentionally NOT descended into (separate scope).
+struct PureChecker<'a> {
+    func: &'a str,
+    out: Vec<TypeError>,
 }
 
-/// Check an expression for pure violations (state reads via `self.field` or
-/// context reads via `msg`/`block`).
-fn check_wf015_pure_in_expr(func: &str, expr: &Expr, out: &mut Vec<TypeError>) {
-    match expr {
-        // `self.field` — state read.
-        Expr::Member(obj, field, span) if is_self_expr(obj) => {
-            out.push(TypeError {
-                kind: TypeErrorKind::EffectViolation {
-                    func: func.to_owned(),
-                    declared: "pure".into(),
-                    found: format!("state read (`self.{field}`)"),
+impl Visitor for PureChecker<'_> {
+    fn visit_expr(&mut self, expr: &Expr) {
+        match expr {
+            // `self.field` — state read.
+            Expr::Member(obj, field, span) if is_self_expr(obj) => {
+                self.out.push(TypeError {
+                    kind: TypeErrorKind::EffectViolation {
+                        func: self.func.to_owned(),
+                        declared: "pure".into(),
+                        found: format!("state read (`self.{field}`)"),
+                        span: *span,
+                    },
                     span: *span,
-                },
-                span: *span,
-                message: format!(
-                    "WF-015: `pure` function `{func}` reads state field `self.{field}`"
-                ),
-            });
-            // Do NOT recurse into `obj` — it is `self` (a leaf).
-        }
-        // `msg` or `block` — context read.
-        Expr::Ident(name, span) if name == "msg" || name == "block" => {
-            out.push(TypeError {
-                kind: TypeErrorKind::EffectViolation {
-                    func: func.to_owned(),
-                    declared: "pure".into(),
-                    found: format!("context read (`{name}`)"),
+                    message: format!(
+                        "WF-015: `pure` function `{}` reads state field `self.{field}`",
+                        self.func
+                    ),
+                });
+                // Do NOT recurse into obj — it is `self` (a leaf).
+                return;
+            }
+            // `msg` or `block` — context read.
+            Expr::Ident(name, span) if name == "msg" || name == "block" => {
+                self.out.push(TypeError {
+                    kind: TypeErrorKind::EffectViolation {
+                        func: self.func.to_owned(),
+                        declared: "pure".into(),
+                        found: format!("context read (`{name}`)"),
+                        span: *span,
+                    },
                     span: *span,
-                },
-                span: *span,
-                message: format!("WF-015: `pure` function `{func}` reads runtime context `{name}`"),
-            });
-        }
-        // Recurse into all other expression forms.
-        Expr::Binary(_, left, right, _) => {
-            check_wf015_pure_in_expr(func, left, out);
-            check_wf015_pure_in_expr(func, right, out);
-        }
-        Expr::Unary(_, inner, _) => check_wf015_pure_in_expr(func, inner, out),
-        Expr::Ternary {
-            cond, then, else_, ..
-        } => {
-            check_wf015_pure_in_expr(func, cond, out);
-            check_wf015_pure_in_expr(func, then, out);
-            check_wf015_pure_in_expr(func, else_, out);
-        }
-        Expr::Nullish(left, right, _) => {
-            check_wf015_pure_in_expr(func, left, out);
-            check_wf015_pure_in_expr(func, right, out);
-        }
-        Expr::Try_(inner, _) => check_wf015_pure_in_expr(func, inner, out),
-        Expr::Cast { expr, .. } => check_wf015_pure_in_expr(func, expr, out),
-        Expr::Assign_(target, _, val, _) => {
-            check_wf015_pure_in_expr(func, target, out);
-            check_wf015_pure_in_expr(func, val, out);
-        }
-        Expr::Member(base, _, _) => {
-            // Non-self member access — recurse into base.
-            check_wf015_pure_in_expr(func, base, out);
-        }
-        Expr::Index(base, idx, _) => {
-            check_wf015_pure_in_expr(func, base, out);
-            check_wf015_pure_in_expr(func, idx, out);
-        }
-        Expr::Call {
-            callee, opts, args, ..
-        } => {
-            check_wf015_pure_in_expr(func, callee, out);
-            if let Some(o) = opts {
-                if let Some(v) = &o.value {
-                    check_wf015_pure_in_expr(func, v, out);
-                }
-                if let Some(g) = &o.gas {
-                    check_wf015_pure_in_expr(func, g, out);
-                }
-                if let Some(s) = &o.salt {
-                    check_wf015_pure_in_expr(func, s, out);
-                }
+                    message: format!(
+                        "WF-015: `pure` function `{}` reads runtime context `{name}`",
+                        self.func
+                    ),
+                });
+                return; // Ident is a leaf — no sub-expressions.
             }
-            for arg in args {
-                let e = match arg {
-                    crate::parser::CallArg::Positional(e) | crate::parser::CallArg::Named(_, e) => {
-                        e
-                    }
-                };
-                check_wf015_pure_in_expr(func, e, out);
-            }
+            _ => {}
         }
-        Expr::New { opts, args, .. } => {
-            if let Some(o) = opts {
-                if let Some(v) = &o.value {
-                    check_wf015_pure_in_expr(func, v, out);
-                }
-                if let Some(g) = &o.gas {
-                    check_wf015_pure_in_expr(func, g, out);
-                }
-                if let Some(s) = &o.salt {
-                    check_wf015_pure_in_expr(func, s, out);
-                }
-            }
-            for arg in args {
-                let e = match arg {
-                    crate::parser::CallArg::Positional(e) | crate::parser::CallArg::Named(_, e) => {
-                        e
-                    }
-                };
-                check_wf015_pure_in_expr(func, e, out);
-            }
-        }
-        Expr::Tuple(elems, _) | Expr::Array(elems, _) => {
-            for e in elems {
-                check_wf015_pure_in_expr(func, e, out);
-            }
-        }
-        Expr::Struct_ { fields, spread, .. } => {
-            for (_, e) in fields {
-                check_wf015_pure_in_expr(func, e, out);
-            }
-            if let Some(s) = spread {
-                check_wf015_pure_in_expr(func, s, out);
-            }
-        }
-        Expr::Template(segments, _) => {
-            for seg in segments {
-                if let crate::parser::ast::TemplateExprSegment::Interpolation(e) = seg {
-                    check_wf015_pure_in_expr(func, e, out);
-                }
-            }
-        }
-        Expr::If_ {
-            cond, then, else_, ..
-        } => {
-            check_wf015_pure_in_expr(func, cond, out);
-            check_wf015_pure_violations(func, then, out);
-            if let Some(b) = else_ {
-                check_wf015_pure_violations(func, b, out);
-            }
-        }
-        Expr::Match_(scrutinee, arms, _) => {
-            check_wf015_pure_in_expr(func, scrutinee, out);
-            for arm in arms {
-                match &arm.body {
-                    MatchBody::Block(body) => check_wf015_pure_violations(func, body, out),
-                    MatchBody::Expr(e) => check_wf015_pure_in_expr(func, e, out),
-                }
-            }
-        }
-        // Lambda bodies are a separate scope — do NOT descend.
-        // Literals, Ident (non-msg/block): leaf nodes.
-        _ => {}
+        walk_expr(self, expr);
     }
 }
 
 /// Check a `view` function body for state-write violations.
 ///
-/// Violation: any `Stmt::Assign { target: Expr::Member(self, field) }` (state write).
-///
-/// Uses `walk_stmt_expr_bodies` to descend into expression-position if/match bodies.
+/// Implemented via [`ViewChecker`] which uses the canonical [`Visitor`]
+/// traversal — no separate `walk_stmt_expr_bodies` call needed.
 fn check_wf015_view_violations(func: &str, stmts: &[Stmt], out: &mut Vec<TypeError>) {
-    for stmt in stmts {
-        match stmt {
-            // Direct state write: `self.field = ...`
-            Stmt::Assign { target, span, .. } if is_self_field_target_any(target) => {
-                out.push(TypeError {
+    let mut checker = ViewChecker {
+        func,
+        out: Vec::new(),
+    };
+    checker.visit_stmts(stmts);
+    out.extend(checker.out);
+}
+
+// ─── WF-015 view Visitor ─────────────────────────────────────────────────────
+
+/// Collects `view` effect violations in a function body.
+///
+/// Violations:
+/// - `Stmt::Assign { target: self.field }` — direct state write statement.
+/// - `Expr::Assign_(self.field, ...)` — expression-form state write (e.g. in
+///   loop body or if-expression arm) reached via the canonical [`walk_stmt`].
+///
+/// The canonical traversal automatically descends into expression-position
+/// `Expr::If_` / `Expr::Match_` bodies — no separate `walk_stmt_expr_bodies`
+/// call needed.
+struct ViewChecker<'a> {
+    func: &'a str,
+    out: Vec<TypeError>,
+}
+
+impl Visitor for ViewChecker<'_> {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        if let Stmt::Assign { target, span, .. } = stmt {
+            if is_self_field_target_any(target) {
+                self.out.push(TypeError {
                     kind: TypeErrorKind::EffectViolation {
-                        func: func.to_owned(),
+                        func: self.func.to_owned(),
                         declared: "view".into(),
                         found: "state write".into(),
                         span: *span,
                     },
                     span: *span,
-                    message: format!("WF-015: `view` function `{func}` writes to contract state"),
+                    message: format!(
+                        "WF-015: `view` function `{}` writes to contract state",
+                        self.func
+                    ),
                 });
             }
-            // Expression-statement assignment: `self.field = ...` wrapped in Stmt::Expr.
-            Stmt::Expr(Expr::Assign_(target, _, _, span), _)
-                if is_self_field_target_any(target) =>
-            {
-                out.push(TypeError {
-                    kind: TypeErrorKind::EffectViolation {
-                        func: func.to_owned(),
-                        declared: "view".into(),
-                        found: "state write".into(),
-                        span: *span,
-                    },
-                    span: *span,
-                    message: format!("WF-015: `view` function `{func}` writes to contract state"),
-                });
-            }
-            Stmt::If { then, else_, .. } => {
-                check_wf015_view_violations(func, then, out);
-                if let Some(b) = else_ {
-                    check_wf015_view_violations(func, b, out);
-                }
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    if let MatchBody::Block(body) = &arm.body {
-                        check_wf015_view_violations(func, body, out);
-                    }
-                }
-            }
-            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop { body, .. } => {
-                check_wf015_view_violations(func, body, out);
-            }
-            Stmt::Try {
-                body, catch_body, ..
-            } => {
-                check_wf015_view_violations(func, body, out);
-                check_wf015_view_violations(func, catch_body, out);
-            }
-            Stmt::Unchecked(body, _) => {
-                check_wf015_view_violations(func, body, out);
-            }
-            _ => {}
         }
-        // Descend into expression-position if/match bodies.
-        walk_stmt_expr_bodies(stmt, &mut |body| {
-            check_wf015_view_violations(func, body, out);
-        });
+        walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        // Catch expression-position assignments: `self.field = ...`.
+        if let Expr::Assign_(target, _, _, span) = expr {
+            if is_self_field_target_any(target) {
+                self.out.push(TypeError {
+                    kind: TypeErrorKind::EffectViolation {
+                        func: self.func.to_owned(),
+                        declared: "view".into(),
+                        found: "state write".into(),
+                        span: *span,
+                    },
+                    span: *span,
+                    message: format!(
+                        "WF-015: `view` function `{}` writes to contract state",
+                        self.func
+                    ),
+                });
+            }
+        }
+        walk_expr(self, expr);
     }
 }
 
