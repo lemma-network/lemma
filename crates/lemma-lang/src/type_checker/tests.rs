@@ -261,7 +261,7 @@ fn check_valid_samples_all_succeed() {
     let samples = [
         "",
         "contract C {}",
-        "token T extends Token { config { name: \"A\" symbol: \"A\" decimals: 18 maxSupply: 1000000 } init(registry: Address) { registry.register(\"A\", self) } }",
+        "token T extends Token { config { name: \"A\" symbol: \"A\" decimals: 18 maxSupply: 1000000 } init() {} }",
         "fn f(x: u128) -> u128 { return x }",
         "struct S { x: u128 }",
     ];

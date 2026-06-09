@@ -22,7 +22,7 @@
 // Visibility violations (`pub init`, `external init`) and return-type violations
 // (`init -> T`) are parse-time errors — they never reach the WF pass.
 // See parser/decl/tests.rs for those parse-error tests.
-// WF-003 checks: duplicate init, token missing init, banned annotations, registry.register.
+// WF-003 checks: duplicate init, token missing init, banned annotations.
 //
 // ## Token config syntax (WF-014)
 //
@@ -440,13 +440,10 @@ fn check_wf003_accepts_payable_init() {
     );
 }
 
-// Note: `pub init` and `external init` are PARSE-TIME errors — they never reach
-// the WF pass. Parser tests for those cases live in parser/decl/tests.rs.
-// Similarly, `init -> T` (return type on init) is a parse-time error.
-
 #[test]
-fn check_wf003_accepts_token_with_init_and_registry_register() {
-    // Token with init that calls registry.register at the top level → OK.
+fn check_wf003_accepts_token_with_init() {
+    // Token with an init function → OK (WF-003 clause 2 satisfied).
+    // registry.register is no longer required here — auto-injected by codegen (DB-A48).
     // Uses a complete Token config (name, symbol, decimals, maxSupply) per WF-014.
     assert_passes(
         r#"
@@ -457,13 +454,15 @@ fn check_wf003_accepts_token_with_init_and_registry_register() {
                 decimals: 18
                 maxSupply: 1000000
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
     );
 }
+
+// Note: `pub init` and `external init` are PARSE-TIME errors — they never reach
+// the WF pass. Parser tests for those cases live in parser/decl/tests.rs.
+// Similarly, `init -> T` (return type on init) is a parse-time error.
 
 // ── Negative tests ─────────────────────────────────────────────────────────────
 
@@ -548,34 +547,7 @@ fn check_wf003_rejects_token_without_init() {
             matches!(
                 kind,
                 TypeErrorKind::MalformedInit { reason, .. }
-                    if reason.contains("registry.register") || reason.contains("init")
-            )
-        },
-    );
-}
-
-#[test]
-fn check_wf003_rejects_token_init_missing_registry_register() {
-    // Token init that does not call registry.register → MalformedInit.
-    // Uses a complete Token config per WF-014 so only the WF-003 violation fires.
-    assert_wf_error(
-        r#"
-        token MyToken extends Token {
-            config {
-                name: "MyToken"
-                symbol: "MTK"
-                decimals: 18
-                maxSupply: 1000000
-            }
-            init() {
-            }
-        }
-        "#,
-        |kind| {
-            matches!(
-                kind,
-                TypeErrorKind::MalformedInit { reason, .. }
-                    if reason.contains("registry.register")
+                    if reason.contains("init") || reason.contains("state initialization")
             )
         },
     );
@@ -634,36 +606,6 @@ fn check_wf003_rejects_whennotpaused_init() {
                 kind,
                 TypeErrorKind::MalformedInit { reason, .. }
                     if reason.contains("whenNotPaused")
-            )
-        },
-    );
-}
-
-#[test]
-fn check_wf003_rejects_token_init_with_registry_register_inside_if() {
-    // registry.register inside an if branch is NOT top-level → reject.
-    // Uses a complete Token config per WF-014 so only the WF-003 violation fires.
-    assert_wf_error(
-        r#"
-        token MyToken extends Token {
-            config {
-                name: "MyToken"
-                symbol: "MTK"
-                decimals: 18
-                maxSupply: 1000000
-            }
-            init(flag: bool, registry: Address) {
-                if (flag) {
-                    registry.register("MTK", self)
-                }
-            }
-        }
-        "#,
-        |kind| {
-            matches!(
-                kind,
-                TypeErrorKind::MalformedInit { reason, .. }
-                    if reason.contains("registry.register")
             )
         },
     );
@@ -1869,9 +1811,7 @@ fn check_wf014_accepts_full_valid_token_config() {
                 decimals: 18
                 maxSupply: 1000000
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
     );
@@ -1890,9 +1830,7 @@ fn check_wf014_accepts_token_config_with_optional_key_absent() {
                 decimals: 18
                 maxSupply: 1000000
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
     );
@@ -1911,9 +1849,7 @@ fn check_wf014_rejects_token_config_missing_mandatory_key() {
                 symbol: "MTK"
                 maxSupply: 1000000
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
         |kind| {
@@ -1938,9 +1874,7 @@ fn check_wf014_rejects_token_config_wrong_value_type() {
                 decimals: "eighteen"
                 maxSupply: 1000000
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
         |kind| {
@@ -1966,9 +1900,7 @@ fn check_wf014_rejects_token_config_unknown_key() {
                 maxSupply: 1000000
                 fooBar: 42
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
         |kind| {
@@ -1997,9 +1929,7 @@ fn check_wf014_rejects_taxtoken_fees_others_without_distribute_taxes() {
                 maxSupply: 1000000
                 fees: { burn: 0 holders: 0 others: 100 }
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
         |kind| {
@@ -2038,9 +1968,7 @@ fn check_wf014_accepts_spec_canonical_token_example() {
                 freezable: false
                 upgradeable: false
             }
-            init(registry: Address) {
-                registry.register("EXT", self)
-            }
+            init() {}
         }
         "#,
     );
@@ -2059,9 +1987,7 @@ fn check_wf014_accepts_token_with_anti_honeypot_false() {
                 maxSupply: 1000000
                 antiHoneypot: false
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
     );
@@ -2080,9 +2006,7 @@ fn check_wf014_rejects_anti_honeypot_wrong_type_int() {
                 maxSupply: 1000000
                 antiHoneypot: 1
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
         |kind| {
@@ -2108,9 +2032,7 @@ fn check_wf014_rejects_anti_honeypot_wrong_type_str() {
                 maxSupply: 1000000
                 antiHoneypot: "yes"
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
         |kind| {
@@ -2137,9 +2059,7 @@ fn check_wf014_accepts_taxtoken_with_anti_honeypot() {
                 antiHoneypot: true
                 fees: { burn: 0 holders: 0 others: 0 }
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
     );
@@ -2161,9 +2081,7 @@ fn check_wf014_accepts_token_with_fair_launch() {
                     antiSnipeBlocks: 3
                 }
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
     );
@@ -2184,9 +2102,7 @@ fn check_wf014_rejects_token_fair_launch_missing_mandatory_key() {
                     antiSnipeBlocks: 3
                 }
             }
-            init(registry: Address) {
-                registry.register("MTK", self)
-            }
+            init() {}
         }
         "#,
         |kind| {

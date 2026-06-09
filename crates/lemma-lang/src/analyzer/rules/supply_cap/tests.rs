@@ -40,9 +40,7 @@ fn supply_cap_mintable_false_no_writes_passes() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: false }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn transfer(to: Address, amount: u128) {
 let x = amount
 }
@@ -63,9 +61,7 @@ fn supply_cap_mintable_false_burn_only_passes() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: false }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn burn(amount: u128) {
 self.totalSupply = self.totalSupply - amount
 }
@@ -86,9 +82,7 @@ fn supply_cap_max_supply_with_preceding_assert_passes() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn mint(amount: u128) {
 assert(self.totalSupply + amount <= 1000000)
 self.totalSupply += amount
@@ -134,9 +128,7 @@ fn supply_cap_mintable_false_with_add_assign_rejected() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: false }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn mint(amount: u128) {
 self.totalSupply += amount
 }
@@ -163,9 +155,7 @@ fn supply_cap_mintable_false_with_plain_add_rejected() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: false }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn mint(amount: u128) {
 self.totalSupply = self.totalSupply + amount
 }
@@ -192,9 +182,7 @@ fn supply_cap_max_supply_without_assert_rejected() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn mint(amount: u128) {
 self.totalSupply += amount
 }
@@ -225,9 +213,7 @@ fn supply_cap_max_supply_nested_write_without_assert_rejected() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
 state { totalSupply: u128 = 0, enabled: bool = false }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn mint(amount: u128) {
 if (self.enabled) {
 self.totalSupply += amount
@@ -256,9 +242,7 @@ fn supply_cap_max_supply_nested_write_with_enclosing_assert_passes() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
 state { totalSupply: u128 = 0, enabled: bool = false }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn mint(amount: u128) {
 assert(self.totalSupply + amount <= 1000000)
 if (self.enabled) {
@@ -284,9 +268,7 @@ fn supply_cap_max_supply_assert_after_write_rejected() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn mint(amount: u128) {
 self.totalSupply += amount
 assert(self.totalSupply <= 1000000)
@@ -312,9 +294,7 @@ fn supply_cap_mintable_true_no_max_supply_passes() {
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: true }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn mint(amount: u128) {
 assert(self.totalSupply + amount <= 1000000)
 self.totalSupply += amount

@@ -58,8 +58,7 @@ return self.balance
 
 #[test]
 fn minimal_token_passes() {
-    // A minimal token with an unconditional registry.register in init must pass.
-    // SAFETY-013 (4e) requires the init constructor to call registry.register.
+    // A minimal token must pass analyze_safety.
     // SAFETY-003 (4e) requires a cap assert before totalSupply writes when maxSupply is set.
     // Uses a complete Token config (name, symbol, decimals, maxSupply) per WF-014.
     let ast = typed_ast(
@@ -70,10 +69,8 @@ symbol: "MIN"
 decimals: 18
 maxSupply: 1000000
 }
-state { totalSupply: u128 = 0, ticker: u128 = 0 }
-init(registry: Address) {
-registry.register(self.ticker, self)
-}
+state { totalSupply: u128 = 0 }
+init() {}
 }"#,
     );
     let contracts = ast.contracts();

@@ -50,9 +50,7 @@ maxFeePercent: 2500
 fees: { burn: 500 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 @onTransfer
 pub fn onTransfer(from: Address, to: Address, amount: u128) {
 let fee = amount * 500 / 10000
@@ -81,9 +79,7 @@ maxFeePercent: 2500
 fees: { burn: 0 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 @onTransfer
 pub fn onTransfer(from: Address, to: Address, amount: u128) {
 self.totalSupply = self.totalSupply + amount
@@ -131,9 +127,7 @@ maxFeePercent: 2500
 fees: { burn: 2500 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 @onTransfer
 pub fn onTransfer(from: Address, to: Address, amount: u128) {
 let fee = amount * 2500 / 10000
@@ -164,9 +158,7 @@ maxFeePercent: 2500
 fees: { burn: 500 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 @onTransfer
 pub fn onTransfer(from: Address, to: Address, amount: u128) {
 let fee = amount * 3000 / 10000
@@ -223,9 +215,7 @@ maxFeePercent: 2500
 fees: { burn: 500 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 @onTransfer
 pub fn onTransfer(from: Address, to: Address, amount: u128) {
 let fee = amount * 500 / 10000
@@ -262,9 +252,7 @@ maxFeePercent: 2500
 fees: { burn: 0 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0, feeRate: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 @onTransfer
 pub fn onTransfer(from: Address, to: Address, amount: u128) {
 let fee = amount * self.feeRate / 10000
@@ -307,9 +295,7 @@ maxFeePercent: 2500
 fees: { burn: 500 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 @onTransfer
 pub fn onTransfer(from: Address, to: Address, amount: u128) {
 let fee = amount * 2501 / 10000
@@ -351,9 +337,7 @@ maxFeePercent: 2500
 fees: { burn: 0 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 pub fn computeFee(amount: u128) -> u128 {
 return amount * 9999 / 10000
 }

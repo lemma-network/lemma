@@ -63,9 +63,7 @@ symbol: "MIN"
 decimals: 18
 maxSupply: 1000000
 }
-init(registry: Address) {
-registry.register("MIN", self)
-}
+init() {}
 }"#,
     );
     assert!(
@@ -92,9 +90,7 @@ maxSupply: 500000000
 state {
 snapshots: Map<Address, u128>
 }
-init(registry: Address) {
-registry.register("EXT2", self)
-}
+init() {}
 pub view fn getSnapshot(holder: Address) -> u128 {
 return self.snapshots[holder]
 }
@@ -214,9 +210,7 @@ fn typed_contract_name_and_is_token_flags_correct() {
     let typed = pipeline(
         r#"token MyToken extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 }"#,
     )
     .expect("pipeline failed");
@@ -321,9 +315,7 @@ fn typed_contract_config_present_for_token_absent_for_contract() {
     let typed = pipeline(
         r#"token Tk extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
-init(registry: Address) {
-registry.register("T", self)
-}
+init() {}
 }"#,
     )
     .expect("pipeline failed");

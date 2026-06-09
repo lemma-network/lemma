@@ -250,8 +250,7 @@ pub enum TypeErrorKind {
     /// WF-003 — The `init` constructor is structurally malformed.
     ///
     /// Covers: duplicate `init`, `pub`/`external`/`@onlyOwner` on `init`,
-    /// `init` with a return type, token missing `init`, token `init` missing
-    /// `registry.register`.
+    /// `init` with a return type, token missing `init`.
     ///
     /// See `docs/03-LANGUAGE_SPEC.md §30 WF-003`.
     MalformedInit {

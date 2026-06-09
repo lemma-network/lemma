@@ -89,7 +89,7 @@ impl<'a> TypedContract<'a> {
     ///
     /// Always empty for `token` declarations (use [`is_token`] for those).
     ///
-    /// Used by SAFETY-013 and 4f rules to detect `contract Foo implements IToken { ... }`.
+    /// Used by WF-008 to check interface implementation completeness.
     #[must_use]
     pub fn implements(&self) -> &[String] {
         match &self.item {

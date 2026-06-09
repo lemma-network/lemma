@@ -65,9 +65,7 @@ fn typed_contract_is_token_correct() {
                 decimals: 18
                 maxSupply: 1000000
             }
-            init(registry: Address) {
-                registry.register("T", self)
-            }
+            init() {}
         }
         "#,
     );
@@ -183,9 +181,7 @@ fn typed_contract_config_some_for_token() {
                 decimals: 18
                 maxSupply: 1000000
             }
-            init(registry: Address) {
-                registry.register("MyToken", self)
-            }
+            init() {}
         }
         "#,
     );

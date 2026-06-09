@@ -1,10 +1,13 @@
 //! Safety-analyzer error types.
 //!
 //! [`SafetyError`] is the error produced by [`super::analyze_safety`] when a
-//! contract violates one of the **SAFETY-001…013** compile-time rules.
+//! contract violates one of the active SAFETY compile-time rules.
 //!
 //! `analyze_safety` collects **all** violations before returning, so a single
 //! compilation attempt surfaces every problem at once.
+//!
+//! Note: SAFETY-013 (MissingTickerRegistration) retired per decision DB-A48 —
+//! registration is auto-injected by codegen.
 
 use crate::lexer::token::Span;
 
@@ -13,7 +16,7 @@ use crate::lexer::token::Span;
 /// A compile-time safety violation detected by the Lem safety analyzer.
 ///
 /// Produced by [`super::analyze_safety`].  Each variant corresponds to one
-/// SAFETY rule from `docs/09-SAFETY_ANALYZER_SPEC.md §3`.
+/// active SAFETY rule from `docs/09-SAFETY_ANALYZER_SPEC.md §3`.
 ///
 /// The enum is `#[non_exhaustive]` so that adding new SAFETY rules (e.g. the
 /// Phase 3 agent rules SAFETY-014…019) is not a breaking change for consumers.
@@ -186,17 +189,6 @@ pub enum SafetyError {
         /// Source location of the unchecked operation.
         span: Span,
     },
-
-    // ── SAFETY-013 — Ticker Registration ─────────────────────────────────────
-    /// A token contract does not call `registry.register(ticker, self)` on an
-    /// unconditional path through its constructor.
-    ///
-    /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-013`.
-    #[error(
-        "SAFETY-013 ticker registration: token contract does not call \
-         `registry.register(ticker, self)` unconditionally in its constructor"
-    )]
-    MissingTickerRegistration,
 
     // ── Inconclusive ──────────────────────────────────────────────────────────
     /// Analysis is inconclusive for a sound rule: the contract cannot be

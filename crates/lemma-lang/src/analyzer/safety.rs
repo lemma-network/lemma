@@ -1,26 +1,28 @@
 //! Safety analyzer driver.
 //!
-//! [`analyze_safety`] runs all SAFETY-001…013 rules against a [`TypedContract`]
+//! [`analyze_safety`] runs all active SAFETY rules against a [`TypedContract`]
 //! and collects every violation before returning.
 //!
 //! ## Rule modules
 //!
 //! ```text
 //! rules/
-//!   reentrancy.rs  — SAFETY-004
-//!   integer.rs     — SAFETY-012
-//!   hooks.rs       — SAFETY-008
-//!   delegate.rs    — SAFETY-011
-//!   fee_cap.rs     — SAFETY-002  (4e)
-//!   supply_cap.rs  — SAFETY-003  (4e)
-//!   approvals.rs   — SAFETY-006  (4e)
-//!   ticker.rs      — SAFETY-013  (4e)
-//!   blacklist.rs   — SAFETY-005  (4f)
-//!   one_way_gate.rs — SAFETY-009 (4f)
-//!   upgrade.rs     — SAFETY-007  (4f)
-//!   declared.rs    — SAFETY-010  (4f)
-//!   honeypot.rs    — SAFETY-001  (4f)
+//!   reentrancy.rs   — SAFETY-004
+//!   integer.rs      — SAFETY-012
+//!   hooks.rs        — SAFETY-008
+//!   delegate.rs     — SAFETY-011
+//!   fee_cap.rs      — SAFETY-002  (4e)
+//!   supply_cap.rs   — SAFETY-003  (4e)
+//!   approvals.rs    — SAFETY-006  (4e)
+//!   blacklist.rs    — SAFETY-005  (4f)
+//!   one_way_gate.rs — SAFETY-009  (4f)
+//!   upgrade.rs      — SAFETY-007  (4f)
+//!   declared.rs     — SAFETY-010  (4f)
+//!   honeypot.rs     — SAFETY-001  (4f)
 //! ```
+//!
+//! Note: SAFETY-013 (ticker registration) retired per decision DB-A48 —
+//! registration is auto-injected by codegen for all token standards.
 
 use crate::type_checker::typed_contract::TypedContract;
 
@@ -38,7 +40,8 @@ use super::rules;
 /// ## Rule coverage
 ///
 /// **Batch 1 (4d)**: SAFETY-004, SAFETY-012, SAFETY-008, SAFETY-011 — active.
-/// **Batch 2 (4e)**: SAFETY-002, SAFETY-003, SAFETY-006, SAFETY-013 — active.
+/// **Batch 2 (4e)**: SAFETY-002, SAFETY-003, SAFETY-006 — active.
+/// SAFETY-013 retired per decision DB-A48 (auto-injected by codegen).
 /// Batch 3 (4f) rules are pending.
 ///
 /// ## Caller
@@ -58,7 +61,6 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     violations.extend(rules::fee_cap::check(contract)); // SAFETY-002
     violations.extend(rules::supply_cap::check(contract)); // SAFETY-003
     violations.extend(rules::approvals::check(contract)); // SAFETY-006
-    violations.extend(rules::ticker::check(contract)); // SAFETY-013
 
     // Batch 3 (4f): honeypot/blacklist/gate/upgrade/declared — pending.
 

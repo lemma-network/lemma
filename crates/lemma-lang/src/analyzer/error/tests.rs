@@ -139,14 +139,6 @@ fn display_unchecked_arithmetic_shows_operator() {
 }
 
 #[test]
-fn display_missing_ticker_registration_contains_rule_tag() {
-    let e = SafetyError::MissingTickerRegistration;
-    let msg = e.to_string();
-    assert!(msg.contains("SAFETY-013"), "missing rule tag: {msg}");
-    assert!(msg.contains("registry.register"), "missing call ref: {msg}");
-}
-
-#[test]
 fn display_inconclusive_shows_rule_and_reason() {
     let e = SafetyError::Inconclusive {
         rule: "SAFETY-002",

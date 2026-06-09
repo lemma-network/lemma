@@ -292,20 +292,18 @@ fn check_wf002_immutable_once(contract: &TypedContract<'_>) -> Vec<TypeError> {
 ///
 /// Checks three active clauses (all must pass):
 /// 1. At most one `init` per contract.
-/// 2. Token contracts MUST have an `init`.
+/// 2. Token contracts MUST have an `init` (required for state initialization
+///    at deploy time).
 /// 3. `init` carries no access-guard annotations (`@onlyOwner`, `@onlyRole`,
 ///    `@whenNotPaused`). Only `payable` modifier is permitted.
-/// 5. Token `init` MUST call `registry.register(…)` unconditionally on the
-///    entry path (structural presence check — top-level call, not inside an `if`).
 ///
 /// Note: WF-003 clauses 3a (visibility), 3b (mutability=view/pure), and 4 (return type)
 /// are enforced by the parser — parse_init hardcodes visibility=Private, return_type=None,
 /// and mutability=Default|Payable only. No WF check needed for those properties.
 /// See decisions-log.md DB-A46.
 ///
-/// Note: `contract Foo implements IToken` (plain contract, not `token` decl) is NOT
-/// caught by clause 2. SAFETY-013 is the authoritative enforcement for that case.
-/// WF-003 clause 2 covers `token` declarations only.
+/// Note: Clause 5 (registry.register check) retired per decision DB-A48 —
+/// registration is auto-injected by codegen for all token standards.
 ///
 /// See `docs/03-LANGUAGE_SPEC.md §30 WF-003`.
 fn check_wf003_init_wellformed(contract: &TypedContract<'_>) -> Vec<TypeError> {
@@ -345,7 +343,7 @@ fn check_wf003_init_wellformed(contract: &TypedContract<'_>) -> Vec<TypeError> {
         violations.push(TypeError {
             kind: TypeErrorKind::MalformedInit {
                 reason: "token contract must declare an `init` function \
-                         (required to call `registry.register`)"
+                         (required for state initialization at deploy time)"
                     .into(),
                 span,
             },
@@ -356,7 +354,7 @@ fn check_wf003_init_wellformed(contract: &TypedContract<'_>) -> Vec<TypeError> {
         return violations;
     }
 
-    // Check the first init (if present) for clauses 3 and 5.
+    // Check the first init (if present) for clause 3.
     let Some(init_fn) = init_fns.first() else {
         // No init — for a non-token contract this is fine (WF-001 handles
         // the case where state fields have no default).
@@ -389,27 +387,8 @@ fn check_wf003_init_wellformed(contract: &TypedContract<'_>) -> Vec<TypeError> {
         }
     }
 
-    // Clause 5: token init must call registry.register unconditionally.
-    if contract.is_token() {
-        let body = init_fn.body.unwrap_or(&[]);
-        if !has_registry_register_call_at_top_level(body) {
-            let span = contract_span(contract);
-            violations.push(TypeError {
-                kind: TypeErrorKind::MalformedInit {
-                    reason: "token `init` must call `registry.register(ticker, self)` \
-                             unconditionally on the entry path"
-                        .into(),
-                    span,
-                },
-                span,
-                message: format!(
-                    "WF-003: token `{}` `init` does not call `registry.register` \
-                     on the entry path",
-                    contract.name()
-                ),
-            });
-        }
-    }
+    // Clause 5 (registry.register check) retired per decision DB-A48 —
+    // registration is auto-injected by codegen for all token standards.
 
     violations
 }
@@ -1742,67 +1721,6 @@ fn count_self_field_assignments(stmts: &[Stmt], field_name: &str) -> usize {
         }
     }
     count
-}
-
-// ─── registry.register detection (WF-003 clause 5) ───────────────────────────
-
-/// Returns `true` if `stmts` contains a call to `registry.register(…)` at the
-/// **top level** (not inside an `if`/`match`/loop).
-///
-/// This is a structural presence check — it does not verify the arguments.
-/// The authoritative enforcement is SAFETY-013; WF-003 only asserts structural
-/// presence so codegen has a valid constructor.
-///
-/// See `docs/03-LANGUAGE_SPEC.md §30 WF-003 clause 5`.
-fn has_registry_register_call_at_top_level(stmts: &[Stmt]) -> bool {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Expr(expr, _) => {
-                if is_registry_register_call(expr) {
-                    return true;
-                }
-            }
-            // Let binding: `let _ = registry.register(…)` — also counts.
-            Stmt::Let { expr, .. } => {
-                if is_registry_register_call(expr) {
-                    return true;
-                }
-            }
-            // Unchecked block: treat as transparent for top-level detection.
-            Stmt::Unchecked(body, _) if has_registry_register_call_at_top_level(body) => {
-                return true;
-            }
-            Stmt::Unchecked(_, _) => {}
-            // Conditional/loop/match: NOT top-level — do not recurse.
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Returns `true` if `expr` is a call to `registry.register(…)`.
-///
-/// Matches: `registry.register(…)` — a `Call` whose callee is
-/// `Member(Ident("registry"), "register")`.
-fn is_registry_register_call(expr: &Expr) -> bool {
-    match expr {
-        Expr::Call { callee, .. } => is_registry_register_member(callee),
-        _ => false,
-    }
-}
-
-/// Returns `true` if `expr` is `registry.register` (a member access).
-fn is_registry_register_member(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Member(obj, method, _)
-            if method == "register" && is_registry_ident(obj)
-    )
-}
-
-/// Returns `true` if `expr` is the identifier `registry`.
-fn is_registry_ident(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "registry")
 }
 
 // ─── Family C: Structural-Completeness (WF-008..011) ─────────────────────────
