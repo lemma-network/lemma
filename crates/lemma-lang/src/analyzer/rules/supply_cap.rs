@@ -24,12 +24,20 @@
 //! supply cap (over-acceptance).  Full operand inspection and a proper
 //! dominator tree are 4g work.  Documented per AGENTS §solution-integrity.
 //!
+//! **Foundation**: increasing-write collection via [`crate::visit::Visitor`]
+//! ([`IncreasingWriteScanner`]); cap-assert dominance check via a stateful
+//! linear scan ([`has_cap_assert_before_write`] — not a visitor; early-exit
+//! semantics prevent a clean Visitor conversion).
+//!
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-003`.
 
 use crate::analyzer::error::SafetyError;
 use crate::lexer::token::Span;
 use crate::parser::{AssignOp, BinaryOp, ConfigValue, Expr, MatchBody, Stmt};
 use crate::type_checker::typed_contract::TypedContract;
+use crate::visit::{walk_stmt, Visitor};
+
+// ─── Public entry point ───────────────────────────────────────────────────────
 
 /// Check a contract for SAFETY-003 supply cap violations.
 ///
@@ -92,13 +100,14 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     violations
 }
 
-// ─── Increasing write detection ───────────────────────────────────────────────
+// ─── Increasing write detection (Visitor-based) ───────────────────────────────
 
-/// Walk `stmts` recursively and collect the spans of all `totalSupply`-increasing writes.
+/// Walk `stmts` recursively and collect the spans of all `totalSupply`-increasing
+/// writes.
 fn collect_increasing_supply_writes(stmts: &[Stmt]) -> Vec<Span> {
-    let mut out = Vec::new();
-    walk_for_increasing_supply_writes(stmts, &mut out);
-    out
+    let mut scanner = IncreasingWriteScanner { out: Vec::new() };
+    scanner.visit_stmts(stmts);
+    scanner.out
 }
 
 /// Returns `true` if `stmts` contains at least one `totalSupply`-increasing write.
@@ -106,97 +115,42 @@ fn has_any_increasing_write(stmts: &[Stmt]) -> bool {
     !collect_increasing_supply_writes(stmts).is_empty()
 }
 
-fn walk_for_increasing_supply_writes(stmts: &[Stmt], out: &mut Vec<Span>) {
-    for stmt in stmts {
+/// Collects spans of all `totalSupply`-increasing writes at any nesting depth.
+///
+/// Implements [`crate::visit::Visitor`] for stmt-level detection.  Does not
+/// override `visit_expr` — expression-level state writes (`Expr::Assign_`) are
+/// caught because `walk_stmt` visits all sub-expressions and `visit_expr`
+/// defaults to `walk_expr`, which recurses into `Expr::If_`/`Expr::Match_`
+/// bodies.  The stmt-level `Stmt::Expr(Expr::Assign_(...))` form is intercepted
+/// in `visit_stmt` directly.
+struct IncreasingWriteScanner {
+    out: Vec<Span>,
+}
+
+impl Visitor for IncreasingWriteScanner {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Assign {
                 target,
                 op,
                 value,
                 span,
-            } => {
-                if is_increasing_supply_write(target, op, value) {
-                    out.push(*span);
-                }
+                ..
+            } if is_increasing_supply_write(target, op, value) => {
+                self.out.push(*span);
             }
-            Stmt::Expr(Expr::Assign_(target, op, value, span), _) => {
-                if is_increasing_supply_write(target, op, value) {
-                    out.push(*span);
-                }
+            Stmt::Expr(Expr::Assign_(target, op, value, span), _)
+                if is_increasing_supply_write(target, op, value) =>
+            {
+                self.out.push(*span);
             }
-            // Recurse into control flow to find writes in nested blocks.
-            Stmt::If { then, else_, .. } => {
-                walk_for_increasing_supply_writes(then, out);
-                if let Some(b) = else_ {
-                    walk_for_increasing_supply_writes(b, out);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop { body, .. } => {
-                walk_for_increasing_supply_writes(body, out);
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    if let MatchBody::Block(stmts) = &arm.body {
-                        walk_for_increasing_supply_writes(stmts, out);
-                    }
-                }
-            }
-            Stmt::Try {
-                body, catch_body, ..
-            } => {
-                walk_for_increasing_supply_writes(body, out);
-                walk_for_increasing_supply_writes(catch_body, out);
-            }
-            Stmt::Unchecked(body, _) => walk_for_increasing_supply_writes(body, out),
             _ => {}
         }
+        walk_stmt(self, stmt);
     }
 }
 
-/// Returns `true` if `(target, op, value)` is a `totalSupply`-increasing write.
-///
-/// - `self.totalSupply += amount` → `AssignOp::Add` → always increasing.
-/// - `self.totalSupply = self.totalSupply + delta` → `AssignOp::Assign` with
-///   `BinaryOp::Add` containing `self.totalSupply` as an operand.
-fn is_increasing_supply_write(target: &Expr, op: &AssignOp, value: &Expr) -> bool {
-    if !is_self_field(target, "totalSupply") {
-        return false;
-    }
-    match op {
-        AssignOp::Add => true, // += always increases
-        AssignOp::Assign => expr_contains_add_with_total_supply(value),
-        _ => false, // -=, *=, /=, %= are decreases or other operations
-    }
-}
-
-/// Returns `true` if `expr` is `self.field` where `field == name`.
-fn is_self_field(expr: &Expr, field: &str) -> bool {
-    matches!(expr, Expr::Member(obj, f, _) if is_self(obj) && f == field)
-}
-
-/// Returns `true` if `expr` is the identifier `self`.
-fn is_self(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "self")
-}
-
-/// Returns `true` if `expr` contains `BinaryOp::Add` with `self.totalSupply`
-/// as one of the operands (i.e., `self.totalSupply + delta` or `delta + self.totalSupply`).
-fn expr_contains_add_with_total_supply(expr: &Expr) -> bool {
-    match expr {
-        Expr::Binary(BinaryOp::Add, lhs, rhs, _) => {
-            is_self_field(lhs, "totalSupply")
-                || is_self_field(rhs, "totalSupply")
-                || expr_contains_add_with_total_supply(lhs)
-                || expr_contains_add_with_total_supply(rhs)
-        }
-        Expr::Binary(_, lhs, rhs, _) => {
-            expr_contains_add_with_total_supply(lhs) || expr_contains_add_with_total_supply(rhs)
-        }
-        _ => false,
-    }
-}
-
-// ─── Cap assert detection ─────────────────────────────────────────────────────
+// ─── Cap assert detection (stateful linear scan — not a Visitor) ──────────────
 
 /// Returns `true` if every `totalSupply`-increasing write in `stmts` is
 /// **preceded** by a cap-guarding `assert` (any `<=` / `<` comparison).
@@ -219,6 +173,12 @@ fn expr_contains_add_with_total_supply(expr: &Expr) -> bool {
 /// Any assert with a `<=` / `<` comparison is treated as a cap guard,
 /// regardless of whether its operands mention `totalSupply`.  Full operand
 /// inspection is deferred to the 4g dominator-tree pass.
+///
+/// ## Why not a Visitor?
+///
+/// This function accumulates a `saw_cap_assert` flag in linear statement order
+/// and may `return false` early.  The ordered, early-exit semantics do not fit
+/// the depth-first, complete-traversal [`crate::visit::Visitor`] model.
 fn has_cap_assert_before_write(stmts: &[Stmt]) -> bool {
     let mut saw_cap_assert = false;
     for stmt in stmts {
@@ -303,6 +263,51 @@ fn has_cap_assert_before_write(stmts: &[Stmt]) -> bool {
     }
     // No increasing write found at any depth → trivially guarded.
     true
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Returns `true` if `(target, op, value)` is a `totalSupply`-increasing write.
+///
+/// - `self.totalSupply += amount` → `AssignOp::Add` → always increasing.
+/// - `self.totalSupply = self.totalSupply + delta` → `AssignOp::Assign` with
+///   `BinaryOp::Add` containing `self.totalSupply` as an operand.
+fn is_increasing_supply_write(target: &Expr, op: &AssignOp, value: &Expr) -> bool {
+    if !is_self_field(target, "totalSupply") {
+        return false;
+    }
+    match op {
+        AssignOp::Add => true, // += always increases
+        AssignOp::Assign => expr_contains_add_with_total_supply(value),
+        _ => false, // -=, *=, /=, %= are decreases or other operations
+    }
+}
+
+/// Returns `true` if `expr` is `self.field` where `field == name`.
+fn is_self_field(expr: &Expr, field: &str) -> bool {
+    matches!(expr, Expr::Member(obj, f, _) if is_self(obj) && f == field)
+}
+
+/// Returns `true` if the expression is the identifier `self`.
+fn is_self(expr: &Expr) -> bool {
+    matches!(expr, Expr::Ident(name, _) if name == "self")
+}
+
+/// Returns `true` if `expr` contains `BinaryOp::Add` with `self.totalSupply`
+/// as one of the operands (i.e., `self.totalSupply + delta` or `delta + self.totalSupply`).
+fn expr_contains_add_with_total_supply(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary(BinaryOp::Add, lhs, rhs, _) => {
+            is_self_field(lhs, "totalSupply")
+                || is_self_field(rhs, "totalSupply")
+                || expr_contains_add_with_total_supply(lhs)
+                || expr_contains_add_with_total_supply(rhs)
+        }
+        Expr::Binary(_, lhs, rhs, _) => {
+            expr_contains_add_with_total_supply(lhs) || expr_contains_add_with_total_supply(rhs)
+        }
+        _ => false,
+    }
 }
 
 /// Returns `true` if `expr` contains a `<=` or `<` comparison.

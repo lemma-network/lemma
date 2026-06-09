@@ -18,6 +18,9 @@
 //! extract the relevant part; SAFETY rules that need multiple analyses can call
 //! `walk_function` directly to avoid redundant walks.
 //!
+//! The traversal itself is provided by [`crate::visit::Visitor`] — `FnWalk`
+//! implements it, overriding only the nodes that carry calls or state writes.
+//!
 //! ## What counts as an "external call"?
 //!
 //! Any call whose callee is **not** a `self` method (spec §2):
@@ -28,8 +31,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::lexer::token::Span;
-use crate::parser::{CallArg, Expr, ForIter, MatchBody, Stmt};
+use crate::parser::{Expr, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
+use crate::visit::{walk_expr, walk_stmt, Visitor};
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -84,6 +88,10 @@ pub enum CfgNode {
 ///
 /// Callers may need only one of the three fields; the single walk pays the
 /// traversal cost once regardless (AGENTS §2 DRY — no per-analysis rewalk).
+///
+/// Implements [`crate::visit::Visitor`]: only the nodes that carry calls or
+/// state writes are intercepted; all structural recursion delegates to the
+/// canonical [`walk_stmt`] / [`walk_expr`].
 #[derive(Debug, Default)]
 pub(crate) struct FnWalk {
     /// Internal callees (for call-graph edges).
@@ -94,12 +102,80 @@ pub(crate) struct FnWalk {
     pub cfg_nodes: Vec<CfgNode>,
 }
 
+impl Visitor for FnWalk {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        // Detect state writes via statement-level assignment.
+        if let Stmt::Assign { target, span, .. } = stmt {
+            if let Some(key) = state_write_key(target) {
+                self.cfg_nodes
+                    .push(CfgNode::StateWrite { key, span: *span });
+            }
+        }
+        walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Call { callee, span, .. } => {
+                match callee.as_ref() {
+                    // self.method(…) — internal call
+                    Expr::Member(obj, method, _) if is_self(obj) => {
+                        self.internal_calls.insert(method.clone());
+                        // Emit an ordered InternalCall node so SAFETY-004 can
+                        // detect reentrancy-via-indirection.
+                        self.cfg_nodes.push(CfgNode::InternalCall {
+                            callee: method.clone(),
+                            span: *span,
+                        });
+                    }
+                    // External method call on another contract instance.
+                    Expr::Member(_, method, _) => {
+                        self.ext_calls.insert(ExtCall {
+                            callee_desc: format!("<external>.{method}"),
+                            span: *span,
+                        });
+                        self.cfg_nodes.push(CfgNode::ExternalCall { span: *span });
+                    }
+                    // Free function call — treated as internal.
+                    Expr::Ident(name, _) => {
+                        self.internal_calls.insert(name.clone());
+                        self.cfg_nodes.push(CfgNode::InternalCall {
+                            callee: name.clone(),
+                            span: *span,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Expr::New { span, .. } => {
+                // new Contract(…) — deployment leaves current contract context.
+                self.ext_calls.insert(ExtCall {
+                    callee_desc: "new <Contract>".to_owned(),
+                    span: *span,
+                });
+                self.cfg_nodes.push(CfgNode::ExternalCall { span: *span });
+            }
+            // State write in expression-assignment form: self.field = …
+            Expr::Assign_(target, _, _, span) => {
+                if let Some(key) = state_write_key(target) {
+                    self.cfg_nodes
+                        .push(CfgNode::StateWrite { key, span: *span });
+                }
+            }
+            _ => {}
+        }
+        walk_expr(self, expr);
+    }
+}
+
+// ─── Walk API (unchanged public surface) ─────────────────────────────────────
+
 /// Walk a function body and collect all analysis results in one pass.
 #[must_use]
 pub(crate) fn walk_function(func: &ContractFunction<'_>) -> FnWalk {
     let mut acc = FnWalk::default();
     if let Some(body) = func.body {
-        walk_stmts(body, &mut acc);
+        acc.visit_stmts(body);
     }
     acc
 }
@@ -110,9 +186,9 @@ pub(crate) fn walk_function(func: &ContractFunction<'_>) -> FnWalk {
 /// used by SAFETY-004 to analyse loop bodies independently from their
 /// enclosing function (back-edge detection).
 #[must_use]
-pub(crate) fn walk_stmts_fn_walk(stmts: &[Stmt]) -> FnWalk {
+pub(crate) fn walk_stmts_fn_walk(stmts: &[crate::parser::Stmt]) -> FnWalk {
     let mut acc = FnWalk::default();
-    walk_stmts(stmts, &mut acc);
+    acc.visit_stmts(stmts);
     acc
 }
 
@@ -141,211 +217,6 @@ pub fn ext_calls(func: &ContractFunction<'_>) -> BTreeSet<ExtCall> {
 #[must_use]
 pub fn cfg_nodes(func: &ContractFunction<'_>) -> Vec<CfgNode> {
     walk_function(func).cfg_nodes
-}
-
-// ─── Walk: statements ─────────────────────────────────────────────────────────
-
-fn walk_stmts(stmts: &[Stmt], acc: &mut FnWalk) {
-    for s in stmts {
-        walk_stmt(s, acc);
-    }
-}
-
-fn walk_stmt(stmt: &Stmt, acc: &mut FnWalk) {
-    match stmt {
-        Stmt::Let { expr, .. } => walk_expr(expr, acc),
-        Stmt::Const(c) => walk_expr(&c.value, acc),
-        Stmt::Assign {
-            target,
-            value,
-            span,
-            ..
-        } => {
-            if let Some(key) = state_write_key(target) {
-                acc.cfg_nodes.push(CfgNode::StateWrite { key, span: *span });
-            }
-            walk_expr(target, acc);
-            walk_expr(value, acc);
-        }
-        Stmt::Return(Some(e), _) => walk_expr(e, acc),
-        Stmt::Emit { fields, .. } => {
-            for (_, e) in fields {
-                walk_expr(e, acc);
-            }
-        }
-        Stmt::If {
-            cond, then, else_, ..
-        } => {
-            walk_expr(cond, acc);
-            walk_stmts(then, acc);
-            for b in else_.iter() {
-                walk_stmts(b, acc);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            walk_expr(cond, acc);
-            walk_stmts(body, acc);
-        }
-        Stmt::For { iter, body, .. } => {
-            match iter {
-                ForIter::Of(e) => walk_expr(e, acc),
-                ForIter::In(start, _, end, _) => {
-                    walk_expr(start, acc);
-                    walk_expr(end, acc);
-                }
-            }
-            walk_stmts(body, acc);
-        }
-        Stmt::Loop { body, .. } => walk_stmts(body, acc),
-        Stmt::Match { expr, arms, .. } => {
-            walk_expr(expr, acc);
-            for arm in arms {
-                if let Some(g) = &arm.guard {
-                    walk_expr(g, acc);
-                }
-                match &arm.body {
-                    MatchBody::Expr(e) => walk_expr(e, acc),
-                    MatchBody::Block(stmts) => walk_stmts(stmts, acc),
-                }
-            }
-        }
-        Stmt::Try {
-            body, catch_body, ..
-        } => {
-            walk_stmts(body, acc);
-            walk_stmts(catch_body, acc);
-        }
-        Stmt::Unchecked(body, _) => walk_stmts(body, acc),
-        Stmt::Assert { cond, msg, .. } => {
-            walk_expr(cond, acc);
-            if let Some(m) = msg {
-                walk_expr(m, acc);
-            }
-        }
-        Stmt::Revert { msg: Some(m), .. } => walk_expr(m, acc),
-        Stmt::Expr(e, _) => walk_expr(e, acc),
-        // Break / Continue / Return(None) / Placeholder carry no sub-expressions.
-        _ => {}
-    }
-}
-
-// ─── Walk: expressions ────────────────────────────────────────────────────────
-
-fn walk_expr(expr: &Expr, acc: &mut FnWalk) {
-    match expr {
-        Expr::Call {
-            callee,
-            opts: _,
-            args,
-            span,
-        } => {
-            match callee.as_ref() {
-                // self.method(…) — internal call
-                Expr::Member(obj, method, _) if is_self(obj) => {
-                    acc.internal_calls.insert(method.clone());
-                    // Also emit an ordered InternalCall node so SAFETY-004 can
-                    // detect reentrancy-via-indirection (call-then-state-writing-helper).
-                    acc.cfg_nodes.push(CfgNode::InternalCall {
-                        callee: method.clone(),
-                        span: *span,
-                    });
-                }
-                // External method call on another contract instance
-                Expr::Member(obj, method, _) if !is_self(obj) => {
-                    acc.ext_calls.insert(ExtCall {
-                        callee_desc: format!("<external>.{method}"),
-                        span: *span,
-                    });
-                    acc.cfg_nodes.push(CfgNode::ExternalCall { span: *span });
-                }
-                // Free function call — internal if name matches a fn in same contract
-                Expr::Ident(name, _) => {
-                    acc.internal_calls.insert(name.clone());
-                    // Same ordered-node emit as for self.method() — see note above.
-                    acc.cfg_nodes.push(CfgNode::InternalCall {
-                        callee: name.clone(),
-                        span: *span,
-                    });
-                }
-                _ => {}
-            }
-            walk_expr(callee, acc);
-            for arg in args {
-                let e = match arg {
-                    CallArg::Positional(e) | CallArg::Named(_, e) => e,
-                };
-                walk_expr(e, acc);
-            }
-        }
-        Expr::New { args, span, .. } => {
-            // new Contract(…) — deployment leaves current contract context.
-            acc.ext_calls.insert(ExtCall {
-                callee_desc: "new <Contract>".to_owned(),
-                span: *span,
-            });
-            acc.cfg_nodes.push(CfgNode::ExternalCall { span: *span });
-            for arg in args {
-                let e = match arg {
-                    CallArg::Positional(e) | CallArg::Named(_, e) => e,
-                };
-                walk_expr(e, acc);
-            }
-        }
-        // State write in expression-assignment form: self.field = …
-        Expr::Assign_(target, _, val, span) => {
-            if let Some(key) = state_write_key(target) {
-                acc.cfg_nodes.push(CfgNode::StateWrite { key, span: *span });
-            }
-            walk_expr(target, acc);
-            walk_expr(val, acc);
-        }
-        Expr::Member(base, _, _) => walk_expr(base, acc),
-        Expr::Index(base, idx, _) => {
-            walk_expr(base, acc);
-            walk_expr(idx, acc);
-        }
-        Expr::Unary(_, inner, _) | Expr::Try_(inner, _) => walk_expr(inner, acc),
-        Expr::Binary(_, l, r, _) => {
-            walk_expr(l, acc);
-            walk_expr(r, acc);
-        }
-        Expr::Ternary {
-            cond, then, else_, ..
-        } => {
-            walk_expr(cond, acc);
-            walk_expr(then, acc);
-            walk_expr(else_, acc);
-        }
-        Expr::Nullish(l, r, _) => {
-            walk_expr(l, acc);
-            walk_expr(r, acc);
-        }
-        Expr::Cast { expr, .. } => walk_expr(expr, acc),
-        Expr::If_ {
-            cond, then, else_, ..
-        } => {
-            walk_expr(cond, acc);
-            walk_stmts(then, acc);
-            for b in else_.iter() {
-                walk_stmts(b, acc);
-            }
-        }
-        Expr::Match_(expr, arms, _) => {
-            walk_expr(expr, acc);
-            for arm in arms {
-                if let Some(g) = &arm.guard {
-                    walk_expr(g, acc);
-                }
-                match &arm.body {
-                    MatchBody::Expr(e) => walk_expr(e, acc),
-                    MatchBody::Block(stmts) => walk_stmts(stmts, acc),
-                }
-            }
-        }
-        // Literal / Ident / Tuple / Array / Struct_ / Lambda / Template:
-        // no sub-calls or state writes to collect.
-        _ => {}
-    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

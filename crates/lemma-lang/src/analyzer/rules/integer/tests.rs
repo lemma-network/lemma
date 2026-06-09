@@ -167,3 +167,81 @@ unchecked {
         "empty unchecked block must pass SAFETY-012; got {violations:?}"
     );
 }
+
+// ─── Gap-closure tests (P3·Step 4e.5): match/try inside unchecked ────────────
+//
+// These tests prove the SAFETY-012 rule (not just the traversal infrastructure)
+// emits UncheckedArithmetic for patterns that were false-negatives before the
+// Visitor refactor.  The recording-visitor tests in visit/tests.rs prove
+// traversal completeness; these tests prove the rule acts on what is traversed.
+
+/// SAFETY-012 detects unchecked arithmetic nested inside a match arm.
+///
+/// Before P3·Step 4e.5, `find_unchecked_arithmetic` missed `Stmt::Match`
+/// inside unchecked blocks — `self.x = self.x + val` in a match arm was a
+/// false negative.
+#[test]
+fn integer_unchecked_match_arm_add_to_state_rejected() {
+    let ast = typed_ast(
+        r#"contract C {
+state { x: u128 = 0 }
+init() { self.x = 0 }
+pub fn badMint(val: u128) {
+unchecked {
+match (val) {
+0 => {}
+_ => { self.x = self.x + val }
+}
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = integer_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "arithmetic in match arm inside unchecked must be rejected; got {violations:?}"
+    );
+    assert!(
+        matches!(&violations[0], SafetyError::UncheckedArithmetic { op, .. } if op == "+"),
+        "expected UncheckedArithmetic(+); got {:?}",
+        violations[0]
+    );
+}
+
+/// SAFETY-012 detects unchecked arithmetic nested inside a try body.
+///
+/// Before P3·Step 4e.5, `find_unchecked_arithmetic` missed `Stmt::Try`
+/// inside unchecked blocks — `self.x = self.x + val` in the try body was a
+/// false negative.
+#[test]
+fn integer_unchecked_try_body_add_to_state_rejected() {
+    let ast = typed_ast(
+        r#"contract C {
+state { x: u128 = 0 }
+init() { self.x = 0 }
+pub fn badMint(val: u128) {
+unchecked {
+try {
+self.x = self.x + val
+} catch (err) {
+self.x = 0
+}
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = integer_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "arithmetic in try body inside unchecked must be rejected; got {violations:?}"
+    );
+    assert!(
+        matches!(&violations[0], SafetyError::UncheckedArithmetic { op, .. } if op == "+"),
+        "expected UncheckedArithmetic(+); got {:?}",
+        violations[0]
+    );
+}

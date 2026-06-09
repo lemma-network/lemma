@@ -38,6 +38,7 @@ pub mod error;
 pub mod lexer;
 pub mod parser;
 pub mod type_checker;
+pub(crate) mod visit;
 
 // Re-export the primary entry points at the crate root for ergonomics.
 pub use analyzer::analyze_safety;

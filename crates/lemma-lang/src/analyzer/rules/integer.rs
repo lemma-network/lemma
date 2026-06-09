@@ -17,12 +17,31 @@
 //! taint from `dataflow::taint_propagate` — tracked as a living-notes item to
 //! refine in 4e when taint consumers are added.
 //!
-//! **Foundation**: direct AST walk — no CFG needed.
+//! ## Gap-closure (P3·Step 4e.5)
+//!
+//! The previous implementation of `find_unchecked_arithmetic` missed
+//! `Stmt::Match`, `Stmt::Try`, and nested `Stmt::Unchecked` variants inside
+//! unchecked blocks, producing false negatives for patterns like:
+//!
+//! ```text
+//! unchecked {
+//!     match val { _ => self.x = self.x + val }  // was missed
+//!     try { self.x = self.x + val } catch e { }   // was missed
+//! }
+//! ```
+//!
+//! Both are now caught automatically because the canonical
+//! [`crate::visit::Visitor`] traversal covers every `Stmt` variant.
+//!
+//! **Foundation**: direct AST walk via [`crate::visit::Visitor`].
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-012`.
 
 use crate::analyzer::error::SafetyError;
-use crate::parser::{BinaryOp, Expr, MatchBody, Stmt};
+use crate::parser::{BinaryOp, Expr, Stmt};
 use crate::type_checker::typed_contract::TypedContract;
+use crate::visit::{walk_expr, walk_stmt, Visitor};
+
+// ─── Public entry point ───────────────────────────────────────────────────────
 
 /// Check a contract for SAFETY-012 unchecked arithmetic violations.
 ///
@@ -30,62 +49,61 @@ use crate::type_checker::typed_contract::TypedContract;
 /// Returns an empty `Vec` if the contract is clean.
 #[must_use]
 pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
-    let mut violations = Vec::new();
-
+    let mut scanner = UncheckedScanner {
+        violations: Vec::new(),
+    };
     for func in contract.functions() {
         if let Some(body) = func.body {
-            check_stmts_for_unchecked(body, &mut violations);
+            scanner.visit_stmts(body);
         }
     }
-
-    violations
+    scanner.violations
 }
 
-/// Recursively scan statements for `Stmt::Unchecked` blocks, then inspect
-/// their contents for arithmetic assignments to state fields.
-fn check_stmts_for_unchecked(stmts: &[Stmt], violations: &mut Vec<SafetyError>) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Unchecked(inner, _) => {
-                find_unchecked_arithmetic(inner, violations);
-            }
-            // Recurse into nested control flow to find unchecked blocks inside.
-            Stmt::If { then, else_, .. } => {
-                check_stmts_for_unchecked(then, violations);
-                if let Some(else_body) = else_ {
-                    check_stmts_for_unchecked(else_body, violations);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop { body, .. } => {
-                check_stmts_for_unchecked(body, violations);
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    match &arm.body {
-                        MatchBody::Block(stmts) => {
-                            check_stmts_for_unchecked(stmts, violations);
-                        }
-                        // `unchecked {}` is a statement block — it cannot appear
-                        // as a single expression arm. Intentionally not recursed.
-                        MatchBody::Expr(_) => {}
-                    }
-                }
-            }
-            Stmt::Try {
-                body, catch_body, ..
-            } => {
-                check_stmts_for_unchecked(body, violations);
-                check_stmts_for_unchecked(catch_body, violations);
-            }
-            _ => {}
+// ─── UncheckedScanner: locate unchecked blocks ───────────────────────────────
+
+/// Scans the function body for `Stmt::Unchecked` blocks at any nesting depth,
+/// then delegates to [`ArithChecker`] for each block's contents.
+///
+/// Does not do arithmetic checking itself — only structural traversal to find
+/// unchecked blocks.  Canonical recursion via [`walk_stmt`] covers all
+/// control-flow variants including `Match`/`Try`/nested `Unchecked`.
+struct UncheckedScanner {
+    violations: Vec<SafetyError>,
+}
+
+impl Visitor for UncheckedScanner {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        if let Stmt::Unchecked(inner, _) = stmt {
+            // Switch to ArithChecker for the unchecked body.
+            let mut checker = ArithChecker {
+                violations: Vec::new(),
+            };
+            checker.visit_stmts(inner);
+            self.violations.extend(checker.violations);
+            // Do NOT call walk_stmt here — inner is already fully traversed
+            // by ArithChecker.  A nested `unchecked` inside `inner` is handled
+            // by ArithChecker's own visit_stmt (which switches again).
+        } else {
+            walk_stmt(self, stmt);
         }
     }
 }
 
-/// Inside an `unchecked {}` block: flag any assignment to a state field that
-/// uses raw arithmetic (`+`, `-`, `*`) in the value expression.
-fn find_unchecked_arithmetic(stmts: &[Stmt], violations: &mut Vec<SafetyError>) {
-    for stmt in stmts {
+// ─── ArithChecker: detect violations inside unchecked bodies ─────────────────
+
+/// Checks statements inside an `unchecked {}` body for raw arithmetic writes
+/// to state fields.  Also handles nested `unchecked` blocks by recursing.
+///
+/// The canonical [`walk_stmt`] covers `Match`, `Try`, and all other
+/// control-flow variants — these were the false-negative paths in the prior
+/// implementation.
+struct ArithChecker {
+    violations: Vec<SafetyError>,
+}
+
+impl Visitor for ArithChecker {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Assign {
                 target,
@@ -95,35 +113,50 @@ fn find_unchecked_arithmetic(stmts: &[Stmt], violations: &mut Vec<SafetyError>) 
             } => {
                 if is_state_write(target) {
                     if let Some(op_str) = first_arithmetic_op(value) {
-                        violations.push(SafetyError::UncheckedArithmetic {
+                        self.violations.push(SafetyError::UncheckedArithmetic {
                             op: op_str.to_owned(),
                             span: *span,
                         });
                     }
                 }
             }
-            // Nested control flow inside unchecked also applies.
-            Stmt::If { then, else_, .. } => {
-                find_unchecked_arithmetic(then, violations);
-                if let Some(else_body) = else_ {
-                    find_unchecked_arithmetic(else_body, violations);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::Loop { body, .. } => {
-                find_unchecked_arithmetic(body, violations);
+            // A nested `unchecked {}` inside an unchecked body: re-enter
+            // ArithChecker for its contents (still inside unchecked scope).
+            Stmt::Unchecked(inner, _) => {
+                let mut inner_checker = ArithChecker {
+                    violations: Vec::new(),
+                };
+                inner_checker.visit_stmts(inner);
+                self.violations.extend(inner_checker.violations);
+                return; // inner already fully traversed
             }
             _ => {}
         }
+        walk_stmt(self, stmt);
+    }
+    fn visit_expr(&mut self, expr: &Expr) {
+        // Detect expression-position assignment: `self.field = self.field + val`
+        if let Expr::Assign_(target, _, value, span) = expr {
+            if is_state_write(target) {
+                if let Some(op_str) = first_arithmetic_op(value) {
+                    self.violations.push(SafetyError::UncheckedArithmetic {
+                        op: op_str.to_owned(),
+                        span: *span,
+                    });
+                }
+            }
+        }
+        walk_expr(self, expr);
     }
 }
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Returns `true` if `expr` is a state-field write target:
 /// `self.field` or `self.map[k]`.
 fn is_state_write(expr: &Expr) -> bool {
     match expr {
-        // self.field = ...
         Expr::Member(obj, _, _) => is_self(obj),
-        // self.map[k] = ...
         Expr::Index(base, _, _) => {
             if let Expr::Member(obj, _, _) = base.as_ref() {
                 is_self(obj)
@@ -135,7 +168,7 @@ fn is_state_write(expr: &Expr) -> bool {
     }
 }
 
-/// Returns `true` if `expr` is the identifier `self`.
+/// Returns `true` if the expression is the identifier `self`.
 fn is_self(expr: &Expr) -> bool {
     matches!(expr, Expr::Ident(name, _) if name == "self")
 }
@@ -144,15 +177,13 @@ fn is_self(expr: &Expr) -> bool {
 /// raw arithmetic operator (`+`, `-`, `*`) found, or `None` if none exists.
 fn first_arithmetic_op(expr: &Expr) -> Option<&'static str> {
     match expr {
-        Expr::Binary(op, lhs, rhs, _) => {
-            match op {
-                BinaryOp::Add => Some("+"),
-                BinaryOp::Sub => Some("-"),
-                BinaryOp::Mul => Some("*"),
-                // Non-arithmetic binary op — recurse into operands.
-                _ => first_arithmetic_op(lhs).or_else(|| first_arithmetic_op(rhs)),
-            }
-        }
+        Expr::Binary(op, lhs, rhs, _) => match op {
+            BinaryOp::Add => Some("+"),
+            BinaryOp::Sub => Some("-"),
+            BinaryOp::Mul => Some("*"),
+            // Non-arithmetic binary op — recurse into operands.
+            _ => first_arithmetic_op(lhs).or_else(|| first_arithmetic_op(rhs)),
+        },
         Expr::Unary(_, inner, _) => first_arithmetic_op(inner),
         Expr::Member(base, _, _) => first_arithmetic_op(base),
         Expr::Index(base, idx, _) => first_arithmetic_op(base).or_else(|| first_arithmetic_op(idx)),
