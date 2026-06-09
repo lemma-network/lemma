@@ -29,7 +29,7 @@ fn approvals_no_approve_function_passes() {
     // Contract with no `approve` function — rule does not apply.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn transfer(to: Address, amount: u128) {
 self.x = self.x - amount
 }
@@ -48,7 +48,7 @@ fn approvals_approve_with_expiry_param_passes() {
     // approve(spender, amount, expiry) → passes.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn approve(spender: Address, amount: u128, expiry: u64) {
 self.x = amount
 }
@@ -67,7 +67,7 @@ fn approvals_approve_with_deadline_param_passes() {
     // approve with `deadline` param (synonym for expiry) → passes.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn approve(spender: Address, amount: u128, deadline: u64) {
 self.x = amount
 }
@@ -86,7 +86,7 @@ fn approvals_approve_with_expires_param_passes() {
     // approve with `expires` param (synonym for expiry) → passes.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn approve(spender: Address, amount: u128, expires: u64) {
 self.x = amount
 }
@@ -107,7 +107,7 @@ fn approvals_approve_without_expiry_rejected() {
     // approve(spender, amount) — no expiry → UnboundedApproval.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn approve(spender: Address, amount: u128) {
 self.x = amount
 }
@@ -134,7 +134,7 @@ fn approvals_approve_with_only_spender_param_rejected() {
     // approve(spender) — no amount, no expiry → UnboundedApproval.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn approve(spender: Address) {
 self.x = 0
 }
@@ -154,7 +154,7 @@ fn approvals_non_approve_function_not_checked() {
     // A function named `setApproval` (not exactly `approve`) — not checked.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn setApproval(spender: Address, amount: u128) {
 self.x = amount
 }

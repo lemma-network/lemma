@@ -247,7 +247,12 @@ impl<'a> TypedContract<'a> {
     // ── Internal helpers ──────────────────────────────────────────────────
 
     /// Return the contract/token members slice.
-    fn members(&self) -> &'a [crate::parser::ContractMember] {
+    ///
+    /// Exposed as `pub(super)` so the `wellformed` sibling module can walk raw
+    /// members directly (for WF-001/002 `StateField.default` and `Immutable.span`
+    /// access) without duplicating the AST-walk logic in a `contract_members()`
+    /// helper. See decisions-log.md DB-A46.
+    pub(super) fn members(&self) -> &'a [crate::parser::ContractMember] {
         match &self.item {
             ContractItem::Contract(c) => &c.members,
             ContractItem::Token(t) => &t.members,

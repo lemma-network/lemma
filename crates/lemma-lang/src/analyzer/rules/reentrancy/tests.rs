@@ -32,7 +32,7 @@ fn reentrancy_cei_order_write_then_call_passes() {
     // CEI pattern: state write BEFORE external call — no violation.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn goodWithdraw(target: Address, amount: u128) {
 self.bal = self.bal - amount
 let _ = target.transfer(amount)
@@ -52,7 +52,7 @@ fn reentrancy_no_external_call_passes() {
     // Function with only state writes and no external calls — safe.
     let ast = typed_ast(
         r#"contract C {
-state { count: u128 }
+state { count: u128 = 0 }
 pub fn increment() {
 self.count = self.count + 1
 }
@@ -71,7 +71,7 @@ fn reentrancy_no_state_write_passes() {
     // Function that only makes external calls but never writes state — safe.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn notify(target: Address, amount: u128) {
 let _ = target.transfer(amount)
 }
@@ -92,7 +92,7 @@ fn reentrancy_state_write_after_ext_call_rejected() {
     // Classic reentrancy: external call THEN state write — must be rejected.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn badWithdraw(target: Address, amount: u128) {
 let _ = target.transfer(amount)
 self.bal = self.bal - amount
@@ -118,7 +118,7 @@ fn reentrancy_non_reentrant_annotation_does_not_exempt() {
     // @nonReentrant does NOT exempt from SAFETY-004 — CEI is required unconditionally.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 @nonReentrant
 pub fn annotatedWithdraw(target: Address, amount: u128) {
 let _ = target.transfer(amount)
@@ -148,7 +148,7 @@ fn reentrancy_state_write_via_helper_callee_after_ext_call_rejected() {
     // an internal helper that writes state — still a CEI violation.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn withdraw(target: Address, amount: u128) {
 let _ = target.transfer(amount)
 self.applyDebit(amount)
@@ -177,7 +177,7 @@ fn reentrancy_helper_called_before_ext_call_passes() {
     // Safe: state-writing helper called BEFORE the external call (correct CEI).
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn safeWithdraw(target: Address, amount: u128) {
 self.applyDebit(amount)
 let _ = target.transfer(amount)
@@ -200,7 +200,7 @@ fn reentrancy_internal_helper_with_no_state_write_after_ext_call_passes() {
     // Safe: calling a helper that does NOT write state after an external call is fine.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn notify(target: Address, amount: u128) {
 let _ = target.transfer(amount)
 self.logEvent(amount)
@@ -226,7 +226,7 @@ fn reentrancy_loop_write_before_call_back_edge_rejected() {
     // means iteration N's call is followed by iteration N+1's write — violation.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn badLoop(target: Address, amount: u128) {
 loop {
 self.bal = self.bal - amount
@@ -257,7 +257,7 @@ fn reentrancy_write_call_write_reports_one_violation() {
     // after call is a violation. Only one violation per function is reported.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128, flag: u128 }
+state { bal: u128 = 0, flag: u128 = 0 }
 pub fn mixed(target: Address, amount: u128) {
 self.flag = 1
 let _ = target.transfer(amount)

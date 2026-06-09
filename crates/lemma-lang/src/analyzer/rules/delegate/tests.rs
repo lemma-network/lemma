@@ -29,7 +29,7 @@ fn delegate_self_method_call_passes() {
     // self.transfer(to, amount) — direct self-method call, internal, not a delegate.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn transfer(to: Address, amount: u128) {
 self.bal = self.bal - amount
 }
@@ -51,7 +51,7 @@ fn delegate_local_var_external_call_passes() {
     // oracle.getPrice() — external call through a local variable, not self.field.
     let ast = typed_ast(
         r#"contract C {
-state { price: u128 }
+state { price: u128 = 0 }
 pub fn updatePrice(oracle: Address) {
 let p = oracle.getPrice()
 self.price = p
@@ -74,6 +74,9 @@ fn delegate_self_field_method_call_rejected() {
     let ast = typed_ast(
         r#"contract C {
 state { implementation: Address }
+init(implementation: Address) {
+self.implementation = implementation
+}
 pub fn execute(data: u128) {
 let _ = self.implementation.execute(data)
 }
@@ -99,6 +102,9 @@ fn delegate_self_impl_addr_call_rejected() {
     let ast = typed_ast(
         r#"contract C {
 state { impl_addr: Address }
+init(impl_addr: Address) {
+self.impl_addr = impl_addr
+}
 pub fn proxyCall(selector: u128) {
 let _ = self.impl_addr.call(selector)
 }
@@ -126,6 +132,9 @@ fn delegate_self_field_read_only_passes() {
     let ast = typed_ast(
         r#"contract C {
 state { implementation: Address }
+init(implementation: Address) {
+self.implementation = implementation
+}
 pub view fn getImpl() -> Address {
 return self.implementation
 }

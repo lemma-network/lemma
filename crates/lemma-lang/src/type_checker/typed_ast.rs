@@ -123,16 +123,43 @@ pub struct TypedAst {
     /// so this table is used by `check_trait_bounds` to verify structural
     /// method presence for contract types that declare `implements Trait`.
     pub contract_methods: BTreeMap<SymbolId, Vec<String>>,
+
+    /// Maps interface [`SymbolId`] → required method names (WF-008/009).
+    ///
+    /// Populated by the resolver from `Item::Interface` member functions.
+    /// Enables WF-008/009 to verify that a contract declaring
+    /// `implements InterfaceName` actually provides all methods the interface
+    /// requires (structural check, not just name-level).
+    ///
+    /// `BTreeMap` — not `HashMap` — for deterministic iteration order (AGENTS §7.1).
+    pub interface_methods: BTreeMap<SymbolId, Vec<String>>,
+
+    /// Maps event name → ordered `(field_name, resolved_type)` pairs (WF-012).
+    ///
+    /// Populated by the resolver from `ContractMember::Event` and
+    /// `InterfaceMember::Event` declarations.  Enables WF-012 to validate
+    /// `emit Foo { field: val }` against the declared event schema.
+    ///
+    /// Events are registered as `SymbolKind::Struct` (opaque) in the symbol
+    /// arena; this table provides the field-level detail needed for emit
+    /// validation without duplicating the struct-sig machinery.
+    ///
+    /// Keyed by event name (`String`) rather than `SymbolId` because emit
+    /// statements reference events by name, not by resolved ID.
+    ///
+    /// `BTreeMap` — not `HashMap` — for deterministic iteration order (AGENTS §7.1).
+    pub event_field_sigs: BTreeMap<String, Vec<(String, ResolvedType)>>,
 }
 
 impl TypedAst {
     /// Construct a [`TypedAst`] from an AST and populated side tables.
     ///
     /// Normally called only by the type checker internals.
-    // Justified: TypedAst holds 7 distinct side-tables each with a separate
+    // Justified: TypedAst holds 9 distinct side-tables each with a separate
     // semantic role (expr types, resolutions, symbol arena, sigs, struct/trait/
-    // contract metadata).  All are produced by different resolver/inference
-    // passes and cannot meaningfully be merged.  Called from one site only.
+    // contract metadata, interface methods, event field sigs).  All are produced
+    // by different resolver/inference passes and cannot meaningfully be merged.
+    // Called from one site only.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ast: Ast,
@@ -143,6 +170,8 @@ impl TypedAst {
         struct_traits: BTreeMap<SymbolId, Vec<String>>,
         trait_methods: BTreeMap<SymbolId, Vec<String>>,
         contract_methods: BTreeMap<SymbolId, Vec<String>>,
+        interface_methods: BTreeMap<SymbolId, Vec<String>>,
+        event_field_sigs: BTreeMap<String, Vec<(String, ResolvedType)>>,
     ) -> Self {
         Self {
             ast,
@@ -153,6 +182,8 @@ impl TypedAst {
             struct_traits,
             trait_methods,
             contract_methods,
+            interface_methods,
+            event_field_sigs,
         }
     }
 
@@ -202,6 +233,30 @@ impl TypedAst {
     #[must_use]
     pub fn sig(&self, id: SymbolId) -> Option<&SymbolSig> {
         self.sigs.get(&id)
+    }
+
+    /// Look up the required method names for an interface by its [`SymbolId`].
+    ///
+    /// Returns `None` if the symbol has no entry (e.g. not an interface).
+    /// Returns `Some(&[])` for interfaces with no function members.
+    ///
+    /// Consumed by WF-008/009 to verify that a contract declaring
+    /// `implements InterfaceName` actually provides all required methods.
+    #[must_use]
+    pub fn interface_methods(&self, id: SymbolId) -> Option<&[String]> {
+        self.interface_methods.get(&id).map(Vec::as_slice)
+    }
+
+    /// Look up the declared field signatures for an event by its name.
+    ///
+    /// Returns `None` if no event with this name was declared.
+    /// Returns `Some(&[])` for events with no fields.
+    ///
+    /// Consumed by WF-012 to validate `emit Foo { field: val }` against the
+    /// declared event schema.
+    #[must_use]
+    pub fn event_field_sigs(&self, event_name: &str) -> Option<&[(String, ResolvedType)]> {
+        self.event_field_sigs.get(event_name).map(Vec::as_slice)
     }
 
     /// Returns `true` if expression types have been populated (subtask 3c+).

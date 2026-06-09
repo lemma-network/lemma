@@ -96,7 +96,7 @@ fn eff_auth_propagates_entry_guards_to_callees() {
     // EffAuth(helper from entry) = {OnlyOwner}.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 @onlyOwner pub fn entry() {
 let _ = self.getX()
 }
@@ -125,7 +125,7 @@ return self.x
 fn eff_auth_handles_entry_with_no_callees() {
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 @onlyOwner pub fn setX(v: u128) { self.x = v }
 }"#,
     );
@@ -145,7 +145,7 @@ fn eff_auth_handles_direct_recursion_without_hang() {
     // A directly recursive function must not cause infinite loop.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn recurse(n: u128) {
 let _ = self.recurse(n)
 }

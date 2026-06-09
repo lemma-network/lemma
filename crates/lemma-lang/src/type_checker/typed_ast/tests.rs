@@ -25,6 +25,8 @@ fn make_typed(ast: Ast) -> TypedAst {
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
     )
 }
 
@@ -48,6 +50,8 @@ fn typed_ast_constructs_with_empty_tables() {
         BTreeMap::new(),
         vec![],
         BTreeMap::<SymbolId, SymbolSig>::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
@@ -75,6 +79,8 @@ fn typed_ast_is_fully_typed_true_when_populated() {
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
     );
     assert!(typed.is_fully_typed());
 }
@@ -92,6 +98,8 @@ fn type_of_returns_inserted_type() {
         BTreeMap::new(),
         vec![],
         BTreeMap::<SymbolId, SymbolSig>::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
@@ -121,6 +129,8 @@ fn type_of_distinguishes_spans_by_offset() {
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
     );
     assert_eq!(typed.type_of(&span_a), Some(&ResolvedType::U128));
     assert_eq!(typed.type_of(&span_b), Some(&ResolvedType::Bool));
@@ -139,6 +149,8 @@ fn resolution_of_returns_inserted_symbol() {
         resolutions,
         vec![],
         BTreeMap::<SymbolId, SymbolSig>::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),

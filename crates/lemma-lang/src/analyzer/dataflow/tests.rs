@@ -17,7 +17,7 @@ fn taint_does_not_propagate_through_pure_fn() {
     // taint set — there are no untrusted inputs.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub view fn pureCalc() -> u128 {
 return 42
 }
@@ -39,7 +39,7 @@ fn taint_params_always_tainted() {
     // Every function parameter is a taint seed (caller-controlled).
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn process(a: u128, b: Address) {}
 }"#,
     );
@@ -63,7 +63,7 @@ fn taint_propagates_from_external_call_arg() {
     // `let result = target.getBalance()` — result is tainted (ExternalCallReturn).
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn fetch(target: Address, amount: u128) {
 let result = target.getBalance()
 }
@@ -90,7 +90,7 @@ fn taint_propagation_terminates_on_cyclic_call_graph() {
     // and are bounded by the finite parameter universe).
     let ast = typed_ast(
         r#"contract C {
-state { n: u128 }
+state { n: u128 = 0 }
 pub fn a(x: u128) {
 let _ = self.b(x)
 }
@@ -124,7 +124,7 @@ fn taint_propagates_from_ext_call_inside_if_branch() {
     // `collect_ext_bindings` recursion into nested control flow must reach it.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn f(c: bool, target: Address) {
 if (c) {
 let r = target.getBalance()
@@ -151,6 +151,7 @@ fn state_write_reachable_from_transfer_fn() {
     let ast = typed_ast(
         r#"contract C {
 state { balances: Map<Address, u128> }
+init() {}
 pub fn transfer(to: Address, amount: u128) {
 self.balances[to] = amount
 }
@@ -174,7 +175,7 @@ fn state_write_unreachable_from_view_fn() {
     // getBalance() only reads self.bal — it must NOT appear as a writer.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub view fn getBalance() -> u128 {
 return self.bal
 }
@@ -197,7 +198,7 @@ fn state_write_reachability_is_transitive() {
     // Expected: both outer AND inner appear as writers of bal.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn outer() {
 let _ = self.inner()
 }
@@ -227,8 +228,8 @@ fn state_write_reachability_multiple_fields_tracked_independently() {
     let ast = typed_ast(
         r#"contract C {
 state {
-supply: u128
-paused: bool
+supply: u128 = 0
+paused: bool = false
 }
 pub fn mint(amount: u128) {
 self.supply = self.supply + amount

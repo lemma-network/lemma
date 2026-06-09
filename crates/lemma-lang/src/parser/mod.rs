@@ -74,6 +74,25 @@ pub fn parse(tokens: Vec<(Token, Span)>) -> Result<Ast, LangError> {
 ///
 /// Maintains a cursor (`pos`) into the flat token stream. All parsing methods
 /// are `pub(crate)` so submodule files can extend `Parser` with `impl Parser`.
+/// Maximum expression nesting depth before the parser returns a parse error.
+///
+/// Prevents stack overflow on adversarial inputs like `((((…))))` with thousands
+/// of nested parentheses.  The limit is generous enough for any realistic Lem
+/// program (deeply nested expressions are a code-smell anyway) while bounding
+/// the recursion depth to a safe fraction of the default stack size.
+///
+/// Calibration: each `parse_expr` call traverses ~13 precedence-ladder frames
+/// before reaching `parse_postfix`.  At depth 24 the actual call depth is
+/// ~312 frames.  In debug builds (unoptimized + debuginfo) each frame is
+/// ~18 KiB due to the large `LangError` type and unoptimized locals; 312 frames
+/// ≈ 5.5 MiB — safely within the 8 MiB default stack with ~2.5 MiB headroom.
+/// The stack overflows at ~36 levels in debug mode, so the guard fires at 25
+/// (one above this limit) with an 11-level safety margin.
+///
+/// For normal programs, realistic nesting depth is < 20 (deeply nested
+/// expressions are a code-smell and a readability problem).
+const MAX_EXPR_DEPTH: u32 = 24;
+
 pub(crate) struct Parser {
     /// The flat token stream (including `Newline` and `Eof`).
     tokens: Vec<(Token, Span)>,
@@ -89,6 +108,12 @@ pub(crate) struct Parser {
     /// rewinds past a `>>`-split point, tests will panic immediately rather than
     /// silently misparsing.  See `living-notes.md` "P3-parser-1".
     gt_split_positions: Vec<usize>,
+    /// Current expression nesting depth.
+    ///
+    /// Incremented on entry to `parse_expr` and decremented on exit.  When it
+    /// reaches [`MAX_EXPR_DEPTH`], `parse_expr` returns a parse error instead of
+    /// recursing further — preventing stack overflow on adversarial inputs.
+    expr_depth: u32,
 }
 
 // Cursor helpers are forward-declared here and wired into the sub-parsers
@@ -102,6 +127,7 @@ impl Parser {
             tokens,
             pos: 0,
             gt_split_positions: Vec::new(),
+            expr_depth: 0,
         }
     }
 
@@ -237,6 +263,41 @@ impl Parser {
     #[cfg(test)]
     pub(crate) fn pos_for_test(&self) -> usize {
         self.pos
+    }
+
+    // ── Recursion depth guard ─────────────────────────────────────────────────
+
+    /// Enter a nested expression parse, checking the depth limit.
+    ///
+    /// Returns `Err(LangError::Parse)` if the depth limit is exceeded.
+    /// The caller MUST pair every successful `enter_expr` with `leave_expr`.
+    ///
+    /// # Why this is the right fix
+    ///
+    /// The recursive-descent expression parser has a cycle:
+    /// `parse_postfix → parse_primary → parse_paren_or_tuple → parse_expr → …`
+    ///
+    /// A deeply-nested input like `((((…))))` drives this cycle to stack
+    /// overflow.  Adding a depth counter at the `parse_expr` entry point is the
+    /// minimal, correct fix: it bounds the recursion without changing the grammar
+    /// or the AST shape.  The limit is generous enough for any realistic program
+    /// (see [`MAX_EXPR_DEPTH`]).
+    pub(crate) fn enter_expr(&mut self) -> Result<(), LangError> {
+        self.expr_depth += 1;
+        if self.expr_depth > MAX_EXPR_DEPTH {
+            self.expr_depth -= 1; // restore before returning
+            Err(self.error(format!(
+                "expression nesting depth exceeds the limit of {MAX_EXPR_DEPTH} \
+                 (deeply nested expressions are not supported)"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Leave a nested expression parse (paired with a successful `enter_expr`).
+    pub(crate) fn leave_expr(&mut self) {
+        self.expr_depth = self.expr_depth.saturating_sub(1);
     }
 
     // ── Error constructors ────────────────────────────────────────────────────

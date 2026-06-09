@@ -51,13 +51,16 @@ use super::types::{
 
 /// Output of the name-resolution pass.
 ///
-/// `(symbols, resolutions, sigs, struct_traits, trait_methods, contract_methods)`:
-/// - `symbols`          — the symbol arena (`SymbolId(n)` → `symbols[n-1]`)
-/// - `resolutions`      — span → SymbolId map for every resolved identifier
-/// - `sigs`             — structured signatures for functions, structs, and enums
-/// - `struct_traits`    — struct/contract SymbolId → declared interface+trait names
-/// - `trait_methods`    — trait SymbolId → required method names (P3-checker-8)
-/// - `contract_methods` — contract SymbolId → declared function names (P3-checker-8)
+/// `(symbols, resolutions, sigs, struct_traits, trait_methods, contract_methods,
+///   interface_methods, event_field_sigs)`:
+/// - `symbols`           — the symbol arena (`SymbolId(n)` → `symbols[n-1]`)
+/// - `resolutions`       — span → SymbolId map for every resolved identifier
+/// - `sigs`              — structured signatures for functions, structs, and enums
+/// - `struct_traits`     — struct/contract SymbolId → declared interface+trait names
+/// - `trait_methods`     — trait SymbolId → required method names (P3-checker-8)
+/// - `contract_methods`  — contract SymbolId → declared function names (P3-checker-8)
+/// - `interface_methods` — interface SymbolId → required method names (WF-008/009)
+/// - `event_field_sigs`  — event name → ordered (field_name, resolved_type) pairs (WF-012)
 pub(super) type ResolveOutput = (
     Vec<SymbolInfo>,
     BTreeMap<Span, SymbolId>,
@@ -65,6 +68,8 @@ pub(super) type ResolveOutput = (
     BTreeMap<SymbolId, Vec<String>>,
     BTreeMap<SymbolId, Vec<String>>,
     BTreeMap<SymbolId, Vec<String>>,
+    BTreeMap<SymbolId, Vec<String>>,
+    BTreeMap<String, Vec<(String, ResolvedType)>>,
 );
 
 /// Run name resolution over a parsed AST.
@@ -91,6 +96,8 @@ pub(super) fn resolve(ast: &Ast) -> Result<ResolveOutput, LangError> {
         r.struct_traits,
         r.trait_methods,
         r.contract_methods,
+        r.interface_methods,
+        r.event_field_sigs,
     ))
 }
 
@@ -131,6 +138,30 @@ struct Resolver {
     /// Contracts do not get a `SymbolSig::Struct` entry (unlike struct types),
     /// so a dedicated table is necessary for method-name lookup.
     contract_methods: BTreeMap<SymbolId, Vec<String>>,
+    /// Maps interface SymbolId → required method names (WF-008/009).
+    ///
+    /// Populated during `build_global_scope` for `Item::Interface`, mirroring
+    /// the `trait_methods` builder pattern.  Enables WF-008/009 to verify that
+    /// a contract declaring `implements InterfaceName` actually provides all
+    /// methods the interface requires (structural, not just name-level).
+    ///
+    /// `BTreeMap` — not `HashMap` — for deterministic iteration order (AGENTS §7.1).
+    interface_methods: BTreeMap<SymbolId, Vec<String>>,
+    /// Maps event name → ordered (field_name, resolved_type) pairs (WF-012).
+    ///
+    /// Populated when processing `ContractMember::Event` and
+    /// `InterfaceMember::Event` during `resolve_item`.  Enables WF-012 to
+    /// validate `emit Foo { field: val }` against the declared event schema.
+    ///
+    /// Events are registered as `SymbolKind::Struct` (opaque) in the symbol
+    /// arena; this table provides the field-level detail needed for emit
+    /// validation without duplicating the struct-sig machinery.
+    ///
+    /// Keyed by event name (String) rather than SymbolId because emit
+    /// statements reference events by name, not by resolved ID.
+    ///
+    /// `BTreeMap` — not `HashMap` — for deterministic iteration order (AGENTS §7.1).
+    event_field_sigs: BTreeMap<String, Vec<(String, ResolvedType)>>,
 }
 
 impl Resolver {
@@ -145,6 +176,8 @@ impl Resolver {
             struct_traits: BTreeMap::new(),
             trait_methods: BTreeMap::new(),
             contract_methods: BTreeMap::new(),
+            interface_methods: BTreeMap::new(),
+            event_field_sigs: BTreeMap::new(),
         }
     }
 
@@ -516,6 +549,22 @@ impl Resolver {
                 Item::Interface(i) => {
                     let id = self.alloc(&i.name, i.span, SymbolKind::Interface);
                     self.define_type_or_err(&i.name, id, i.span)?;
+                    // WF-008/009: collect required method names from interface body
+                    // so the WF pass can do structural (not just name-level)
+                    // verification that a contract implementing this interface
+                    // actually provides all required methods.
+                    let methods: Vec<String> = i
+                        .members
+                        .iter()
+                        .filter_map(|m| {
+                            if let crate::parser::InterfaceMember::Function(f) = m {
+                                Some(f.name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    self.interface_methods.insert(id, methods);
                 }
                 Item::Trait(t) => {
                     let id = self.alloc(&t.name, t.span, SymbolKind::Trait);
@@ -761,9 +810,34 @@ impl Resolver {
             Item::TypeAlias(a) => {
                 self.resolve_type_ref(&a.ty, a.span)?;
             }
-            // Interface / Trait / Library: register signatures only in 3b.
+            // Interface: extract event field signatures for WF-012.
+            // Full body resolution is deferred to 3g; only event fields are
+            // extracted here so the WF pass can validate emit statements.
+            Item::Interface(i) => {
+                for member in &i.members {
+                    if let crate::parser::InterfaceMember::Event(e) = member {
+                        // WF-012: extract interface-declared event field signatures.
+                        // These are registered in the same event_field_sigs table as
+                        // contract-declared events — emit validation is name-based.
+                        // Only insert if not already present (contract-declared event
+                        // with the same name takes precedence; interface events are
+                        // typically re-declared in the implementing contract).
+                        if !self.event_field_sigs.contains_key(&e.name) {
+                            // Collect fields before mutating event_field_sigs to
+                            // avoid a simultaneous mutable + immutable borrow of self.
+                            let fields: Vec<(String, ResolvedType)> = e
+                                .fields
+                                .iter()
+                                .map(|f| (f.name.clone(), self.lower_type(&f.ty)))
+                                .collect();
+                            self.event_field_sigs.insert(e.name.clone(), fields);
+                        }
+                    }
+                }
+            }
+            // Trait / Library: register signatures only in 3b.
             // Full body resolution for these is deferred to 3g.
-            Item::Interface(_) | Item::Trait(_) | Item::Library(_) => {}
+            Item::Trait(_) | Item::Library(_) => {}
             Item::Import(_) | Item::Using(_) | Item::ErrorDecl(_) => {}
         }
         Ok(())
@@ -865,6 +939,16 @@ impl Resolver {
             ContractMember::Event(e) => {
                 let id = self.alloc(&e.name, e.span, SymbolKind::Struct);
                 self.define_type_or_err(&e.name, id, e.span)?;
+                // WF-012: extract event field signatures so the WF pass can
+                // validate `emit Foo { field: val }` against the declared schema.
+                // Events are opaque SymbolKind::Struct in the arena; this table
+                // provides the field-level detail without duplicating StructSig.
+                let fields: Vec<(String, ResolvedType)> = e
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), self.lower_type(&f.ty)))
+                    .collect();
+                self.event_field_sigs.insert(e.name.clone(), fields);
             }
             ContractMember::ErrorDecl(e) => {
                 let id = self.alloc(&e.name, e.span, SymbolKind::ErrorDecl);

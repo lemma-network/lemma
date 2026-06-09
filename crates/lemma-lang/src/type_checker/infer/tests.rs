@@ -1099,7 +1099,7 @@ fn member_assign_not_flagged_as_immutable() {
     // Use a contract with a state field assignment.
     check_src(
         "contract C {\
-         \n  state { balance: u128 }\
+         \n  state { balance: u128 = 0 }\
          \n  fn set(v: u128) { self.balance = v }\
          \n}",
     )
@@ -1925,7 +1925,7 @@ fn assign_to_self_state_field_passes() {
     let result = check_src(
         r#"
         contract Foo {
-            state { balance: u128 }
+            state { balance: u128 = 0 }
             fn update(amount: u128) {
                 self.balance = amount
             }
@@ -1941,7 +1941,9 @@ fn assign_to_self_state_field_passes() {
 #[test]
 fn assign_to_self_immutable_field_errors() {
     // `self.owner = x` where owner is `immutable` → MutationOfImmutable.
-    let result = check_src(
+    // The assignment is in a non-init function, so the type checker must reject it.
+    // We use check_skip_wf to bypass WF-002 (which would also fire since there's no init).
+    let tokens = crate::lexer::tokenize(
         r#"
         contract Foo {
             immutable owner: Address
@@ -1950,7 +1952,10 @@ fn assign_to_self_immutable_field_errors() {
             }
         }
         "#,
-    );
+    )
+    .expect("tokenize failed");
+    let ast = crate::parser::parse(tokens).expect("parse failed");
+    let result = crate::type_checker::check_skip_wf(ast);
     assert!(
         matches!(
             result,
@@ -2008,7 +2013,7 @@ fn assign_to_member_of_non_self_skipped() {
     let result = check_src(
         r#"
         contract Foo {
-            state { balance: u128 }
+            state { balance: u128 = 0 }
             fn update(amount: u128) {
                 self.balance = amount
             }
@@ -2309,7 +2314,7 @@ fn structural_bound_accepts_type_with_all_required_methods() {
             fn run() -> bool
         }
         contract GoodRunner implements Runnable {
-            state { x: u128 }
+            state { x: u128 = 0 }
             pub fn run() -> bool {
                 return true
             }

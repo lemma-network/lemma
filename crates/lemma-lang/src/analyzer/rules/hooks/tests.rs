@@ -28,7 +28,7 @@ fn hooks_on_transfer_pure_state_access_passes() {
     // #[onTransfer] hook that only reads/writes own state — no violation.
     let ast = typed_ast(
         r#"contract C {
-state { count: u128 }
+state { count: u128 = 0 }
 #[onTransfer]
 pub fn onTransfer() {
 self.count = self.count + 1
@@ -48,7 +48,7 @@ fn hooks_no_on_transfer_annotation_passes() {
     // Function without #[onTransfer] that makes external calls — not a hook, safe.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn notAHook(target: Address, amount: u128) {
 let _ = target.transfer(amount)
 }
@@ -69,7 +69,7 @@ fn hooks_on_transfer_with_external_call_rejected() {
     // #[onTransfer] hook that calls an external contract — must be rejected.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 #[onTransfer]
 pub fn onTransfer(target: Address, amount: u128) {
 let _ = target.transfer(amount)
@@ -98,7 +98,7 @@ fn hooks_other_annotation_with_external_call_passes() {
     // calls — not a hook, so SAFETY-008 does not apply.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 @onlyOwner
 pub fn adminAction(target: Address, amount: u128) {
 let _ = target.transfer(amount)
@@ -118,7 +118,7 @@ fn hooks_empty_on_transfer_body_passes() {
     // #[onTransfer] hook with an empty body — no external calls, safe.
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 #[onTransfer]
 pub fn onTransfer() {
 }

@@ -14,9 +14,10 @@
 //!
 //! ## Submodule layout
 //!
-//! - `error`     — [`TypeError`] and [`TypeErrorKind`]
-//! - `types`     — [`ResolvedType`] (semantic types) and [`SymbolId`]
-//! - `typed_ast` — [`TypedAst`] (the span-keyed typed output)
+//! - `error`      — [`TypeError`] and [`TypeErrorKind`]
+//! - `types`      — [`ResolvedType`] (semantic types) and [`SymbolId`]
+//! - `typed_ast`  — [`TypedAst`] (the span-keyed typed output)
+//! - `wellformed` — WF-001…015 well-formedness pass (P3·Step 4e-bis)
 //!
 //! ## Implementation status (P3·Step 3 — COMPLETE as of 3h)
 //!
@@ -53,6 +54,7 @@ pub(crate) mod resolver;
 pub mod typed_ast;
 pub mod typed_contract;
 pub mod types;
+pub(crate) mod wellformed;
 
 use std::collections::BTreeMap;
 
@@ -109,6 +111,20 @@ pub fn check(ast: Ast) -> Result<TypedAst, LangError> {
     checker.check_program(ast)
 }
 
+/// Run the full type-checking pipeline but skip the well-formedness pass.
+///
+/// **For test use only.** Safety-rule tests that need a `TypedAst` for
+/// contracts that intentionally violate WF-001…015 (e.g. tokens without
+/// `init`) must use this entry point so the WF pass does not panic the test
+/// before the safety rule under test can be exercised.
+///
+/// Production code must always use [`check`].
+#[cfg(test)]
+pub(crate) fn check_skip_wf(ast: Ast) -> Result<TypedAst, LangError> {
+    let mut checker = Checker;
+    checker.check_program_skip_wf(ast)
+}
+
 // ─── Internal checker ─────────────────────────────────────────────────────────
 
 /// The internal type-checking engine.
@@ -122,12 +138,40 @@ struct Checker;
 
 impl Checker {
     fn check_program(&mut self, ast: Ast) -> Result<TypedAst, LangError> {
+        self.run_pipeline(ast, true)
+    }
+
+    /// Same as [`check_program`] but skips the well-formedness pass.
+    ///
+    /// For test use only — allows safety-rule tests to obtain a `TypedAst`
+    /// for contracts that intentionally violate WF rules.
+    #[cfg(test)]
+    fn check_program_skip_wf(&mut self, ast: Ast) -> Result<TypedAst, LangError> {
+        self.run_pipeline(ast, false)
+    }
+
+    /// Shared pipeline: tokenize → name-resolve → infer → (optionally) well-formedness.
+    ///
+    /// `run_wf = true`  → runs `wellformed::check` before returning `Ok(TypedAst)`.
+    /// `run_wf = false` → skips the WF pass (test-only; see `check_program_skip_wf`).
+    ///
+    /// Extracted to eliminate the ~60-line duplication between `check_program` and
+    /// `check_program_skip_wf` (AGENTS §2 DRY).
+    fn run_pipeline(&mut self, ast: Ast, run_wf: bool) -> Result<TypedAst, LangError> {
         // Pass 1 (3a): reject duplicate top-level declaration names.
         self.check_no_duplicate_top_level_names(&ast.items)?;
 
         // Pass 2 (3b/3d): name resolution + SymbolSig building.
-        let (mut symbols, resolutions, sigs, struct_traits, trait_methods, contract_methods) =
-            resolver::resolve(&ast)?;
+        let (
+            mut symbols,
+            resolutions,
+            sigs,
+            struct_traits,
+            trait_methods,
+            contract_methods,
+            interface_methods,
+            event_field_sigs,
+        ) = resolver::resolve(&ast)?;
 
         // Build flat global-type namespace for the Inferer's lower_cast_target.
         // Maps each type-namespace symbol's name to its SymbolId.
@@ -173,7 +217,7 @@ impl Checker {
             inferer.validate_type_annotations(&ast)?;
         }
 
-        Ok(TypedAst::new(
+        let typed_ast = TypedAst::new(
             ast,
             expr_types,
             resolutions,
@@ -182,7 +226,18 @@ impl Checker {
             struct_traits,
             trait_methods,
             contract_methods,
-        ))
+            interface_methods,
+            event_field_sigs,
+        );
+
+        // Well-formedness pass (P3·Step 4e-bis): runs after the inferer succeeds,
+        // before returning Ok(TypedAst).  Collects all WF-001…015 violations and
+        // maps a non-empty vec to LangError::WellFormed (collect-all, never fail-fast).
+        if run_wf {
+            wellformed::check(&typed_ast).map_err(LangError::WellFormed)?;
+        }
+
+        Ok(typed_ast)
     }
 
     /// Verify that no two top-level items share a declaration name.

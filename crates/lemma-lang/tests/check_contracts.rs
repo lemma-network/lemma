@@ -37,6 +37,9 @@ use lemma_lang::{check, parse, tokenize};
 ///
 /// `tokenize` and `parse` are expected to succeed (already proven by
 /// `parse_contracts.rs`).  Only `check` may return `Err`.
+// LangError is the intentional top-level pipeline error type; boxing it would
+// change the public API.  The compiler pipeline is not a hot path.
+#[allow(clippy::result_large_err)]
 fn pipeline(src: &str) -> Result<TypedAst, LangError> {
     let tokens = tokenize(src).expect("tokenize failed in integration test");
     let ast = parse(tokens).expect("parse failed in integration test");
@@ -59,6 +62,9 @@ name: "Minimal"
 symbol: "MIN"
 decimals: 18
 maxSupply: 1000000
+}
+init(registry: Address) {
+registry.register("MIN", self)
 }
 }"#,
     );
@@ -85,6 +91,9 @@ maxSupply: 500000000
 }
 state {
 snapshots: Map<Address, u128>
+}
+init(registry: Address) {
+registry.register("EXT2", self)
 }
 pub view fn getSnapshot(holder: Address) -> u128 {
 return self.snapshots[holder]
@@ -115,11 +124,11 @@ fn check_contract_dex_amm_accepts() {
     let result = pipeline(
         r#"contract SimpleAMM {
 state {
-pub reserves0: u128,
-pub reserves1: u128,
-pub totalLiquidity: u128,
+pub reserves0: u128 = 0,
+pub reserves1: u128 = 0,
+pub totalLiquidity: u128 = 0,
 liquidity: Map<Address, u128>,
-pub paused: bool,
+pub paused: bool = false,
 }
 @nonReentrant
 @whenNotPaused
@@ -165,9 +174,9 @@ fn check_staking_contract_accepts() {
     let result = pipeline(
         r#"contract SimpleStaking {
 state {
-pub totalStaked: u128
+pub totalStaked: u128 = 0
 stakes: Map<Address, u128>
-pub rewardRate: u128
+pub rewardRate: u128 = 0
 }
 pub fn stake(staker: Address, amount: u128) {
 self.stakes[staker] = self.stakes[staker] + amount
@@ -205,6 +214,9 @@ fn typed_contract_name_and_is_token_flags_correct() {
     let typed = pipeline(
         r#"token MyToken extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
+init(registry: Address) {
+registry.register("T", self)
+}
 }"#,
     )
     .expect("pipeline failed");
@@ -257,10 +269,13 @@ fn typed_contract_state_fields_resolved_types_correct() {
     let typed = pipeline(
         r#"contract TypesTest {
 state {
-count: u128
-flag: bool
+count: u128 = 0
+flag: bool = false
 }
 immutable owner: Address
+init(owner: Address) {
+self.owner = owner
+}
 }"#,
     )
     .expect("pipeline failed");
@@ -306,6 +321,9 @@ fn typed_contract_config_present_for_token_absent_for_contract() {
     let typed = pipeline(
         r#"token Tk extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
+init(registry: Address) {
+registry.register("T", self)
+}
 }"#,
     )
     .expect("pipeline failed");
@@ -340,7 +358,7 @@ fn typed_contract_functions_names_and_return_types_correct() {
     let typed = pipeline(
         r#"contract FnTest {
 state {
-count: u128
+count: u128 = 0
 }
 pub view fn getCount() -> u128 {
 return self.count

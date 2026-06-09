@@ -14,7 +14,7 @@ fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
 fn call_graph_records_self_method_call_as_internal_edge() {
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn outer() {
 let _ = self.inner()
 }
@@ -38,6 +38,9 @@ fn call_graph_does_not_record_external_call_as_edge() {
     let ast = typed_ast(
         r#"contract C {
 state { other: Address }
+init(other: Address) {
+self.other = other
+}
 pub fn bridge(target: Address, amount: u128) {
 let _ = target.transfer(amount)
 }
@@ -57,7 +60,7 @@ let _ = target.transfer(amount)
 fn call_graph_handles_recursion_without_infinite_loop() {
     let ast = typed_ast(
         r#"contract C {
-state { n: u128 }
+state { n: u128 = 0 }
 pub fn count(x: u128) {
 let _ = self.count(x)
 }
@@ -79,7 +82,7 @@ let _ = self.count(x)
 fn ext_calls_empty_for_self_only_fn() {
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub view fn getBalance() -> u128 {
 return self.bal
 }
@@ -98,7 +101,7 @@ return self.bal
 fn ext_calls_detected_for_cross_contract_method_call() {
     let ast = typed_ast(
         r#"contract C {
-state { x: u128 }
+state { x: u128 = 0 }
 pub fn pay(target: Address, amount: u128) {
 let _ = target.transfer(amount)
 }
@@ -125,7 +128,7 @@ let _ = target.transfer(amount)
 fn cfg_nodes_state_write_detected_for_self_field_assign() {
     let ast = typed_ast(
         r#"contract C {
-state { count: u128 }
+state { count: u128 = 0 }
 pub fn increment() {
 self.count = self.count + 1
 }
@@ -147,7 +150,7 @@ fn cfg_nodes_external_call_detected_before_state_write() {
     // Pattern that SAFETY-004 should catch: external call then state write.
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn badWithdraw(target: Address, amount: u128) {
 let _ = target.transfer(amount)
 self.bal = self.bal - amount
@@ -179,7 +182,7 @@ fn cfg_nodes_state_write_before_external_call_not_flagged_as_reentrancy_pattern(
     // Good pattern: state write BEFORE external call (CEI order — no violation).
     let ast = typed_ast(
         r#"contract C {
-state { bal: u128 }
+state { bal: u128 = 0 }
 pub fn goodWithdraw(target: Address, amount: u128) {
 self.bal = self.bal - amount
 let _ = target.transfer(amount)

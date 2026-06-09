@@ -51,9 +51,23 @@ impl Parser {
     /// Parse a single expression (entry point for stmt.rs and decl.rs).
     ///
     /// Dispatches to the top of the precedence ladder (`parse_assignment`).
+    ///
+    /// # Depth guard
+    ///
+    /// Increments the expression nesting depth counter on entry and decrements
+    /// it on exit.  Returns a parse error if the depth exceeds
+    /// [`super::MAX_EXPR_DEPTH`], preventing stack overflow on adversarial
+    /// inputs like `((((…))))`.  See [`Parser::enter_expr`] for the rationale.
     pub(crate) fn parse_expr(&mut self) -> Result<Expr, LangError> {
         self.skip_newlines();
-        self.parse_assignment()
+        // Depth guard: prevents stack overflow on deeply-nested expressions.
+        // Every recursive call path that re-enters parse_expr (e.g.
+        // parse_paren_or_tuple, parse_call_args, parse_index) goes through
+        // this entry point, so a single counter here covers all cycles.
+        self.enter_expr()?;
+        let result = self.parse_assignment();
+        self.leave_expr();
+        result
     }
 
     // ── Precedence level: assignment (right-associative) ─────────────────────

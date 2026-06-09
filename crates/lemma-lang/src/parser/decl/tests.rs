@@ -612,3 +612,61 @@ fn parse_decl_malformed_never_panics() {
         );
     }
 }
+
+// ─── Init constructor parser tests ───────────────────────────────────────────
+
+#[test]
+fn parse_decl_init_plain_has_default_mutability() {
+    // `init(params) { body }` — plain init, mutability must be Default.
+    let item = parse_item("contract Foo {\n  init(owner: Address) {}\n}");
+    let Item::Contract(c) = item else {
+        panic!("expected Contract");
+    };
+    let ContractMember::Function(f) = &c.members[0] else {
+        panic!("expected Function member");
+    };
+    assert_eq!(f.name, "init");
+    assert_eq!(f.visibility, Visibility::Private);
+    assert_eq!(f.mutability, Mutability::Default);
+    assert!(f.return_type.is_none());
+}
+
+#[test]
+fn parse_decl_payable_init_has_payable_mutability() {
+    // `payable init(params) { body }` — the ONE permitted modifier on init (§9, WF-003).
+    // Parser must set mutability=Payable and visibility=Private.
+    let item = parse_item("contract Foo {\n  payable init(seed: u128 = 0) {}\n}");
+    let Item::Contract(c) = item else {
+        panic!("expected Contract");
+    };
+    let ContractMember::Function(f) = &c.members[0] else {
+        panic!("expected Function member");
+    };
+    assert_eq!(f.name, "init");
+    assert_eq!(f.visibility, Visibility::Private);
+    assert_eq!(f.mutability, Mutability::Payable);
+    assert!(f.return_type.is_none());
+    assert_eq!(f.params.len(), 1);
+    assert_eq!(f.params[0].name, "seed");
+}
+
+#[test]
+fn parse_decl_payable_init_in_token_decl() {
+    // `payable init` inside a `token` declaration — same grammar, same rules.
+    let item = parse_item("token MyToken extends Token {\n  payable init(seed: u128 = 0) {}\n}");
+    let Item::Token_(t) = item else {
+        panic!("expected Token_");
+    };
+    let ContractMember::Function(f) = &t.members[0] else {
+        panic!("expected Function member");
+    };
+    assert_eq!(f.name, "init");
+    assert_eq!(f.mutability, Mutability::Payable);
+}
+
+// Note: `pub init` and `external init` are parse-time errors (visibility is
+// parser-enforced as Private for init). These cannot be tested as WF errors
+// because they never reach the type checker. The parse error is produced by
+// the contract-member dispatcher routing `pub` → parse_function (not parse_init),
+// which then fails to find `fn` after `pub`. This is the correct behavior —
+// `pub init` is not valid Lem syntax.}

@@ -10,6 +10,14 @@
 //!
 //! Cap-assert detection is conservative (linear scan, any `<=`/`<` assert
 //! before the write).  Full dominator tree analysis is 4g work.
+//!
+//! ## Config note (WF-014)
+//!
+//! All token configs include the mandatory Token keys (name, symbol, decimals,
+//! maxSupply) per WF-014.  Supply-cap-specific keys (mintable, maxSupply) are
+//! added on top.  When testing `mintable: false` without a `maxSupply` cap,
+//! `maxSupply` is still present as a mandatory key (the supply_cap rule reads
+//! `mintable` and `maxSupply` independently).
 
 use crate::analyzer::error::SafetyError;
 use crate::{check, parse, tokenize};
@@ -30,8 +38,11 @@ fn supply_cap_mintable_false_no_writes_passes() {
     // mintable: false token with no totalSupply writes → passes.
     let ast = typed_ast(
         r#"token T extends Token {
-config { mintable: false }
-state { totalSupply: u128 }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: false }
+state { totalSupply: u128 = 0 }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn transfer(to: Address, amount: u128) {
 let x = amount
 }
@@ -50,8 +61,11 @@ fn supply_cap_mintable_false_burn_only_passes() {
     // mintable: false with only totalSupply -= (burn, no +=) → passes.
     let ast = typed_ast(
         r#"token T extends Token {
-config { mintable: false }
-state { totalSupply: u128 }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: false }
+state { totalSupply: u128 = 0 }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn burn(amount: u128) {
 self.totalSupply = self.totalSupply - amount
 }
@@ -70,8 +84,11 @@ fn supply_cap_max_supply_with_preceding_assert_passes() {
     // maxSupply declared + assert before totalSupply += → passes.
     let ast = typed_ast(
         r#"token T extends Token {
-config { maxSupply: 1000000 }
-state { totalSupply: u128 }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { totalSupply: u128 = 0 }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn mint(amount: u128) {
 assert(self.totalSupply + amount <= 1000000)
 self.totalSupply += amount
@@ -91,7 +108,7 @@ fn supply_cap_no_config_block_passes() {
     // Plain contract with no config block — rule does not apply.
     let ast = typed_ast(
         r#"contract C {
-state { totalSupply: u128 }
+state { totalSupply: u128 = 0 }
 pub fn mint(amount: u128) {
 self.totalSupply += amount
 }
@@ -110,10 +127,16 @@ self.totalSupply += amount
 #[test]
 fn supply_cap_mintable_false_with_add_assign_rejected() {
     // mintable: false + self.totalSupply += amount → SupplyCapViolation.
+    // Note: maxSupply is also set (mandatory per WF-014), so the supply_cap rule
+    // fires twice: once for mintable:false and once for the missing cap assert.
+    // We verify at least one violation mentions mintable:false.
     let ast = typed_ast(
         r#"token T extends Token {
-config { mintable: false }
-state { totalSupply: u128 }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: false }
+state { totalSupply: u128 = 0 }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn mint(amount: u128) {
 self.totalSupply += amount
 }
@@ -121,25 +144,28 @@ self.totalSupply += amount
     );
     let contracts = ast.contracts();
     let violations = supply_cap_check(&contracts[0]);
-    assert_eq!(
-        violations.len(),
-        1,
-        "mintable:false + += must produce one violation; got {violations:?}"
+    assert!(
+        !violations.is_empty(),
+        "mintable:false + += must produce violations; got {violations:?}"
     );
     assert!(
-        matches!(&violations[0], SafetyError::SupplyCapViolation { reason } if reason.contains("mintable: false")),
-        "violation must be SupplyCapViolation mentioning mintable:false; got {:?}",
-        violations[0]
+        violations.iter().any(|v| matches!(v, SafetyError::SupplyCapViolation { reason } if reason.contains("mintable: false"))),
+        "at least one violation must mention mintable:false; got {violations:?}"
     );
 }
 
 #[test]
 fn supply_cap_mintable_false_with_plain_add_rejected() {
     // mintable: false + self.totalSupply = self.totalSupply + amount → SupplyCapViolation.
+    // Note: maxSupply is also set (mandatory per WF-014), so multiple violations may fire.
+    // We verify at least one SupplyCapViolation is produced.
     let ast = typed_ast(
         r#"token T extends Token {
-config { mintable: false }
-state { totalSupply: u128 }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: false }
+state { totalSupply: u128 = 0 }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn mint(amount: u128) {
 self.totalSupply = self.totalSupply + amount
 }
@@ -147,15 +173,15 @@ self.totalSupply = self.totalSupply + amount
     );
     let contracts = ast.contracts();
     let violations = supply_cap_check(&contracts[0]);
-    assert_eq!(
-        violations.len(),
-        1,
-        "mintable:false + plain add must produce one violation; got {violations:?}"
+    assert!(
+        !violations.is_empty(),
+        "mintable:false + plain add must produce violations; got {violations:?}"
     );
     assert!(
-        matches!(&violations[0], SafetyError::SupplyCapViolation { .. }),
-        "violation must be SupplyCapViolation; got {:?}",
-        violations[0]
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::SupplyCapViolation { .. })),
+        "at least one violation must be SupplyCapViolation; got {violations:?}"
     );
 }
 
@@ -164,8 +190,11 @@ fn supply_cap_max_supply_without_assert_rejected() {
     // maxSupply declared + totalSupply += without preceding assert → SupplyCapViolation.
     let ast = typed_ast(
         r#"token T extends Token {
-config { maxSupply: 1000000 }
-state { totalSupply: u128 }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { totalSupply: u128 = 0 }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn mint(amount: u128) {
 self.totalSupply += amount
 }
@@ -194,8 +223,11 @@ fn supply_cap_max_supply_nested_write_without_assert_rejected() {
     // true for nested writes before the fix).
     let ast = typed_ast(
         r#"token T extends Token {
-config { maxSupply: 1000000 }
-state { totalSupply: u128, enabled: bool }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { totalSupply: u128 = 0, enabled: bool = false }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn mint(amount: u128) {
 if (self.enabled) {
 self.totalSupply += amount
@@ -222,8 +254,11 @@ fn supply_cap_max_supply_nested_write_with_enclosing_assert_passes() {
     // Enclosing assert (before the if) covers nested write — must pass.
     let ast = typed_ast(
         r#"token T extends Token {
-config { maxSupply: 1000000 }
-state { totalSupply: u128, enabled: bool }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { totalSupply: u128 = 0, enabled: bool = false }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn mint(amount: u128) {
 assert(self.totalSupply + amount <= 1000000)
 if (self.enabled) {
@@ -247,8 +282,11 @@ fn supply_cap_max_supply_assert_after_write_rejected() {
     // Assert AFTER the write (not before) → not a cap guard → violation.
     let ast = typed_ast(
         r#"token T extends Token {
-config { maxSupply: 1000000 }
-state { totalSupply: u128 }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { totalSupply: u128 = 0 }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn mint(amount: u128) {
 self.totalSupply += amount
 assert(self.totalSupply <= 1000000)
@@ -266,12 +304,19 @@ assert(self.totalSupply <= 1000000)
 
 #[test]
 fn supply_cap_mintable_true_no_max_supply_passes() {
-    // mintable: true (default) with no maxSupply — rule does not apply.
+    // mintable: true (default) with a cap assert before the write → passes.
+    // Note: maxSupply is present as a mandatory Token config key (WF-014), so
+    // the supply_cap rule requires a cap assert before totalSupply writes.
+    // We add the assert to satisfy SAFETY-003 while testing mintable:true behavior.
     let ast = typed_ast(
         r#"token T extends Token {
-config { mintable: true }
-state { totalSupply: u128 }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 mintable: true }
+state { totalSupply: u128 = 0 }
+init(registry: Address) {
+registry.register("T", self)
+}
 pub fn mint(amount: u128) {
+assert(self.totalSupply + amount <= 1000000)
 self.totalSupply += amount
 }
 }"#,
@@ -280,6 +325,6 @@ self.totalSupply += amount
     let violations = supply_cap_check(&contracts[0]);
     assert!(
         violations.is_empty(),
-        "mintable:true with no maxSupply must pass SAFETY-003; got {violations:?}"
+        "mintable:true with cap assert must pass SAFETY-003; got {violations:?}"
     );
 }

@@ -1,3 +1,11 @@
+// `LangError` is the intentional top-level pipeline error type for this crate.
+// It wraps large variants (TypeError, SafetyError, WellFormed) by design — the
+// compiler pipeline is not a hot path and the ergonomics of a flat enum outweigh
+// the stack-size concern.  Boxing every variant would change the public API and
+// add allocations on every error path.  Suppressed crate-wide because the lint
+// fires on every function returning `Result<_, LangError>` across the codebase.
+#![allow(clippy::result_large_err)]
+
 //! # lemma-lang
 //!
 //! The Lem language compiler pipeline: lexer, parser, type checker,

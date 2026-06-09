@@ -479,6 +479,36 @@ fn parse_expr_compound_assignment_operators() {
 // ── Error cases (never panic, always Err) ─────────────────────────────────────
 
 #[test]
+fn parse_expr_returns_err_on_excessive_nesting_depth() {
+    // 30 levels of nested parentheses exceeds MAX_EXPR_DEPTH (24).
+    //
+    // Recursion path per `(`: parse_expr → … → parse_paren_or_tuple → parse_expr.
+    // Each `(` generates exactly one call to enter_expr.  enter_expr fires when
+    // expr_depth > MAX_EXPR_DEPTH (24), i.e. on the 25th call.  30 parens
+    // therefore triggers the guard on the 25th `(` and returns a clean Err —
+    // the recursion stops at depth 25, not 30, so no deep stack usage occurs.
+    // Reaching this assertion proves no stack-overflow or panic occurred.
+    let deep = "(".repeat(30) + "1" + &")".repeat(30);
+    let result = parse_expr_from_str(&deep);
+    assert!(
+        result.is_err(),
+        "parser must return Err for depth > MAX_EXPR_DEPTH (24), got Ok"
+    );
+}
+
+#[test]
+fn parse_expr_accepts_normal_nesting_depth() {
+    // 10 levels of parentheses is well within MAX_EXPR_DEPTH (24).
+    // Must parse successfully and produce the inner integer literal.
+    let normal = "(".repeat(10) + "1" + &")".repeat(10);
+    let result = parse_expr_from_str(&normal);
+    assert!(
+        result.is_ok(),
+        "parser must succeed for normal nesting depth (10), got {result:?}"
+    );
+}
+
+#[test]
 fn parse_expr_empty_source_returns_error() {
     let result = parse_expr_from_str("");
     assert!(result.is_err(), "empty source should return Err");

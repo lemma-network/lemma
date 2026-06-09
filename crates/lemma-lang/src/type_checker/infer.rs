@@ -74,6 +74,12 @@ pub(super) struct Inferer<'a> {
     /// `None` outside any function body.  Used by `check_return` (3e) to
     /// validate that `return expr` matches the declared return type.
     current_fn_ret: Option<ResolvedType>,
+    /// The name of the innermost enclosing function, set in `walk_function`.
+    ///
+    /// `None` outside any function body.  Used by `check_assign` to allow
+    /// `self.immutable_field = value` inside `init` (WF-002 permits exactly
+    /// one assignment in init; the type-checker must not block it there).
+    current_fn_name: Option<String>,
     /// The [`SymbolId`] of the contract currently being walked, set in
     /// `walk_item` when entering a `Contract` or `Token_` item.
     ///
@@ -110,6 +116,7 @@ impl<'a> Inferer<'a> {
             contract_methods,
             expr_types,
             current_fn_ret: None,
+            current_fn_name: None,
             current_contract_id: None,
         }
     }
@@ -231,8 +238,10 @@ impl<'a> Inferer<'a> {
 
     fn walk_function(&mut self, f: &Function) -> Result<(), LangError> {
         // Find the FnSig for this function by matching its declaration span.
-        // Save and restore current_fn_ret to handle nested fn declarations.
+        // Save and restore current_fn_ret and current_fn_name to handle nested fn declarations.
         let prev_ret = self.current_fn_ret.take();
+        let prev_fn_name = self.current_fn_name.take();
+        self.current_fn_name = Some(f.name.clone());
         self.current_fn_ret = self
             .symbols
             .iter()
@@ -261,8 +270,9 @@ impl<'a> Inferer<'a> {
             }
         }
 
-        // Restore previous return type (handles nested fn declarations).
+        // Restore previous return type and function name (handles nested fn declarations).
         self.current_fn_ret = prev_ret;
+        self.current_fn_name = prev_fn_name;
         Ok(())
     }
 
@@ -2226,7 +2236,15 @@ impl<'a> Inferer<'a> {
                                 .symbols
                                 .iter()
                                 .any(|s| s.name == *field_name && s.kind == SymbolKind::Immutable);
-                            if is_immutable {
+                            // Allow `self.immutable_field = value` inside `init`:
+                            // WF-002 enforces exactly-once assignment in init; the
+                            // type-checker must not block it at this layer.
+                            let in_init = self
+                                .current_fn_name
+                                .as_deref()
+                                .map(|n| n == "init")
+                                .unwrap_or(false);
+                            if is_immutable && !in_init {
                                 return Err(type_err(
                                     TypeErrorKind::MutationOfImmutable {
                                         name: field_name.clone(),

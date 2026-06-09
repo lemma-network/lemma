@@ -54,10 +54,21 @@ fn typed_contract_name_matches_ast() {
 
 #[test]
 fn typed_contract_is_token_correct() {
+    // Uses a complete Token config (name, symbol, decimals, maxSupply) per WF-014.
     let typed = check_src(
         r#"
         contract Plain {}
-        token MyToken extends Token {}
+        token MyToken extends Token {
+            config {
+                name: "MyToken"
+                symbol: "MTK"
+                decimals: 18
+                maxSupply: 1000000
+            }
+            init(registry: Address) {
+                registry.register("T", self)
+            }
+        }
         "#,
     );
     let contracts = typed.contracts();
@@ -74,8 +85,11 @@ fn typed_contract_state_fields_include_name_and_type() {
         r#"
         contract Foo {
             state {
-                balance: u128
+                balance: u128 = 0
                 owner: Address
+            }
+            init(owner: Address) {
+                self.owner = owner
             }
         }
         "#,
@@ -97,8 +111,11 @@ fn typed_contract_state_fields_immutable_flagged() {
     let typed = check_src(
         r#"
         contract Foo {
-            state { balance: u128 }
+            state { balance: u128 = 0 }
             immutable owner: Address
+            init(owner: Address) {
+                self.owner = owner
+            }
         }
         "#,
     );
@@ -156,10 +173,19 @@ fn typed_contract_delegates_type_of_to_typed_ast() {
 #[test]
 fn typed_contract_config_some_for_token() {
     // token contracts expose config() as Some (P3-checker-1 coverage).
+    // Uses a complete Token config (name, symbol, decimals, maxSupply) per WF-014.
     let typed = check_src(
         r#"
         token MyToken extends Token {
-            config { name: "MyToken" }
+            config {
+                name: "MyToken"
+                symbol: "MTK"
+                decimals: 18
+                maxSupply: 1000000
+            }
+            init(registry: Address) {
+                registry.register("MyToken", self)
+            }
         }
         "#,
     );
@@ -208,6 +234,9 @@ fn typed_contract_immutable_field_ty_resolves() {
         r#"
         contract Foo {
             immutable deployer: Address
+            init(deployer: Address) {
+                self.deployer = deployer
+            }
         }
         "#,
     );

@@ -124,6 +124,12 @@ impl Parser {
             Token::State => Ok(ContractMember::State(self.parse_state_block()?)),
             Token::Const => Ok(ContractMember::Const(self.parse_const_decl()?)),
             Token::Immutable => Ok(ContractMember::Immutable(self.parse_immutable()?)),
+            // `payable init(…) { … }` — the one permitted modifier on init (§9, WF-003).
+            // Peek ahead: if `payable` is immediately followed by `init`, route to parse_init.
+            // Otherwise fall through to parse_function (e.g. `payable fn receive(…)`).
+            Token::Payable if self.peek_nth(1) == &Token::Init => {
+                Ok(ContractMember::Function(self.parse_init(annotations)?))
+            }
             Token::Init => Ok(ContractMember::Function(self.parse_init(annotations)?)),
             Token::Fn
             | Token::Pub
@@ -208,14 +214,35 @@ impl Parser {
 
     // ── Init (constructor) ────────────────────────────────────────────────────
 
-    /// Parse `init(params) { body }` — the contract constructor.
+    /// Parse `payable? init(params) { body }` — the contract constructor.
     ///
-    /// Parsed as a `Function` named `"init"` with `Visibility::Private`.
+    /// Grammar: `payable? init ( params? ) { body }`
+    ///
+    /// - Visibility is always `Private` (parser-enforced; WF-003 clause 3a is a
+    ///   parse-time guarantee — `pub init` / `external init` are parse errors).
+    /// - Return type is always `None` (parser-enforced; WF-003 clause 4 is a
+    ///   parse-time guarantee — `init -> T` is a parse error).
+    /// - Mutability is `Payable` if the optional `payable` keyword precedes `init`,
+    ///   otherwise `Default`. `payable` is the ONE permitted modifier (§9, WF-003).
+    ///
+    /// See decisions-log.md DB-A46.
     pub(crate) fn parse_init(
         &mut self,
         annotations: Vec<crate::parser::ast::Annotation>,
     ) -> Result<crate::parser::ast::Function, LangError> {
-        let start = self.expect(&Token::Init, "\"init\"")?;
+        // Optional `payable` keyword before `init` — the one permitted modifier.
+        // Capture the start span from `payable` if present, otherwise from `init`.
+        let (mutability, start) = if self.check(&Token::Payable) {
+            let payable_span = self.peek_span();
+            self.advance(); // consume `payable`
+            let init_span = self.expect(&Token::Init, "\"init\"")?;
+            // Span starts at `payable` for accurate source location.
+            let _ = init_span; // init_span consumed; start from payable
+            (crate::parser::ast::Mutability::Payable, payable_span)
+        } else {
+            let init_span = self.expect(&Token::Init, "\"init\"")?;
+            (crate::parser::ast::Mutability::Default, init_span)
+        };
         self.expect(&Token::LParen, "\"(\"")?;
         let params = self.parse_param_list()?;
         self.expect(&Token::RParen, "\")\"")?;
@@ -225,7 +252,7 @@ impl Parser {
             name: "init".to_string(),
             annotations,
             visibility: crate::parser::ast::Visibility::Private,
-            mutability: crate::parser::ast::Mutability::Default,
+            mutability,
             generic_params: vec![],
             params,
             return_type: None,

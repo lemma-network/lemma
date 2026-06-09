@@ -215,6 +215,204 @@ pub enum TypeErrorKind {
         /// The type the `?` operator was applied to (human-readable).
         found: String,
     },
+
+    // ── Well-Formedness variants (WF-001…015, spec §30) ──────────────────────
+    // These are emitted by `type_checker::wellformed::check` (P3·Step 4e-bis).
+    // The pass runs after the inferer succeeds and before `Ok(TypedAst)` is
+    // returned.  All violations are collected before returning (collect-all,
+    // never fail-fast) — consistent with the safety analyzer shape.
+    /// WF-001 — A `state` field has no default initializer and is not assigned
+    /// on every path through `init`.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-001`.
+    UninitializedStateField {
+        /// The name of the uninitialized state field.
+        field: String,
+        /// Source location of the field declaration.
+        span: Span,
+    },
+
+    /// WF-002 — An `immutable` field is not assigned exactly once inside `init`,
+    /// or is assigned outside `init`.
+    ///
+    /// `found_assignments` is 0 (never set) or >1 (set multiple times on some path).
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-002`.
+    ImmutableNotSetOnce {
+        /// The name of the immutable field.
+        field: String,
+        /// The number of assignments found (0 = never set; >1 = set multiple times).
+        found_assignments: usize,
+        /// Source location of the field declaration.
+        span: Span,
+    },
+
+    /// WF-003 — The `init` constructor is structurally malformed.
+    ///
+    /// Covers: duplicate `init`, `pub`/`external`/`@onlyOwner` on `init`,
+    /// `init` with a return type, token missing `init`, token `init` missing
+    /// `registry.register`.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-003`.
+    MalformedInit {
+        /// Human-readable description of the structural violation.
+        reason: String,
+        /// Source location of the offending `init` (or contract if `init` is absent).
+        span: Span,
+    },
+
+    /// WF-004 — A function with a non-unit return type has a path that falls
+    /// off the end without a `return`, `revert`, or infinite `loop {}`.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-004`.
+    MissingReturn {
+        /// The name of the function missing a return on some path.
+        func: String,
+        /// Source location of the function declaration.
+        span: Span,
+    },
+
+    /// WF-005 — A `match` over an enum/bool/Option/Result does not cover all
+    /// variants and has no wildcard `_` arm.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-005`.
+    NonExhaustiveMatch {
+        /// The variant names that are not covered by any arm.
+        missing: Vec<String>,
+        /// Source location of the `match` expression.
+        span: Span,
+    },
+
+    /// WF-006 — A `_` placeholder statement appears outside a `modifier` body.
+    ///
+    /// `_` is only valid as the splice point inside a modifier; a stray `_` in
+    /// a regular function has no codegen target.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-006`.
+    PlaceholderOutsideModifier {
+        /// Source location of the offending `_` statement.
+        span: Span,
+    },
+
+    /// WF-007 — A `break` or `continue` statement appears outside any
+    /// `for`/`while`/`loop` construct.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-007`.
+    ControlFlowOutsideLoop {
+        /// `"break"` or `"continue"`.
+        kind: String,
+        /// Source location of the offending statement.
+        span: Span,
+    },
+
+    /// WF-008 — A contract declares `implements I` but does not provide every
+    /// method required by interface `I`.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-008`.
+    IncompleteInterface {
+        /// The interface name that is not fully implemented.
+        interface: String,
+        /// The method names that are missing from the contract.
+        missing: Vec<String>,
+        /// Source location of the `implements` clause.
+        span: Span,
+    },
+
+    /// WF-009 — A contract declares `uses T` but does not provide every
+    /// required method or state field demanded by trait `T`.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-009`.
+    IncompleteTrait {
+        /// The trait name whose requirements are not fully satisfied.
+        trait_name: String,
+        /// The method or state-field names that are missing.
+        missing: Vec<String>,
+        /// Source location of the `uses` clause.
+        span: Span,
+    },
+
+    /// WF-010 — A contract declares more than one `receive()` or more than one
+    /// `fallback()` function.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-010`.
+    DuplicateSpecialFunction {
+        /// `"receive"` or `"fallback"`.
+        kind: String,
+        /// Source location of the duplicate declaration.
+        span: Span,
+    },
+
+    /// WF-011 — A `struct` or `enum` contains itself by value (directly or via
+    /// a cycle of by-value fields), producing an infinite-size type.
+    ///
+    /// Indirection through `Map`/`Array`/`Option` breaks the cycle and is allowed.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-011`.
+    RecursiveType {
+        /// The name of the type at the root of the cycle.
+        type_name: String,
+        /// The sequence of type names forming the cycle (e.g. `["A", "B", "A"]`).
+        cycle: Vec<String>,
+        /// Source location of the type declaration.
+        span: Span,
+    },
+
+    /// WF-012 — An `emit` statement's fields do not match the declared event schema.
+    ///
+    /// Covers: unknown event name, missing field, wrong field type, unknown field key.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-012`.
+    EmitMismatch {
+        /// The event name referenced by the `emit` statement.
+        event: String,
+        /// Human-readable description of the mismatch.
+        reason: String,
+        /// Source location of the `emit` statement.
+        span: Span,
+    },
+
+    /// WF-013 — A `const` initializer expression is not compile-time evaluable.
+    ///
+    /// Only literals, other `const`s, and pure arithmetic/bitwise/comparison
+    /// over them are allowed.  State reads, runtime calls, and `msg`/`block`
+    /// references are rejected.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-013`.
+    NonConstExpr {
+        /// Source location of the non-evaluable sub-expression.
+        span: Span,
+    },
+
+    /// WF-014 — A token `config {}` block violates the standard's schema.
+    ///
+    /// Covers: missing mandatory key, wrong value type, unknown key, partial
+    /// nested block, declared feature missing its required interface.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-014`.
+    InvalidTokenConfig {
+        /// Human-readable description of the config violation.
+        reason: String,
+        /// Source location of the offending config entry (or the `config` block).
+        span: Span,
+    },
+
+    /// WF-015 — A `pure` or `view` function performs an effect that violates
+    /// its declared effect class.
+    ///
+    /// `pure` must not read/write state or access `msg`/`block`.
+    /// `view` must not write state.
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §30 WF-015`.
+    EffectViolation {
+        /// The name of the function with the mismatched effect class.
+        func: String,
+        /// The declared effect class (`"pure"` or `"view"`).
+        declared: String,
+        /// The effect found (`"state read"`, `"state write"`, `"msg access"`, etc.).
+        found: String,
+        /// Source location of the offending expression or statement.
+        span: Span,
+    },
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

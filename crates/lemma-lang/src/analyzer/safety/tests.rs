@@ -35,8 +35,11 @@ fn non_token_contract_passes() {
     let ast = typed_ast(
         r#"contract SimpleVault {
 state {
-pub balance: u128
+pub balance: u128 = 0
 pub owner: Address
+}
+init(owner: Address) {
+self.owner = owner
 }
 pub view fn getBalance() -> u128 {
 return self.balance
@@ -58,14 +61,16 @@ fn minimal_token_passes() {
     // A minimal token with an unconditional registry.register in init must pass.
     // SAFETY-013 (4e) requires the init constructor to call registry.register.
     // SAFETY-003 (4e) requires a cap assert before totalSupply writes when maxSupply is set.
+    // Uses a complete Token config (name, symbol, decimals, maxSupply) per WF-014.
     let ast = typed_ast(
         r#"token MinimalToken extends Token {
 config {
 name: "Minimal"
 symbol: "MIN"
 decimals: 18
+maxSupply: 1000000
 }
-state { totalSupply: u128, ticker: u128 }
+state { totalSupply: u128 = 0, ticker: u128 = 0 }
 init(registry: Address) {
 registry.register(self.ticker, self)
 }

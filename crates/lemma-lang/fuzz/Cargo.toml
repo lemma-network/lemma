@@ -1,0 +1,21 @@
+[package]
+name = "lemma-lang-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lemma-lang = { path = ".." }
+
+# Prevent this from interfering with the workspace
+[[bin]]
+name = "fuzz_wellformed"
+path = "fuzz_targets/wellformed.rs"
+test = false
+doc = false

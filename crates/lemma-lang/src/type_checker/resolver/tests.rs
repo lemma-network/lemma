@@ -157,7 +157,7 @@ fn check_resolves_param_reference_in_body() {
 fn check_resolves_self_in_method_body() {
     let typed = check_src(
         r#"contract C {
-state { pub x: u128 }
+state { pub x: u128 = 0 }
 pub fn getX() -> u128 { return self }
 }"#,
     )
