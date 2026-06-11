@@ -2868,6 +2868,9 @@ fn check_wf014_token_schema(
         "freezable",
         "upgradeable",
         "fairLaunch",
+        // §3-010 (SAFETY-010): declares the address of an external transfer
+        // checker, making a transfer-path external call explicit + monitored.
+        "externalChecker",
     ];
     const BPS_KEYS: &[&str] = &["maxWallet"];
 
@@ -2925,6 +2928,8 @@ fn check_wf014_token_schema(
                 }
                 // §24.8 fairLaunch block — validated separately below.
                 "fairLaunch" => matches!(entry.value, ConfigValue::Object(_)),
+                // §3-010 externalChecker: an address literal (string form).
+                "externalChecker" => matches!(entry.value, ConfigValue::Str(_)),
                 _ => true,
             };
             if !ok {
@@ -3071,6 +3076,8 @@ fn check_wf014_taxtoken_full_schema(
         // TaxToken optional
         "maxFeePercent",
         "fairLaunch",
+        // §3-010 (SAFETY-010): external transfer-checker address declaration.
+        "externalChecker",
     ];
 
     let entry_map: BTreeMap<&str, &crate::parser::ConfigEntry> =
@@ -3124,6 +3131,7 @@ fn check_wf014_taxtoken_full_schema(
         "pausable",
         "freezable",
         "upgradeable",
+        "externalChecker",
     ] {
         if let Some(entry) = entry_map.get(key) {
             let ok = match *key {
@@ -3136,6 +3144,8 @@ fn check_wf014_taxtoken_full_schema(
                 | "upgradeable" => {
                     matches!(entry.value, ConfigValue::Bool(_))
                 }
+                // §3-010 externalChecker: an address literal (string form).
+                "externalChecker" => matches!(entry.value, ConfigValue::Str(_)),
                 _ => true,
             };
             if !ok {
