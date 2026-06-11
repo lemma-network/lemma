@@ -207,3 +207,142 @@ let _ = target.transfer(amount)
         "In CEI pattern, StateWrite must precede ExternalCall"
     );
 }
+
+// ─── Collection-method state writes (P3-cfg-1 fix) ──────────────────────────────
+
+#[test]
+fn cfg_nodes_collection_set_recorded_as_state_write() {
+    // self.balances.set(k, v) is a write to OWN storage — must be StateWrite,
+    // NOT an external call. (P3-cfg-1: state_write_key was blind to this.)
+    let ast = typed_ast(
+        r#"contract C {
+state { balances: Map<Address, u128> }
+init() {}
+pub fn credit(to: Address, amount: u128) {
+self.balances.set(to, amount)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let fns = contracts[0].functions();
+    let credit = fns.iter().find(|f| f.name == "credit").expect("fn");
+    let nodes = cfg_nodes(credit);
+    assert!(
+        nodes
+            .iter()
+            .any(|n| matches!(n, CfgNode::StateWrite { key, .. } if key == "balances")),
+        "self.balances.set(...) must be a StateWrite to `balances`; got {nodes:?}"
+    );
+    assert!(
+        !nodes
+            .iter()
+            .any(|n| matches!(n, CfgNode::ExternalCall { .. })),
+        "a collection mutator on own state must NOT be an ExternalCall; got {nodes:?}"
+    );
+}
+
+#[test]
+fn cfg_nodes_set_add_recorded_as_state_write() {
+    // self.voters.add(t) (Set mutator) — StateWrite to `voters`.
+    let ast = typed_ast(
+        r#"contract C {
+state { voters: Set<Address> }
+init() {}
+pub fn enroll(who: Address) {
+self.voters.add(who)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let fns = contracts[0].functions();
+    let enroll = fns.iter().find(|f| f.name == "enroll").expect("fn");
+    let nodes = cfg_nodes(enroll);
+    assert!(
+        nodes
+            .iter()
+            .any(|n| matches!(n, CfgNode::StateWrite { key, .. } if key == "voters")),
+        "self.voters.add(...) must be a StateWrite to `voters`; got {nodes:?}"
+    );
+}
+
+#[test]
+fn cfg_nodes_array_sort_recorded_as_state_write() {
+    // self.queue.sort() — in-place Array reordering, conservatively a StateWrite
+    // (spec §11 ambiguous on in-place vs returns-new; reject-on-doubt for
+    // SAFETY-004 soundness).
+    let ast = typed_ast(
+        r#"contract C {
+state { queue: Array<u128> }
+init() { self.queue = [] }
+pub fn order() {
+self.queue.sort()
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let fns = contracts[0].functions();
+    let order = fns.iter().find(|f| f.name == "order").expect("fn");
+    let nodes = cfg_nodes(order);
+    assert!(
+        nodes
+            .iter()
+            .any(|n| matches!(n, CfgNode::StateWrite { key, .. } if key == "queue")),
+        "self.queue.sort() must be a StateWrite to `queue`; got {nodes:?}"
+    );
+}
+
+#[test]
+fn cfg_nodes_array_query_method_not_state_write() {
+    // self.queue.contains(x) (a read/query) must NOT be a StateWrite.
+    let ast = typed_ast(
+        r#"contract C {
+state { queue: Array<u128> }
+init() { self.queue = [] }
+pub fn look(x: u128) {
+let _ = self.queue.contains(x)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let fns = contracts[0].functions();
+    let look = fns.iter().find(|f| f.name == "look").expect("fn");
+    let nodes = cfg_nodes(look);
+    assert!(
+        !nodes
+            .iter()
+            .any(|n| matches!(n, CfgNode::StateWrite { key, .. } if key == "queue")),
+        "self.queue.contains(...) is a read — must NOT be a StateWrite; got {nodes:?}"
+    );
+}
+
+#[test]
+fn cfg_nodes_address_field_method_is_external_not_write() {
+    // self.checker.canTransfer(...) — `checker` is an Address field; calling a
+    // method on it leaves the contract. NOT a collection mutator → ExternalCall,
+    // NOT a StateWrite. (Confirms the P3-cfg-1 fix doesn't over-classify.)
+    let ast = typed_ast(
+        r#"contract C {
+state { checker: Address }
+init(c: Address) { self.checker = c }
+pub fn gate(to: Address, amount: u128) {
+let ok = self.checker.canTransfer(to, amount)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let fns = contracts[0].functions();
+    let gate = fns.iter().find(|f| f.name == "gate").expect("fn");
+    let nodes = cfg_nodes(gate);
+    assert!(
+        nodes
+            .iter()
+            .any(|n| matches!(n, CfgNode::ExternalCall { .. })),
+        "method call on an Address field must be an ExternalCall; got {nodes:?}"
+    );
+    assert!(
+        !nodes
+            .iter()
+            .any(|n| matches!(n, CfgNode::StateWrite { key, .. } if key == "checker")),
+        "a non-mutator method on an Address field must NOT be a StateWrite; got {nodes:?}"
+    );
+}

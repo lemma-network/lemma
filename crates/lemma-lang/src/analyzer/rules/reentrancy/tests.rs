@@ -290,3 +290,56 @@ fn reentrancy_empty_contract_passes() {
         "empty contract must pass SAFETY-004; got {violations:?}"
     );
 }
+
+// ─── P3-cfg-1 regression: collection-method write after external call ──────────
+
+#[test]
+fn reentrancy_collection_set_after_call_rejected() {
+    // CEI violation via a COLLECTION mutator: external call THEN
+    // self.balances.set(...). Before the P3-cfg-1 cfg fix, state_write_key was
+    // blind to `.set()` so this CEI violation was a FALSE NEGATIVE. Now the
+    // collection-method write is a StateWrite after the ExternalCall → rejected.
+    let ast = typed_ast(
+        r#"contract C {
+state { balances: Map<Address, u128> }
+init() {}
+pub fn badWithdraw(target: Address, amount: u128) {
+let _ = target.transfer(amount)
+self.balances.set(target, amount)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = reentrancy_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::StateAfterCall { func, .. } if func == "badWithdraw")),
+        "collection-mutator write after external call must be a SAFETY-004 violation; got {violations:?}"
+    );
+}
+
+#[test]
+fn reentrancy_array_sort_after_call_rejected() {
+    // CEI violation via an in-place Array reordering after an external call.
+    // self.queue.sort() is conservatively a StateWrite → CEI violation when it
+    // follows an external call.
+    let ast = typed_ast(
+        r#"contract C {
+state { queue: Array<u128> }
+init() { self.queue = [] }
+pub fn badReorder(target: Address, amount: u128) {
+let _ = target.transfer(amount)
+self.queue.sort()
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = reentrancy_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::StateAfterCall { func, .. } if func == "badReorder")),
+        "in-place sort after external call must be a SAFETY-004 violation; got {violations:?}"
+    );
+}

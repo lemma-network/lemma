@@ -130,7 +130,24 @@ impl Visitor for FnWalk {
                             span: *span,
                         });
                     }
-                    // External method call on another contract instance.
+                    // self.<field>.<collection-mutator>(…) — a write to OWN
+                    // storage (`self.balances.set(k,v)`, `self.voters.add(t)`).
+                    // A collection mutator operates on owned `Map`/`Set`/`Array`
+                    // state, so it is a `StateWrite` to `<field>`, NOT an external
+                    // call.  (Read accessors and method calls on an `Address`-typed
+                    // field — e.g. `self.checker.canTransfer(…)` — are NOT
+                    // collection mutators and fall through to the external-call
+                    // arm below, which is correct: those DO leave the contract.)
+                    Expr::Member(recv, method, _)
+                        if is_collection_mutator(method) && self_field_name(recv).is_some() =>
+                    {
+                        // SAFETY: self_field_name(recv) is Some by the guard.
+                        let key = self_field_name(recv).expect("guarded above");
+                        self.cfg_nodes
+                            .push(CfgNode::StateWrite { key, span: *span });
+                    }
+                    // External method call on another contract instance (incl. a
+                    // non-mutator method on a `self.<addressField>`).
                     Expr::Member(_, method, _) => {
                         self.ext_calls.insert(ExtCall {
                             callee_desc: format!("<external>.{method}"),
@@ -222,6 +239,55 @@ pub fn cfg_nodes(func: &ContractFunction<'_>) -> Vec<CfgNode> {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// If `expr` is `self.<field>`, return the field name; otherwise `None`.
+///
+/// Used to recognise a collection-method receiver (`self.balances.set(…)` →
+/// receiver `self.balances` → field `"balances"`).
+fn self_field_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Member(obj, field, _) if is_self(obj) => Some(field.clone()),
+        _ => None,
+    }
+}
+
+/// Returns `true` if `method` is a Lem collection **mutator** that writes its
+/// receiver's storage (spec `03 §11/§13`):
+/// - Map: `set`, `delete`
+/// - Set: `add`, `remove`
+/// - Array: `push`, `pop`, `insert`, `removeAt`, `clear`, and the in-place
+///   reorderings `sort`, `sortBy`, `reverse`.
+///
+/// Read accessors / query / functional methods (`get`/`getOr`/`has`/`contains`/
+/// `keys`/`values`/`map`/`filter`/`slice`/`concat`/`indexOf`/…) are excluded —
+/// they do not write state (the lazy functional ops return new values).
+///
+/// ## Conservative inclusion of `sort`/`sortBy`/`reverse`
+///
+/// Spec `03 §11` lists these alongside both mutators and query methods without
+/// pinning in-place-vs-returns-new semantics.  Because a SAFETY-004 (reentrancy)
+/// false-negative is unacceptable (a post-external-call `self.queue.sort()` that
+/// mutates in place would be a CEI violation), they are treated as **writes**
+/// (reject on doubt).  If Lem later pins them as returning a new array, removing
+/// them here is a sound tightening (turns a possible false-positive into none);
+/// the reverse (omitting an in-place mutator) would be an unsound false-negative.
+fn is_collection_mutator(method: &str) -> bool {
+    matches!(
+        method,
+        "set"
+            | "delete"
+            | "add"
+            | "remove"
+            | "push"
+            | "pop"
+            | "insert"
+            | "removeAt"
+            | "clear"
+            | "sort"
+            | "sortBy"
+            | "reverse"
+    )
+}
 
 /// If `expr` is a state-write target (`self.field` or `self.map[k]`), return
 /// the field/map name; otherwise return `None`.

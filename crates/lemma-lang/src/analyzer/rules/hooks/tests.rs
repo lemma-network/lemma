@@ -131,3 +131,27 @@ pub fn onTransfer() {
         "#[onTransfer] hook with empty body must pass SAFETY-008; got {violations:?}"
     );
 }
+
+#[test]
+fn hooks_on_transfer_collection_write_own_state_passes() {
+    // P3-cfg-1 regression: a hook writing its OWN collection state via a
+    // collection mutator (self.balances.set(...)) must NOT be a HookEscape.
+    // Before the cfg fix, self.balances.set() was mis-recorded as an EXTERNAL
+    // call → false-positive HookEscape. The fix records it as a StateWrite to
+    // own state → no violation.
+    let ast = typed_ast(
+        r#"contract C {
+state { balances: Map<Address, u128> }
+#[onTransfer]
+pub fn onTransfer(to: Address, amount: u128) {
+self.balances.set(to, amount)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = hooks_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "hook writing own collection state must pass SAFETY-008 (P3-cfg-1); got {violations:?}"
+    );
+}
