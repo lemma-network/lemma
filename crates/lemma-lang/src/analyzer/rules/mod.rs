@@ -15,3 +15,6 @@ pub(crate) mod delegate;
 pub(crate) mod hooks;
 pub(crate) mod integer;
 pub(crate) mod reentrancy;
+
+// Batch 3 (4f): authority/declaration rules.
+pub(crate) mod upgrade;

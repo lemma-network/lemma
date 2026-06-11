@@ -62,7 +62,8 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     violations.extend(rules::supply_cap::check(contract)); // SAFETY-003
     violations.extend(rules::approvals::check(contract)); // SAFETY-006
 
-    // Batch 3 (4f): honeypot/blacklist/gate/upgrade/declared — pending.
+    // Batch 3 (4f): authority/declaration rules (wired per-rule as each lands).
+    violations.extend(rules::upgrade::check(contract)); // SAFETY-007
 
     if violations.is_empty() {
         Ok(())
