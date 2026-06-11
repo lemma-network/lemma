@@ -66,6 +66,7 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     violations.extend(rules::upgrade::check(contract)); // SAFETY-007
     violations.extend(rules::one_way_gate::check(contract)); // SAFETY-009
     violations.extend(rules::blacklist::check(contract)); // SAFETY-005
+    violations.extend(rules::honeypot::check(contract)); // SAFETY-001
 
     if violations.is_empty() {
         Ok(())
