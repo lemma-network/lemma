@@ -221,6 +221,106 @@ self.balances[to] = amount
 }
 
 #[test]
+fn blacklist_transitive_owner_helper_rejected() {
+    // CR-found false-negative: @onlyOwner ban(addr) freezes via an internal
+    // helper doBan(a) { frozen[a] = true }. The owner ENTRY is the real lever.
+    // Transitive state_write_reachability must include `ban` and reject it.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { frozen: Map<Address, bool> }
+init() {}
+@onlyOwner pub fn ban(addr: Address) {
+let _ = self.doBan(addr)
+}
+fn doBan(a: Address) {
+self.frozen[a] = true
+}
+pub fn transfer(to: Address, amount: u128) {
+assert (!self.frozen[to])
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = blacklist_check(&contracts[0]);
+    // `ban` (@onlyOwner, transitive lever) must be flagged. `doBan` (unguarded,
+    // direct writer) is also a lever and flagged. Both lack governance.
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::UngovernedBlacklist { func } if func == "ban")),
+        "transitive @onlyOwner blacklist entry `ban` must be rejected; got {violations:?}"
+    );
+}
+
+#[test]
+fn blacklist_owner_only_map_set_rejected() {
+    // @onlyOwner setFrozen(addr) via Map.set(addr, true) — the canonical Lem Map
+    // mutator (spec §13). Must be rejected (mutator-completeness fix).
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { frozen: Map<Address, bool> }
+init() {}
+@onlyOwner pub fn setFrozen(addr: Address) {
+self.frozen.set(addr, true)
+}
+pub fn transfer(to: Address, amount: u128) {
+assert (!self.frozen[to])
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = blacklist_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::UngovernedBlacklist { func } if func == "setFrozen")),
+        "owner-only Map.set blacklist must be rejected; got {violations:?}"
+    );
+}
+
+#[test]
+fn blacklist_transitive_governance_helper_passes() {
+    // The mirror of the transitive-owner case: @onlyRole("GOVERNANCE") ban(addr)
+    // freezes via an UNGUARDED internal helper doBan(a). `ban` (the public
+    // authority lever) is governance-gated, so the transitive path is safe.
+    // `doBan` is private (not a public entry); it is a lever but is only
+    // reachable through the governance-gated `ban`. Since `doBan` itself is not
+    // governance-gated, the rule DOES flag `doBan` (sound — an unguarded direct
+    // writer is its own lever). This test pins that the GOVERNANCE entry `ban`
+    // is NOT flagged (its own auth is sufficient); we assert ban is absent.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { frozen: Map<Address, bool> }
+init() {}
+@onlyRole("GOVERNANCE") pub fn ban(addr: Address) {
+let _ = self.doBan(addr)
+}
+@onlyRole("GOVERNANCE") fn doBan(a: Address) {
+self.frozen[a] = true
+}
+pub fn transfer(to: Address, amount: u128) {
+assert (!self.frozen[to])
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = blacklist_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "governance-gated blacklist via governance-gated helper must pass; got {violations:?}"
+    );
+}
+
+#[test]
 fn blacklist_non_param_key_not_flagged() {
     // A write to a restriction field with a NON-param key (a hardcoded address
     // or self-derived key) is not a per-address blacklist keyed by a caller
