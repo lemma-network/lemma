@@ -33,11 +33,16 @@
 //! let taint = taint_propagate(&contract, &cg);
 //! let reach = state_write_reachability(&contract, &cg);
 //! ```
-// ── Justified `dead_code` (entire module): all pub(crate) APIs are called by
-// the SAFETY-rule modules (4d–4f) and the state-access analyzer (Step 5).
-// No production caller outside tests is wired until 4d ships.
-// Remove this allow once 4d lands.
-#![allow(dead_code)]
+// Dead-code status (audited after the full 4f rule batch, AGENTS §1 Rule 7):
+// - `restriction_fields` + `state_write_reachability` are LIVE (consumed by
+//   SAFETY-005/007/009 — no allow needed).
+// - The `taint_propagate` machinery (`TaintOrigin`, `TaintedVar`, `taint_seeds`,
+//   `collect_ext_bindings*`, `is_ext_call`, `collect_pattern_idents`) is
+//   intentional-deferred, NOT dead: its named consumer is `P3-rule-1`
+//   (SAFETY-012 value-taint narrowing — scope unchecked arithmetic to
+//   value-bearing fields), blocked on `msg`/value-path recognition
+//   (P3-checker-14, Step 7).  Each such item carries a targeted `#[allow(
+//   dead_code)]` with this pointer instead of a blanket module allow.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -53,6 +58,7 @@ use super::util::{block_contains_revert, is_self};
 /// How a variable acquired taint (untrusted data).
 ///
 /// `Ord` is derived for deterministic `BTreeSet` iteration (AGENTS §7.1).
+#[allow(dead_code)] // consumer: SAFETY-012 value-taint narrowing (P3-rule-1, Step 7)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum TaintOrigin {
     /// Function parameter — any caller could be untrusted.
@@ -66,6 +72,7 @@ pub(crate) enum TaintOrigin {
 ///
 /// `Ord` derives lexicographically on `(name, origin)` — deterministic per
 /// AGENTS §7.1.
+#[allow(dead_code)] // consumer: SAFETY-012 value-taint narrowing (P3-rule-1, Step 7)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct TaintedVar {
     /// Variable or parameter name.
@@ -74,6 +81,7 @@ pub(crate) struct TaintedVar {
     pub(crate) origin: TaintOrigin,
 }
 
+#[allow(dead_code)] // consumer: SAFETY-012 value-taint narrowing (P3-rule-1, Step 7)
 impl TaintedVar {
     /// Convenience ctor: parameter taint.
     pub(crate) fn param(name: impl Into<String>) -> Self {
@@ -115,6 +123,13 @@ impl TaintedVar {
 ///
 /// Pre-condition: `call_graph` must be built with
 /// [`super::cfg::build_call_graph`].
+///
+/// ## Pending consumer (intentional-deferred, not dead)
+///
+/// First production consumer is `P3-rule-1` (SAFETY-012 value-taint narrowing —
+/// scope unchecked-arithmetic rejection to value-bearing fields), blocked on
+/// `msg`/value-path recognition (P3-checker-14, Step 7).
+#[allow(dead_code)] // consumer: SAFETY-012 value-taint narrowing (P3-rule-1, Step 7)
 #[must_use]
 pub(crate) fn taint_propagate(
     contract: &TypedContract<'_>,
@@ -355,6 +370,7 @@ fn collect_self_field_reads(expr: &Expr, out: &mut BTreeSet<String>) {
 // ─── Private helpers ─────────────────────────────────────────────────────────
 
 /// Per-function taint seeds: all params + `let x = ext.call()` bindings.
+#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
 fn taint_seeds(func: &ContractFunction<'_>) -> BTreeSet<TaintedVar> {
     let mut seeds = BTreeSet::new();
     for p in func.params {
@@ -367,6 +383,7 @@ fn taint_seeds(func: &ContractFunction<'_>) -> BTreeSet<TaintedVar> {
 }
 
 /// Walk `stmts` and add `let x = ext.call()` names as `ExternalCallReturn`-tainted.
+#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
 fn collect_ext_bindings(stmts: &[Stmt], out: &mut BTreeSet<TaintedVar>) {
     for stmt in stmts {
         match stmt {
@@ -427,6 +444,7 @@ fn collect_ext_bindings(stmts: &[Stmt], out: &mut BTreeSet<TaintedVar>) {
 ///
 /// Only `Expr::If_` and `Expr::Match_` carry embedded statement lists where
 /// let-bindings can appear; all other expressions are leaves here.
+#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
 fn collect_ext_bindings_in_expr(expr: &Expr, out: &mut BTreeSet<TaintedVar>) {
     match expr {
         Expr::If_ {
@@ -453,6 +471,7 @@ fn collect_ext_bindings_in_expr(expr: &Expr, out: &mut BTreeSet<TaintedVar>) {
 
 /// Returns `true` if `expr` is a method call on a non-`self` receiver or a
 /// `new <Contract>(…)` deployment — i.e., a call that leaves the contract.
+#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
 fn is_ext_call(expr: &Expr) -> bool {
     match expr {
         Expr::Call { callee, .. } => matches!(
@@ -469,6 +488,7 @@ fn is_ext_call(expr: &Expr) -> bool {
 ///
 /// Handles nested patterns (tuple, struct, enum variant) recursively.
 /// `Wildcard`, `Literal`, and `Rest` patterns bind nothing.
+#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
 fn collect_pattern_idents(pattern: &Pattern, out: &mut BTreeSet<TaintedVar>) {
     match pattern {
         Pattern::Ident(name, _) => {

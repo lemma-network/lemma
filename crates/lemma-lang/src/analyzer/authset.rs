@@ -1,10 +1,4 @@
 //! Authorization-set analysis — `Auth(f)` and `EffAuth`.
-//
-// Justified `dead_code` (entire module): all pub(crate) APIs are called by the
-// SAFETY-rule modules (4d–4f) and by `authset/tests.rs`.  The rule modules do
-// not exist yet; no production caller outside tests is wired until 4d.
-// Remove this allow once 4d lands (the first rule caller will suppress it).
-#![allow(dead_code)]
 //!
 //! ## Purpose
 //!
@@ -119,6 +113,17 @@ pub fn auth_set(func: &ContractFunction<'_>) -> BTreeSet<Guard> {
 /// monotonically decreasing and guard sets are finite, the algorithm always
 /// terminates.  Cycles (recursion) are handled naturally: a function is
 /// re-added to the worklist only when its guard set shrinks.
+///
+/// ## Pending consumer (intentional-deferred, not dead)
+///
+/// `EffAuth` is the transitive guard the spec mandates for the **SAFETY-001
+/// balance-direction symmetry** check (spec §86/§104/§107 — `EffAuth(disposal) ⊆
+/// EffAuth(acq)`).  That full symmetry form is **deferred** as `P3-rule-5`
+/// (needs balance-direction analysis + `msg.sender` recognition, blocked on
+/// P3-checker-14, Step 5/7).  The 4f rules (005/007/009) use direct `auth_set`
+/// with self-contained transitive closures, which is sound for *their* queries;
+/// `compute_eff_auth` is retained for the deferred 001-symmetry consumer.
+#[allow(dead_code)] // consumer: SAFETY-001 EffAuth symmetry (P3-rule-5, Step 5/7)
 #[must_use]
 pub fn compute_eff_auth(
     entry_fn: &str,
@@ -174,7 +179,9 @@ pub fn compute_eff_auth(
 
 /// Collect `Auth(f)` for every function in a contract.
 ///
-/// Convenience wrapper used by `compute_eff_auth` callers.
+/// Convenience wrapper used by `compute_eff_auth` callers — retained with it for
+/// the deferred SAFETY-001 EffAuth-symmetry consumer (P3-rule-5).
+#[allow(dead_code)] // consumer: SAFETY-001 EffAuth symmetry (P3-rule-5, Step 5/7)
 #[must_use]
 pub fn all_auth_sets(contract: &TypedContract<'_>) -> BTreeMap<String, BTreeSet<Guard>> {
     contract
@@ -196,6 +203,13 @@ pub fn requires_governance(guards: &BTreeSet<Guard>) -> bool {
 }
 
 /// Returns `true` if the guard set requires owner-only access.
+///
+/// Part of the guard-predicate trio (`requires_governance` /
+/// `requires_owner_only` / `is_access_unrestricted`).  No current SAFETY rule
+/// queries owner-only *positively* (rules check `requires_governance` /
+/// `is_access_unrestricted`); retained for the deferred renounced-owner
+/// treatment (P3-own-3, Step 5).
+#[allow(dead_code)] // consumer: renounced-owner Auth treatment (P3-own-3, Step 5)
 #[must_use]
 pub fn requires_owner_only(guards: &BTreeSet<Guard>) -> bool {
     guards.contains(&Guard::OnlyOwner)
