@@ -24,14 +24,23 @@
 //! 4. **Require governance**: any blocking-value writer not gated by
 //!    `@onlyRole("GOVERNANCE")` ⇒ `OneWayGate`.
 //!
-//! ## Soundness
+//! ## Soundness (reject on doubt — spec §5.1)
 //!
-//! Over-approximation toward rejection.  If a flag is read with mixed polarity
-//! across multiple gating sites (ambiguous blocking value), **both** boolean
-//! values are treated as blocking (any non-gov writer of either ⇒ reject) — the
-//! conservative choice.  Reuses `auth_set`/`requires_governance` (4b) +
-//! `restriction_fields` (4f-0).  Gates whose condition is an external read slip
-//! to SAFETY-010.
+//! Over-approximation toward rejection in three places:
+//! - **Mixed polarity** across gating sites (ambiguous blocking value) ⇒ `Both`
+//!   (any non-gov writer of either value ⇒ reject).
+//! - **Opaque flag reads** — a gating flag read as an operand of a comparison
+//!   (`self.flag == false`), arithmetic, call, or index ⇒ polarity is NOT
+//!   trustworthy (`== false` is semantically `!flag`, which structural parity
+//!   does not capture) ⇒ `Both`.  Only bare / `!`-wrapped / `&&`/`||` reads keep
+//!   exact polarity.
+//! - **Non-literal blocking writes** — `self.flag = !self.flag` / `= compute()` /
+//!   `= cond` cannot be statically pinned ⇒ treated as a blocking write (a gating
+//!   flag must not be settable to an unprovable value by a non-gov actor).
+//!
+//! These keep the rule free of false-negatives (never accepts an owner-flippable
+//! gate).  Reuses `auth_set`/`requires_governance` (4b) + `restriction_fields`
+//! (4f-0).  Gates whose condition is an external read slip to SAFETY-010.
 //!
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-009`, `03-LANGUAGE_SPEC §24.8`.
 
@@ -39,7 +48,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analyzer::authset::{auth_set, requires_governance};
 use crate::analyzer::dataflow::restriction_fields;
-use crate::parser::{Expr, Literal, Stmt, UnaryOp};
+use crate::parser::{BinaryOp, Expr, Literal, Stmt, UnaryOp};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::type_checker::types::ResolvedType;
 use crate::visit::{walk_stmt, Visitor};
@@ -203,58 +212,166 @@ impl PolarityScanner<'_> {
     /// Record the blocking polarity implied by a gating `cond` that triggers a
     /// revert either when true (`reverts_when_true`) or when false.
     fn record_condition(&mut self, cond: &Expr, reverts_when_true: bool) {
-        // Find each gating-flag read in `cond` with its negation parity.
-        let mut reads: Vec<(String, bool)> = Vec::new(); // (flag, negated)
+        // Find each gating-flag read in `cond` with its read kind.
+        let mut reads: Vec<FlagRead> = Vec::new();
         collect_flag_reads(cond, self.gating_flags, false, &mut reads);
-        for (flag, negated) in reads {
-            // The flag's *required* value to AVOID revert:
-            //   reverts_when_true  → cond must be false to pass
-            //   !reverts_when_true → cond must be true  to pass
-            // With negation parity, the flag's blocking value is:
-            //   blocking = value that makes `cond` take the revert branch.
-            // cond takes revert branch when cond == reverts_when_true.
-            // cond (for a bare flag read, possibly negated) == (flag XOR negated).
-            // So revert when (flag XOR negated) == reverts_when_true
-            //   ⇒ flag == reverts_when_true XOR negated  is the BLOCKING value.
-            let blocking_bool = reverts_when_true ^ negated;
-            let bv = if blocking_bool {
-                BlockingValue::True
-            } else {
-                BlockingValue::False
+        for read in reads {
+            let bv = match read.kind {
+                // Clean read: polarity is trustworthy.
+                //
+                // `cond` takes the revert branch when `cond == reverts_when_true`.
+                // For a bare (optionally `!`-negated) flag read, the boolean value
+                // of `cond` is `(flag XOR negated)`.  So the revert (BLOCKING)
+                // branch is taken when `(flag XOR negated) == reverts_when_true`,
+                // i.e. the BLOCKING flag value is `reverts_when_true XOR negated`.
+                ReadKind::Clean { negated } => {
+                    if reverts_when_true ^ negated {
+                        BlockingValue::True
+                    } else {
+                        BlockingValue::False
+                    }
+                }
+                // Opaque read: the flag appears as an operand of a comparison,
+                // arithmetic, call, index, etc.  The polarity CANNOT be trusted
+                // (`self.flag == false` is semantically `!self.flag`, but the
+                // structural parity does not capture this).  Conservatively treat
+                // BOTH boolean values as blocking — reject on doubt (spec §5.1).
+                ReadKind::Opaque => BlockingValue::Both,
             };
-            let entry = self.out.entry(flag).or_insert(BlockingValue::Unknown);
+            let entry = self.out.entry(read.flag).or_insert(BlockingValue::Unknown);
             *entry = entry.merge(bv);
         }
     }
 }
 
-/// Collect `(flag_name, negated)` for each gating-flag read in `expr`.
+/// A gating-flag read found inside a condition, tagged with how trustworthy its
+/// polarity is.
+struct FlagRead {
+    flag: String,
+    kind: ReadKind,
+}
+
+/// Whether a flag read's polarity can be trusted for blocking-value inference.
+enum ReadKind {
+    /// The flag is read bare, or under an even/odd chain of `!`, possibly inside
+    /// `&&`/`||` boolean combinators.  `negated` is the `!`-parity.  The
+    /// inferred polarity is exact.
+    Clean { negated: bool },
+    /// The flag appears as an operand of a non-boolean operator (comparison
+    /// `==`/`!=`/`<`…, arithmetic, a call argument, an index, …).  Polarity is
+    /// untrustworthy → caller must treat as `BlockingValue::Both`.
+    Opaque,
+}
+
+/// Collect a [`FlagRead`] for each gating-flag read in `expr`.
 ///
-/// `negated` tracks whether the read sits under an odd number of `!` operators.
-/// Only simple boolean-combination conditions are tracked precisely; reads
-/// nested under non-boolean operators still register (with their current parity)
-/// so the conservative `Both`/`Unknown` merge keeps soundness.
+/// Distinguishes **clean** reads (bare / `!`-wrapped / inside `&&`/`||`) — whose
+/// polarity is exact — from **opaque** reads (the flag is an operand of a
+/// comparison, arithmetic, call, or index) — whose polarity cannot be trusted
+/// and which therefore force a conservative `Both` (reject-on-doubt) classification.
+///
+/// `negated` is the running `!`-parity for the clean path.
 fn collect_flag_reads(
     expr: &Expr,
     gating_flags: &BTreeSet<String>,
     negated: bool,
-    out: &mut Vec<(String, bool)>,
+    out: &mut Vec<FlagRead>,
+) {
+    match expr {
+        // Bare `self.flag` in a boolean position — clean read.
+        Expr::Member(obj, field, _) if is_self(obj) => {
+            if gating_flags.contains(field) {
+                out.push(FlagRead {
+                    flag: field.clone(),
+                    kind: ReadKind::Clean { negated },
+                });
+            }
+        }
+        // `!expr` — flip parity, stay on the clean path.
+        Expr::Unary(UnaryOp::Not, inner, _) => {
+            collect_flag_reads(inner, gating_flags, !negated, out);
+        }
+        // `&&` / `||` — boolean combinators preserve polarity; stay clean.
+        Expr::Binary(BinaryOp::And | BinaryOp::Or, l, r, _) => {
+            collect_flag_reads(l, gating_flags, negated, out);
+            collect_flag_reads(r, gating_flags, negated, out);
+        }
+        // Any OTHER binary operator (`==`, `!=`, comparisons, arithmetic) — a
+        // gating flag read inside is OPAQUE: parity is not trustworthy.
+        Expr::Binary(_, l, r, _) => {
+            collect_opaque_flag_reads(l, gating_flags, out);
+            collect_opaque_flag_reads(r, gating_flags, out);
+        }
+        Expr::Member(base, _, _) => collect_flag_reads(base, gating_flags, negated, out),
+        // Ternary / if-expr / match-expr / call / index / cast in a boolean
+        // position obscure polarity — route to the opaque collector so the read
+        // is conservatively classified `Both` rather than silently dropped.
+        Expr::Ternary { .. }
+        | Expr::If_ { .. }
+        | Expr::Match_(..)
+        | Expr::Call { .. }
+        | Expr::Index(..)
+        | Expr::Cast { .. }
+        | Expr::Nullish(..)
+        | Expr::Try_(..) => collect_opaque_flag_reads(expr, gating_flags, out),
+        _ => {}
+    }
+}
+
+/// Collect gating-flag reads anywhere inside `expr` as **opaque** (untrustworthy
+/// polarity).  Used for operands of non-boolean operators.
+fn collect_opaque_flag_reads(
+    expr: &Expr,
+    gating_flags: &BTreeSet<String>,
+    out: &mut Vec<FlagRead>,
 ) {
     match expr {
         Expr::Member(obj, field, _) if is_self(obj) => {
             if gating_flags.contains(field) {
-                out.push((field.clone(), negated));
+                out.push(FlagRead {
+                    flag: field.clone(),
+                    kind: ReadKind::Opaque,
+                });
             }
         }
-        Expr::Unary(UnaryOp::Not, inner, _) => {
-            collect_flag_reads(inner, gating_flags, !negated, out);
+        Expr::Unary(_, inner, _) | Expr::Try_(inner, _) | Expr::Cast { expr: inner, .. } => {
+            collect_opaque_flag_reads(inner, gating_flags, out);
         }
-        // && / || / other boolean combinators: propagate current parity.
-        Expr::Binary(_, l, r, _) => {
-            collect_flag_reads(l, gating_flags, negated, out);
-            collect_flag_reads(r, gating_flags, negated, out);
+        Expr::Binary(_, l, r, _) | Expr::Nullish(l, r, _) => {
+            collect_opaque_flag_reads(l, gating_flags, out);
+            collect_opaque_flag_reads(r, gating_flags, out);
         }
-        Expr::Member(base, _, _) => collect_flag_reads(base, gating_flags, negated, out),
+        Expr::Member(base, _, _) => collect_opaque_flag_reads(base, gating_flags, out),
+        Expr::Index(base, idx, _) => {
+            collect_opaque_flag_reads(base, gating_flags, out);
+            collect_opaque_flag_reads(idx, gating_flags, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_opaque_flag_reads(callee, gating_flags, out);
+            for arg in args {
+                let e = match arg {
+                    crate::parser::CallArg::Positional(e) | crate::parser::CallArg::Named(_, e) => {
+                        e
+                    }
+                };
+                collect_opaque_flag_reads(e, gating_flags, out);
+            }
+        }
+        // Ternary `c ? a : b`: any gating-flag read in any branch is opaque.
+        Expr::Ternary {
+            cond, then, else_, ..
+        } => {
+            collect_opaque_flag_reads(cond, gating_flags, out);
+            collect_opaque_flag_reads(then, gating_flags, out);
+            collect_opaque_flag_reads(else_, gating_flags, out);
+        }
+        // A gating flag read inside an `if`/`match` expression condition is
+        // opaque (the value-position control flow obscures polarity).  Reads in
+        // the statement bodies are handled by the statement-level visitor; here
+        // we only need the scrutinee/cond expression.
+        Expr::If_ { cond, .. } => collect_opaque_flag_reads(cond, gating_flags, out),
+        Expr::Match_(scrutinee, _, _) => collect_opaque_flag_reads(scrutinee, gating_flags, out),
+        // Leaf / Lambda / literal: no gating-flag read of interest.
         _ => {}
     }
 }
@@ -300,8 +417,19 @@ impl BlockingWriteScanner<'_> {
     fn check_assign(&mut self, target: &Expr, value: &Expr) {
         if let Expr::Member(obj, field, _) = target {
             if is_self(obj) && field == self.flag {
-                if let Expr::Literal(Literal::Bool(b), _) = value {
-                    if self.blocking.blocks(*b) {
+                match value {
+                    // Literal bool: blocking iff the literal matches the blocking value.
+                    Expr::Literal(Literal::Bool(b), _) => {
+                        if self.blocking.blocks(*b) {
+                            self.found = true;
+                        }
+                    }
+                    // Non-literal write (`= !self.flag`, `= computeFlag()`, `= cond`):
+                    // the written value cannot be statically pinned, so it COULD be
+                    // the blocking value.  Reject on doubt (spec §5.1 soundness) —
+                    // a gating flag should not be settable to an unprovable value by
+                    // a non-governance actor.
+                    _ => {
                         self.found = true;
                     }
                 }

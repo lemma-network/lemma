@@ -238,6 +238,137 @@ self.balances[to] = amount
     );
 }
 
+// ─── Soundness regression: comparison-to-literal gating (CR BLOCKER fix) ─────
+
+#[test]
+fn one_way_gate_comparison_eq_false_honeypot_rejected() {
+    // CR-found honeypot: `assert(self.paused == false)` is semantically
+    // `assert(!self.paused)` (blocking value = true). An @onlyOwner pause()
+    // that sets paused = true is a re-blocking honeypot.
+    //
+    // The naive parity scan would infer blocking=false from the `==` and MISS
+    // the pause() writer (false-negative). The opaque-read fix treats the
+    // comparison read as Both → rejects on doubt.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { paused: bool = false }
+init() {}
+@onlyOwner pub fn pause() {
+self.paused = true
+}
+pub fn transfer(to: Address, amount: u128) {
+assert (self.paused == false)
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = one_way_gate_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "comparison-to-literal gate honeypot must be rejected (opaque-read fix); got {violations:?}"
+    );
+    assert!(
+        matches!(&violations[0], SafetyError::OneWayGate { func } if func == "pause"),
+        "expected OneWayGate naming pause; got {:?}",
+        violations[0]
+    );
+}
+
+#[test]
+fn one_way_gate_comparison_if_revert_honeypot_rejected() {
+    // `if (self.tradingEnabled == false) { revert }` — comparison gate.
+    // @onlyOwner disable sets tradingEnabled = false. Opaque read → reject.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { tradingEnabled: bool = false }
+init() {}
+@onlyOwner pub fn disable() {
+self.tradingEnabled = false
+}
+pub fn transfer(to: Address, amount: u128) {
+if (self.tradingEnabled == false) {
+revert "disabled"
+}
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = one_way_gate_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "comparison if-revert gate honeypot must be rejected; got {violations:?}"
+    );
+}
+
+#[test]
+fn one_way_gate_non_literal_flip_write_rejected() {
+    // CR-found: `self.tradingEnabled = !self.tradingEnabled` (non-literal) can
+    // set the blocking value. transfer asserts self.tradingEnabled (blocking =
+    // false). An @onlyOwner flip() that writes a non-literal must be rejected
+    // (reject on doubt — value can't be statically pinned).
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { tradingEnabled: bool = true }
+init() {}
+@onlyOwner pub fn flip() {
+self.tradingEnabled = !self.tradingEnabled
+}
+pub fn transfer(to: Address, amount: u128) {
+assert (self.tradingEnabled)
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = one_way_gate_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "non-literal flip write to a gating flag must be rejected; got {violations:?}"
+    );
+}
+
+#[test]
+fn one_way_gate_and_combinator_gate_rejected() {
+    // `&&` combinator keeps clean polarity: assert(self.tradingEnabled && cond).
+    // blocking value = false; @onlyOwner disable sets false → rejected.
+    // Confirms the &&/|| clean-path still works after the opaque-read fix.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { tradingEnabled: bool = false }
+state { setupDone: bool = false }
+init() {}
+@onlyOwner pub fn disableTrading() {
+self.tradingEnabled = false
+}
+pub fn transfer(to: Address, amount: u128) {
+assert (self.tradingEnabled && self.setupDone)
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = one_way_gate_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::OneWayGate { func } if func == "disableTrading")),
+        "&& clean-polarity gate must still reject the disable writer; got {violations:?}"
+    );
+}
+
 #[test]
 fn one_way_gate_non_governance_role_rejected() {
     // @onlyRole("ADMIN") (non-governance) disabling trading → OneWayGate.
