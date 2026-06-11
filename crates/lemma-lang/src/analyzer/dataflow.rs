@@ -15,6 +15,12 @@
 //!   (totalSupply mint sites), SAFETY-002 (fee-rate field writers), and
 //!   SAFETY-005/009 (restriction-flag writers).
 //!
+//! - **[`restriction_fields`]**: the set of `state {}` fields read on a transfer
+//!   path to **deny** a transfer (`assert`/`if-revert` gating conditions).  The
+//!   "restriction link" of spec §6.  Consumed by SAFETY-005 (blacklist
+//!   governance): a field read to deny + written with a parameter key must be
+//!   GOVERNANCE-gated.
+//!
 //! ## Sharing with Step 5
 //!
 //! Both analyses are `pub(crate)` and reused by the state-access analyzer
@@ -37,6 +43,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::parser::{Expr, ForIter, MatchBody, Pattern, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
+use crate::visit::{walk_stmt, Visitor};
 
 use super::cfg::{walk_function, CallGraph, CfgNode};
 
@@ -200,6 +207,160 @@ pub(crate) fn state_write_reachability(
         }
     }
     result
+}
+
+// ─── restriction_fields ───────────────────────────────────────────────────────
+
+/// Compute the set of `state {}` field names that are read on a **transfer
+/// path** in a position that gates a transfer **denial** (a `revert`/`assert`).
+///
+/// This is the "restriction link" analysis (spec §6, `dataflow.rs` —
+/// "restriction links") consumed by **SAFETY-005** (blacklist governance): a
+/// state field read to deny a transfer is a *restriction field*; SAFETY-005
+/// then checks that every function which writes such a field with a
+/// parameter-specified key is GOVERNANCE-gated, not `@onlyOwner`.
+///
+/// ## Transfer path (entry surface)
+///
+/// A function is on the transfer path if it is named `transfer` /
+/// `transferFrom`, or is annotated `#[onTransfer]` / `@onTransfer`.  (Functions
+/// transitively reachable from these are covered by the writer/CFG analyses in
+/// the consuming rule; this analysis identifies the *fields read to deny*,
+/// which the spec locates on the transfer entry itself.)
+///
+/// ## Denial position (what counts as "read to deny")
+///
+/// Lem has no `require`; a denial is expressed as either:
+/// - `assert(<cond reading self.field>)` — [`Stmt::Assert`], or
+/// - `if (<cond reading self.field>) { … revert … }` — an [`Stmt::If`] whose
+///   `then`/`else` body contains a [`Stmt::Revert`].
+///
+/// A `self.<field>` or `self.<field>[key]` read anywhere inside such a gating
+/// condition marks `<field>` as a restriction field.
+///
+/// ## Soundness
+///
+/// Over-approximation in the **detection** direction (any field read in a
+/// gating condition is flagged) — sound for SAFETY-005, which rejects on a
+/// flagged field being owner-settable.  A blacklist hidden behind a non-`assert`
+/// / non-`if-revert` denial (e.g. an external checker) is out of scope here and
+/// is forced into the open by SAFETY-010 instead.
+#[must_use]
+pub(crate) fn restriction_fields(contract: &TypedContract<'_>) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    for func in contract.functions() {
+        if !is_transfer_path_fn(&func) {
+            continue;
+        }
+        let Some(body) = func.body else {
+            continue;
+        };
+        let mut scanner = DenialFieldScanner {
+            fields: &mut fields,
+        };
+        scanner.visit_stmts(body);
+    }
+    fields
+}
+
+/// Returns `true` if `func` is a transfer-path entry (`transfer`/`transferFrom`
+/// by name, or annotated `#[onTransfer]`).
+fn is_transfer_path_fn(func: &ContractFunction<'_>) -> bool {
+    func.name == "transfer"
+        || func.name == "transferFrom"
+        || func.annotations.iter().any(|a| a.name == "onTransfer")
+}
+
+/// Visitor that records `self.<field>` reads occurring inside transfer-denial
+/// conditions (`assert` conditions, and `if` conditions whose branch reverts).
+struct DenialFieldScanner<'a> {
+    fields: &'a mut BTreeSet<String>,
+}
+
+impl Visitor for DenialFieldScanner<'_> {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            // `assert(<cond>)` — every self.field read in <cond> gates a denial.
+            Stmt::Assert { cond, .. } => {
+                collect_self_field_reads(cond, self.fields);
+            }
+            // `if (<cond>) { … revert … }` / `else { … revert … }` — if either
+            // branch can revert, the condition's self.field reads gate a denial.
+            Stmt::If {
+                cond, then, else_, ..
+            } => {
+                let then_reverts = block_contains_revert(then);
+                let else_reverts = else_.as_ref().is_some_and(|b| block_contains_revert(b));
+                if then_reverts || else_reverts {
+                    collect_self_field_reads(cond, self.fields);
+                }
+            }
+            _ => {}
+        }
+        // Continue canonical recursion (nested control flow, expression bodies).
+        walk_stmt(self, stmt);
+    }
+}
+
+/// Returns `true` if `stmts` contains a `revert` at its top level (the direct
+/// body of the `if`/`else` branch).  Nested control flow is handled by the
+/// outer visitor's recursion into those sub-`if`s.
+fn block_contains_revert(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| matches!(s, Stmt::Revert { .. }))
+}
+
+/// Collect the field names of every `self.<field>` / `self.<field>[key]` read
+/// in `expr` into `out`.
+fn collect_self_field_reads(expr: &Expr, out: &mut BTreeSet<String>) {
+    match expr {
+        // self.field
+        Expr::Member(obj, field, _) if is_self(obj) => {
+            out.insert(field.clone());
+        }
+        // self.field[key] — the base is Member(self, field); also recurse key.
+        Expr::Index(base, idx, _) => {
+            if let Expr::Member(obj, field, _) = base.as_ref() {
+                if is_self(obj) {
+                    out.insert(field.clone());
+                }
+            }
+            collect_self_field_reads(base, out);
+            collect_self_field_reads(idx, out);
+        }
+        Expr::Member(base, _, _) => collect_self_field_reads(base, out),
+        Expr::Unary(_, inner, _) | Expr::Try_(inner, _) | Expr::Cast { expr: inner, .. } => {
+            collect_self_field_reads(inner, out);
+        }
+        Expr::Binary(_, l, r, _) | Expr::Nullish(l, r, _) => {
+            collect_self_field_reads(l, out);
+            collect_self_field_reads(r, out);
+        }
+        Expr::Ternary {
+            cond, then, else_, ..
+        } => {
+            collect_self_field_reads(cond, out);
+            collect_self_field_reads(then, out);
+            collect_self_field_reads(else_, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_self_field_reads(callee, out);
+            for arg in args {
+                let e = match arg {
+                    crate::parser::CallArg::Positional(e) | crate::parser::CallArg::Named(_, e) => {
+                        e
+                    }
+                };
+                collect_self_field_reads(e, out);
+            }
+        }
+        // Literals, Ident, and other forms carry no self.field read of interest.
+        _ => {}
+    }
+}
+
+/// Returns `true` if `expr` is the identifier `self`.
+fn is_self(expr: &Expr) -> bool {
+    matches!(expr, Expr::Ident(name, _) if name == "self")
 }
 
 // ─── Private helpers ─────────────────────────────────────────────────────────
