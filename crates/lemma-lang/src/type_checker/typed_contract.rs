@@ -85,6 +85,20 @@ impl<'a> TypedContract<'a> {
         matches!(self.item, ContractItem::Token(_))
     }
 
+    /// The base standard this token extends (e.g. `"Token"`, `"TaxToken"`, `"NFT"`).
+    ///
+    /// Returns `None` for plain `contract` declarations (which have no `extends` clause).
+    ///
+    /// Used by the safety analyzer to dispatch TaxToken-specific rules (SAFETY-020/021/022)
+    /// without duplicating the `token.extends.as_str()` pattern from `wellformed/mod.rs`.
+    #[must_use]
+    pub fn base_standard(&self) -> Option<&str> {
+        match &self.item {
+            ContractItem::Token(t) => Some(t.extends.as_str()),
+            ContractItem::Contract(_) => None,
+        }
+    }
+
     /// Interfaces this contract declares it implements (for plain `contract` declarations).
     ///
     /// Always empty for `token` declarations (use [`is_token`] for those).

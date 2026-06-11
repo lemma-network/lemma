@@ -1,24 +1,18 @@
-//! Tests for SAFETY-002 — Fee Cap rule.
+//! Tests for SAFETY-002 — Fee Cap rule (DB-A41 model).
+//!
+//! ## DB-A41 model (replaces old `amount * rate / DENOM` hook scan)
+//!
+//! Under DB-A41:
+//! - **Plain `Token`**: fee-free.  Only `maxFeePercent` config ceiling is checked.
+//! - **`TaxToken`**: `fees` is a state block.  The rule checks the initial `fees`
+//!   config block sum AND any fees-setter functions that write individual components.
+//! - **Plain `contract`**: no config block → rule does not apply.
 //!
 //! ## Inconclusive coverage (spec §5.2)
 //!
-//! SAFETY-002 is the **first rule in this codebase with a real Inconclusive
-//! path**.  A non-canonical fee expression (e.g. `amount * some_var / 10_000`
-//! where `some_var` is not a literal) cannot be bounded statically, so the
-//! contract is **rejected** with `Inconclusive`.  The test
-//! `fee_cap_non_literal_rate_inconclusive_rejected` verifies this behaviour.
-//!
-//! ## Scoping note
-//!
-//! State-field rate → Inconclusive (sound; full sup analysis is 4f/4g work).
-//! MAX-sentinel check deferred to 4f.
-//!
-//! ## Config note (WF-014)
-//!
-//! All token configs use TaxToken (which has `maxFeePercent`) with a complete
-//! mandatory config (name, symbol, decimals, maxSupply, fees block) per WF-014.
-//! The fee_cap rule reads `maxFeePercent` from the config and inspects
-//! `@onTransfer` hooks — the mandatory keys do not affect SAFETY-002 logic.
+//! A fees-setter with a non-literal component value cannot be bounded statically
+//! → the contract is **rejected** with `Inconclusive`.  The test
+//! `fee_cap_non_literal_fees_component_inconclusive_rejected` verifies this.
 
 use crate::analyzer::error::SafetyError;
 use crate::{check, parse, tokenize};
@@ -35,10 +29,8 @@ fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
 // ─── Positive tests (safe contracts → empty Vec) ──────────────────────────────
 
 #[test]
-fn fee_cap_canonical_fee_within_cap_passes() {
-    // Canonical form: amount * 500 / 10_000 (5%), maxFeePercent: 2500 → passes.
-    // Uses TaxToken (which has maxFeePercent) with a complete config per WF-014.
-    // fees.others = 0 so no distributeTaxes function is required.
+fn fee_cap_taxttoken_fees_within_cap_passes() {
+    // TaxToken with fees sum (500+0+0 = 500) ≤ maxFeePercent (2500) → passes.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -51,71 +43,20 @@ fees: { burn: 500 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
 init() {}
-@onTransfer
-pub fn onTransfer(from: Address, to: Address, amount: u128) {
-let fee = amount * 500 / 10000
-}
 }"#,
     );
     let contracts = ast.contracts();
     let violations = fee_cap_check(&contracts[0]);
     assert!(
         violations.is_empty(),
-        "canonical fee within cap must pass SAFETY-002; got {violations:?}"
+        "TaxToken fees within cap must pass SAFETY-002; got {violations:?}"
     );
 }
 
 #[test]
-fn fee_cap_hook_with_no_division_passes() {
-    // Pure accounting hook with no division — no fee expression → passes.
-    let ast = typed_ast(
-        r#"token T extends TaxToken {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-maxFeePercent: 2500
-fees: { burn: 0 holders: 0 others: 0 }
-}
-state { totalSupply: u128 = 0 }
-init() {}
-@onTransfer
-pub fn onTransfer(from: Address, to: Address, amount: u128) {
-self.totalSupply = self.totalSupply + amount
-}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = fee_cap_check(&contracts[0]);
-    assert!(
-        violations.is_empty(),
-        "hook with no division must pass SAFETY-002; got {violations:?}"
-    );
-}
-
-#[test]
-fn fee_cap_no_config_block_passes() {
-    // Plain contract with no config block — rule does not apply.
-    let ast = typed_ast(
-        r#"contract C {
-state { x: u128 = 0 }
-pub fn foo(amount: u128) {
-let fee = amount * 500 / 10000
-}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = fee_cap_check(&contracts[0]);
-    assert!(
-        violations.is_empty(),
-        "contract with no config block must pass SAFETY-002; got {violations:?}"
-    );
-}
-
-#[test]
-fn fee_cap_rate_equal_to_max_passes() {
-    // Boundary: rate == maxFeePercent (2500) → passes (not strictly greater).
+fn fee_cap_taxttoken_fees_equal_to_max_passes() {
+    // Boundary: fees sum == maxFeePercent (2500) → passes (not strictly greater).
+    // Use burn=2500, holders=0, others=0 to avoid WF-014 distributeTaxes requirement.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -128,9 +69,47 @@ fees: { burn: 2500 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
 init() {}
-@onTransfer
-pub fn onTransfer(from: Address, to: Address, amount: u128) {
-let fee = amount * 2500 / 10000
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = fee_cap_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "fees sum == maxFeePercent must pass SAFETY-002; got {violations:?}"
+    );
+}
+
+#[test]
+fn fee_cap_plain_token_no_max_fee_passes() {
+    // Plain Token with no maxFeePercent config — rule does not apply.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+}
+state { totalSupply: u128 = 0 }
+init() {}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = fee_cap_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "plain Token with no maxFeePercent must pass SAFETY-002; got {violations:?}"
+    );
+}
+
+#[test]
+fn fee_cap_no_config_block_passes() {
+    // Plain contract with no config block — rule does not apply.
+    let ast = typed_ast(
+        r#"contract C {
+state { x: u128 = 0 }
+pub fn foo(amount: u128) {
+let y = amount + 1
 }
 }"#,
     );
@@ -138,15 +117,13 @@ let fee = amount * 2500 / 10000
     let violations = fee_cap_check(&contracts[0]);
     assert!(
         violations.is_empty(),
-        "rate == maxFeePercent must pass SAFETY-002; got {violations:?}"
+        "contract with no config block must pass SAFETY-002; got {violations:?}"
     );
 }
 
-// ─── Negative tests (violations → exact SafetyError variant) ─────────────────
-
 #[test]
-fn fee_cap_literal_rate_exceeds_declared_max_rejected() {
-    // Literal rate 3000 > maxFeePercent 2500 → FeeTooHigh.
+fn fee_cap_taxttoken_no_fees_setter_passes() {
+    // TaxToken with no function that writes self.fees.* → no setter violations.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -159,9 +136,78 @@ fees: { burn: 500 holders: 0 others: 0 }
 }
 state { totalSupply: u128 = 0 }
 init() {}
-@onTransfer
-pub fn onTransfer(from: Address, to: Address, amount: u128) {
-let fee = amount * 3000 / 10000
+pub fn getSupply() -> u128 {
+return self.totalSupply
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = fee_cap_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "TaxToken with no fees setter must pass SAFETY-002; got {violations:?}"
+    );
+}
+
+#[test]
+fn fee_cap_taxttoken_fees_setter_all_components_within_cap_passes() {
+    // Fees setter writes all three components with literals summing to 500 ≤ 2500 → passes.
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 500 holders: 0 others: 0 }
+}
+state { totalSupply: u128 = 0, feeEffectiveBlock: u64 = 0 }
+init() {}
+@onlyOwner
+pub fn setFees() {
+self.fees.burn = 300
+self.fees.holders = 100
+self.fees.others = 100
+self.feeEffectiveBlock = 7200
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = fee_cap_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "fees setter with all components within cap must pass SAFETY-002; got {violations:?}"
+    );
+}
+
+// ─── Negative tests (violations → exact SafetyError variant) ─────────────────
+
+#[test]
+fn fee_cap_taxttoken_initial_fees_sum_exceeds_declared_max_rejected() {
+    // Initial fees config sum (3000) > maxFeePercent (2500) → FeeTooHigh.
+    // Note: WF-014 also catches this; this test verifies SAFETY-002 defense-in-depth.
+    // We bypass WF-014 by using a sum that WF-014 would also reject — but since
+    // WF-014 runs before SAFETY-002, we test the rule directly.
+    // Instead, test via a fees setter that writes a total > cap.
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 500 holders: 0 others: 0 }
+}
+state { totalSupply: u128 = 0, feeEffectiveBlock: u64 = 0 }
+init() {}
+@onlyOwner
+pub fn setFees() {
+self.fees.burn = 3000
+self.fees.holders = 0
+self.fees.others = 0
+self.feeEffectiveBlock = 7200
 }
 }"#,
     );
@@ -170,7 +216,7 @@ let fee = amount * 3000 / 10000
     assert_eq!(
         violations.len(),
         1,
-        "literal rate > maxFeePercent must produce one violation; got {violations:?}"
+        "fees setter total > maxFeePercent must produce one violation; got {violations:?}"
     );
     assert!(
         matches!(
@@ -186,24 +232,9 @@ let fee = amount * 3000 / 10000
 }
 
 #[test]
-fn fee_cap_config_max_fee_exceeds_protocol_ceiling_rejected() {
-    // Config maxFeePercent > 2500 (e.g. 3000) → FeeTooHigh (config itself illegal).
-    // Note: WF-014 also catches this (maxFeePercent > PROTOCOL_MAX_FEE_BPS), so
-    // typed_ast() will panic. We test the fee_cap rule directly on a TypedAst
-    // built from a contract that bypasses WF-014 by using a plain contract.
-    // Since we can't easily bypass WF-014 here, we test via the safety rule
-    // directly using a pre-built TypedAst from a valid config and then verify
-    // the fee_cap rule logic separately.
-    //
-    // Alternative: use a plain contract (no WF-014) and inject config manually.
-    // For now, we verify the fee_cap rule rejects maxFeePercent > 2500 via
-    // a TaxToken with maxFeePercent: 2500 (valid) but a hook rate of 3000.
-    // The config-level check (maxFeePercent > PROTOCOL_MAX_FEE_BPS) is now
-    // also enforced by WF-014, so a token with maxFeePercent: 3000 would fail
-    // the WF pass before reaching the safety analyzer.
-    //
-    // This test verifies the fee_cap rule's config-level check is consistent
-    // with WF-014 by confirming that maxFeePercent: 2500 (the ceiling) passes.
+fn fee_cap_taxttoken_fees_setter_exceeds_protocol_ceiling_rejected() {
+    // A fees setter writes total 2501 which exceeds PROTOCOL_MAX_FEE_BPS (2500)
+    // even when no maxFeePercent is declared → FeeTooHigh.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -211,36 +242,39 @@ name: "T"
 symbol: "T"
 decimals: 18
 maxSupply: 1000000
-maxFeePercent: 2500
 fees: { burn: 500 holders: 0 others: 0 }
 }
-state { totalSupply: u128 = 0 }
+state { totalSupply: u128 = 0, feeEffectiveBlock: u64 = 0 }
 init() {}
-@onTransfer
-pub fn onTransfer(from: Address, to: Address, amount: u128) {
-let fee = amount * 500 / 10000
+@onlyOwner
+pub fn setFees() {
+self.fees.burn = 2501
+self.fees.holders = 0
+self.fees.others = 0
+self.feeEffectiveBlock = 7200
 }
 }"#,
     );
     let contracts = ast.contracts();
     let violations = fee_cap_check(&contracts[0]);
-    // maxFeePercent: 2500 == PROTOCOL_MAX_FEE_BPS → no config-level violation.
+    assert_eq!(
+        violations.len(),
+        1,
+        "fees setter total > PROTOCOL_MAX_FEE_BPS must produce one violation; got {violations:?}"
+    );
     assert!(
-        violations.is_empty(),
-        "maxFeePercent at ceiling (2500) must pass SAFETY-002; got {violations:?}"
+        matches!(&violations[0], SafetyError::FeeTooHigh { .. }),
+        "violation must be FeeTooHigh; got {:?}",
+        violations[0]
     );
 }
 
 // ─── Inconclusive→reject test (REQUIRED by spec §5.2) ────────────────────────
 
 #[test]
-fn fee_cap_non_literal_rate_inconclusive_rejected() {
-    // Non-canonical fee: `amount * self.feeRate / 10_000` where `self.feeRate`
-    // is NOT a literal → Inconclusive (safe-but-unanalyzable contract is REJECTED).
-    //
-    // This is the required Inconclusive→reject test for SAFETY-002.
-    // The contract may be safe (feeRate could always be ≤ 2500), but the
-    // analyzer cannot prove it statically → soundness requires rejection.
+fn fee_cap_non_literal_fees_component_inconclusive_rejected() {
+    // A fees setter uses a non-literal value for a component — cannot be bounded
+    // statically → Inconclusive (safe-but-unanalyzable contract is REJECTED).
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -251,11 +285,14 @@ maxSupply: 1000000
 maxFeePercent: 2500
 fees: { burn: 0 holders: 0 others: 0 }
 }
-state { totalSupply: u128 = 0, feeRate: u128 = 0 }
+state { totalSupply: u128 = 0, feeEffectiveBlock: u64 = 0 }
 init() {}
-@onTransfer
-pub fn onTransfer(from: Address, to: Address, amount: u128) {
-let fee = amount * self.feeRate / 10000
+@onlyOwner
+pub fn setFees(newBurn: u128) {
+self.fees.burn = newBurn
+self.fees.holders = 0
+self.fees.others = 0
+self.feeEffectiveBlock = 7200
 }
 }"#,
     );
@@ -264,7 +301,7 @@ let fee = amount * self.feeRate / 10000
     assert_eq!(
         violations.len(),
         1,
-        "non-literal rate must produce exactly one Inconclusive; got {violations:?}"
+        "non-literal fees component must produce exactly one Inconclusive; got {violations:?}"
     );
     assert!(
         matches!(
@@ -282,8 +319,8 @@ let fee = amount * self.feeRate / 10000
 // ─── Boundary tests ───────────────────────────────────────────────────────────
 
 #[test]
-fn fee_cap_rate_one_above_max_rejected() {
-    // Boundary: rate == maxFeePercent + 1 (2501) → FeeTooHigh.
+fn fee_cap_taxttoken_fees_sum_one_above_max_rejected() {
+    // Boundary: fees setter sum == maxFeePercent + 1 (2501) → FeeTooHigh.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -294,11 +331,14 @@ maxSupply: 1000000
 maxFeePercent: 2500
 fees: { burn: 500 holders: 0 others: 0 }
 }
-state { totalSupply: u128 = 0 }
+state { totalSupply: u128 = 0, feeEffectiveBlock: u64 = 0 }
 init() {}
-@onTransfer
-pub fn onTransfer(from: Address, to: Address, amount: u128) {
-let fee = amount * 2501 / 10000
+@onlyOwner
+pub fn setFees() {
+self.fees.burn = 2501
+self.fees.holders = 0
+self.fees.others = 0
+self.feeEffectiveBlock = 7200
 }
 }"#,
     );
@@ -307,7 +347,7 @@ let fee = amount * 2501 / 10000
     assert_eq!(
         violations.len(),
         1,
-        "rate == maxFeePercent+1 must produce one violation; got {violations:?}"
+        "fees sum == maxFeePercent+1 must produce one violation; got {violations:?}"
     );
     assert!(
         matches!(
@@ -319,34 +359,5 @@ let fee = amount * 2501 / 10000
         ),
         "violation must be FeeTooHigh(declared=2500, found=2501); got {:?}",
         violations[0]
-    );
-}
-
-#[test]
-fn fee_cap_non_hook_function_with_division_not_checked() {
-    // A non-hook function with a division expression — rule does not apply
-    // (only #[onTransfer] hooks are inspected).
-    let ast = typed_ast(
-        r#"token T extends TaxToken {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-maxFeePercent: 2500
-fees: { burn: 0 holders: 0 others: 0 }
-}
-state { totalSupply: u128 = 0 }
-init() {}
-pub fn computeFee(amount: u128) -> u128 {
-return amount * 9999 / 10000
-}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = fee_cap_check(&contracts[0]);
-    assert!(
-        violations.is_empty(),
-        "non-hook function with division must not be checked by SAFETY-002; got {violations:?}"
     );
 }

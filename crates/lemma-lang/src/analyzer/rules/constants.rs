@@ -5,6 +5,12 @@
 /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-002`.
 pub(crate) const PROTOCOL_MAX_FEE_BPS: u16 = 2500;
 
-/// Denominator for the canonical fee form `amount * rate / FEE_DENOM`.
-/// Basis-point arithmetic: `rate = 500` means 5.00% (500 / 10_000).
-pub(crate) const FEE_DENOM: u128 = 10_000;
+/// Minimum block delay before a TaxToken fee *increase* takes effect.
+///
+/// A fee setter that raises `fees` must write a pending change with
+/// `effectiveBlock ≥ block.height + FEE_INCREASE_DELAY`.  This is a
+/// **protocol constant** — it is NOT token-settable (a token-settable delay
+/// could be set to 0 and defeat the rule).
+///
+/// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-022`.
+pub(crate) const FEE_INCREASE_DELAY: u64 = 7200; // ≈ 24 h at 12 s/block

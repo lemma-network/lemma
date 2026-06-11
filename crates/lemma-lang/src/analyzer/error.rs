@@ -190,6 +190,84 @@ pub enum SafetyError {
         span: Span,
     },
 
+    // ── SAFETY-020 — distributeTaxes separation + budget bound ───────────────
+    /// A call-graph path exists from the transfer path (`transfer` /
+    /// `transferFrom` / `#[onTransfer]` and their transitive callees) to
+    /// `distributeTaxes`.  Fee distribution must run *outside* the transfer
+    /// path to prevent it being used as a hidden honeypot or reentrancy vector.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-020`.
+    #[error(
+        "SAFETY-020 tax-distribute on transfer path: `{func}` is on the transfer path \
+         and calls `distributeTaxes` (directly or transitively) — \
+         fee distribution must not be reachable from the transfer path"
+    )]
+    TaxDistributeOnTransferPath {
+        /// The transfer-path function (or its callee) that reaches `distributeTaxes`.
+        func: String,
+    },
+
+    /// `distributeTaxes` reads or moves value from `self.balances` or
+    /// `self.totalSupply` as an outflow source.  Only `self.taxPool` (via a
+    /// local snapshot) is the permitted value source for fee distribution.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-020`.
+    #[error(
+        "SAFETY-020 tax-distribute unbounded: `distributeTaxes` uses an unauthorized \
+         value source — {reason} \
+         (only `self.taxPool` via a local snapshot is permitted)"
+    )]
+    TaxDistributeUnbounded {
+        /// Human-readable description of the unauthorized value source found.
+        reason: String,
+    },
+
+    /// `distributeTaxes` does not zero `self.taxPool` before every external
+    /// call, or an external call reads `self.taxPool` after the zero-write.
+    /// The canonical drain shape requires: snapshot → zero → distribute snapshot.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-020`.
+    #[error(
+        "SAFETY-020 tax-pool not zeroed first: `{func}` makes an external call \
+         before zeroing `self.taxPool`, or reads `self.taxPool` after zeroing it — \
+         zero the pool before any external interaction"
+    )]
+    TaxPoolNotZeroedFirst {
+        /// The function where the zero-before-interaction violation occurs.
+        func: String,
+    },
+
+    // ── SAFETY-021 — isTaxable determinism + purity ───────────────────────────
+    /// `isTaxable` writes state or reads a non-deterministic input (clock,
+    /// RNG, external call, block-randomness).  The taxable predicate must be
+    /// a deterministic, side-effect-free decision.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-021`.
+    #[error(
+        "SAFETY-021 taxable predicate impure: `isTaxable` is not view-pure — {reason} \
+         (the taxable predicate must be deterministic and side-effect-free)"
+    )]
+    TaxablePredicateImpure {
+        /// Human-readable description of the impurity found.
+        reason: String,
+    },
+
+    // ── SAFETY-022 — Fee-change asymmetric timelock ───────────────────────────
+    /// A function that writes the `fees` state field can raise the effective
+    /// fee without the required `FEE_INCREASE_DELAY`-block timelock.  Fee
+    /// decreases may apply immediately; increases must be delayed.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-022`.
+    #[error(
+        "SAFETY-022 fee raise no timelock: `{func}` can raise `fees` without the \
+         required `FEE_INCREASE_DELAY`-block pending period — \
+         fee increases must use a pending change with effectiveBlock ≥ block.height + FEE_INCREASE_DELAY"
+    )]
+    FeeRaiseNoTimelock {
+        /// The function that can raise fees without the required timelock.
+        func: String,
+    },
+
     // ── Inconclusive ──────────────────────────────────────────────────────────
     /// Analysis is inconclusive for a sound rule: the contract cannot be
     /// *proven* safe, so it is **rejected** (soundness over completeness).

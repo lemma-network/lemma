@@ -1,6 +1,7 @@
 //! SAFETY rule modules — batch 1 (4d): rules 004, 012, 008, 011.
 //! Batch 2 (4e): 002, 003, 006.
 //! Batch 3 (4f): 005, 009, 001, 007, 010.
+//! Batch 3 (4f-tax): 020, 021, 022 (TaxToken fee-model rules) + SAFETY-002 rework.
 //! Note: SAFETY-013 (ticker registration) retired per decision DB-A48 —
 //! registration is auto-injected by codegen.
 
@@ -22,3 +23,6 @@ pub(crate) mod declared;
 pub(crate) mod honeypot;
 pub(crate) mod one_way_gate;
 pub(crate) mod upgrade;
+
+// Batch 3 (4f-tax): TaxToken fee-model rules (SAFETY-020/021/022).
+pub(crate) mod tax;
