@@ -87,7 +87,7 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     // Plain Token is fee-free (DB-A41: no hook fee arithmetic).
     // Plain contract (None base_standard): no fee rules apply.
     if contract.base_standard() == Some("TaxToken") {
-        check_taxttoken_fees(contract, config, declared_bps, &mut violations);
+        check_tax_token_fees(contract, config, declared_bps, &mut violations);
     }
 
     violations
@@ -99,7 +99,7 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
 /// 1. Initial `fees` config block sum ≤ cap.
 /// 2. Any fees-setter function with literal component writes → check sum.
 /// 3. Any fees-setter function with non-literal component writes → Inconclusive.
-fn check_taxttoken_fees(
+fn check_tax_token_fees(
     contract: &TypedContract<'_>,
     config: &[crate::parser::ConfigEntry],
     cap_bps: u16,

@@ -3,9 +3,11 @@
 //! ## Test layout (AGENTS §11.2)
 //!
 //! - **Positive**: valid TaxToken (correct `distributeTaxes`, pure `isTaxable`,
-//!   correct fees setter with timelock) → zero violations.
+//!   no fees setter) → zero violations.
 //! - **Token guard**: plain `Token` (non-tax) → zero violations for all three rules.
 //! - **Negative per rule**: each attack variant produces the exact `SafetyError` variant.
+//! - **Inconclusive→reject**: non-canonical shapes that cannot be proven safe are
+//!   rejected with `Inconclusive` (soundness over completeness).
 //! - **Boundary**: fees sum == maxFeePercent passes; fees sum == maxFeePercent+1 fails.
 //!
 //! ## Config note (WF-014)
@@ -21,6 +23,13 @@
 //! - `fees.others > 0` in config requires a `distributeTaxes` function (WF-014).
 //! - State fields must be initialized in `init` (WF-001).
 //! - `maxFeePercent` is only valid for TaxToken, not plain Token.
+//!
+//! ## SAFETY-022 reject-on-doubt (C4)
+//!
+//! Any direct write to `self.fees.*` → `Inconclusive`.  The canonical
+//! `pendingFees + effectiveBlock` pattern is required for full enforcement
+//! (deferred to P3·Step 7).  Tests that previously expected `FeeRaiseNoTimelock`
+//! now expect `Inconclusive`.
 
 use crate::analyzer::error::SafetyError;
 use crate::{check, parse, tokenize};
@@ -38,7 +47,7 @@ fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
 
 /// Minimal valid TaxToken with no `distributeTaxes`, no `isTaxable`, no fees setter.
 /// Uses `fees.others = 0` to avoid WF-014 `distributeTaxes` requirement.
-fn minimal_taxttoken_src() -> &'static str {
+fn minimal_tax_token_src() -> &'static str {
     r#"token T extends TaxToken {
 config {
 name: "T"
@@ -102,7 +111,7 @@ pub fn foo() {}
 #[test]
 fn safety_020_no_distribute_taxes_passes() {
     // TaxToken with no `distributeTaxes` function → SAFETY-020 does not apply.
-    let ast = typed_ast(minimal_taxttoken_src());
+    let ast = typed_ast(minimal_tax_token_src());
     let contracts = ast.contracts();
     let violations = tax_check(&contracts[0]);
     assert!(
@@ -113,7 +122,7 @@ fn safety_020_no_distribute_taxes_passes() {
 
 #[test]
 fn safety_020_valid_distribute_taxes_passes() {
-    // Valid `distributeTaxes`: not on transfer path, zeroes taxPool before ext call.
+    // Valid `distributeTaxes`: not on transfer path, canonical drain shape.
     // Uses fees.others = 500 to require distributeTaxes (WF-014).
     let ast = typed_ast(
         r#"token T extends TaxToken {
@@ -146,6 +155,10 @@ recipient.transfer(pool)
                 SafetyError::TaxDistributeOnTransferPath { .. }
                     | SafetyError::TaxDistributeUnbounded { .. }
                     | SafetyError::TaxPoolNotZeroedFirst { .. }
+                    | SafetyError::Inconclusive {
+                        rule: "SAFETY-020",
+                        ..
+                    }
             )
         })
         .collect();
@@ -247,6 +260,7 @@ fees: { burn: 0 holders: 0 others: 500 }
 }
 state { totalSupply: u128 = 0, taxPool: u128 = 0, balances: Map<Address, u128> }
 init() {}
+pub fn transfer(to: Address, amount: u128) {}
 pub fn distributeTaxes(recipient: Address) {
 let pool = self.taxPool
 self.taxPool = 0
@@ -282,6 +296,7 @@ fees: { burn: 0 holders: 0 others: 500 }
 }
 state { totalSupply: u128 = 0, taxPool: u128 = 0 }
 init() {}
+pub fn transfer(to: Address, amount: u128) {}
 pub fn distributeTaxes(recipient: Address) {
 let pool = self.taxPool
 self.taxPool = 0
@@ -303,8 +318,194 @@ recipient.transfer(pool)
 }
 
 #[test]
-fn safety_020_distribute_taxes_ext_call_before_zero_rejected() {
-    // `distributeTaxes` makes an external call before zeroing taxPool → TaxPoolNotZeroedFirst.
+fn safety_020_distribute_taxes_ext_call_before_zero_is_inconclusive() {
+    // `distributeTaxes` makes an external call before zeroing taxPool →
+    // Inconclusive (reject-on-doubt: non-canonical ordering cannot be proven safe).
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 0 holders: 0 others: 500 }
+}
+state { totalSupply: u128 = 0, taxPool: u128 = 0 }
+init() {}
+pub fn transfer(to: Address, amount: u128) {}
+pub fn distributeTaxes(recipient: Address) {
+recipient.transfer(self.taxPool)
+self.taxPool = 0
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = tax_check(&contracts[0]);
+    // The non-canonical ordering (ext call before zero) → Inconclusive.
+    let inconclusive: Vec<_> = violations
+        .iter()
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-020",
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        !inconclusive.is_empty(),
+        "ext call before taxPool zero must produce Inconclusive(SAFETY-020); got {violations:?}"
+    );
+}
+
+// ─── SAFETY-020 C1 — non-literal-zero write is Inconclusive ──────────────────
+
+#[test]
+fn distribute_taxes_with_partial_decrement_is_inconclusive() {
+    // `self.taxPool = self.taxPool - 1` is a non-literal-zero write →
+    // Inconclusive (C1: RHS must be literal integer 0).
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 0 holders: 0 others: 500 }
+}
+state { totalSupply: u128 = 0, taxPool: u128 = 0 }
+init() {}
+pub fn transfer(to: Address, amount: u128) {}
+pub fn distributeTaxes(recipient: Address) {
+self.taxPool = self.taxPool - 1
+recipient.transfer(self.taxPool)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = tax_check(&contracts[0]);
+    let inconclusive: Vec<_> = violations
+        .iter()
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-020",
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        !inconclusive.is_empty(),
+        "non-literal-zero taxPool write must produce Inconclusive(SAFETY-020); got {violations:?}"
+    );
+}
+
+// ─── SAFETY-020 C1.3 — external call arg reads self.taxPool after zero ────────
+
+#[test]
+fn distribute_taxes_args_read_taxpool_after_zero_is_inconclusive() {
+    // `recipient.transfer(self.taxPool)` after `self.taxPool = 0` →
+    // Inconclusive (C1.3: external call arg must use local snapshot, not self.taxPool).
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 0 holders: 0 others: 500 }
+}
+state { totalSupply: u128 = 0, taxPool: u128 = 0 }
+init() {}
+pub fn transfer(to: Address, amount: u128) {}
+pub fn distributeTaxes(recipient: Address) {
+self.taxPool = 0
+recipient.transfer(self.taxPool)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = tax_check(&contracts[0]);
+    let inconclusive: Vec<_> = violations
+        .iter()
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-020",
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        !inconclusive.is_empty(),
+        "ext call arg reading self.taxPool after zero must produce Inconclusive(SAFETY-020); got {violations:?}"
+    );
+}
+
+// ─── SAFETY-020 C2 — helper call is Inconclusive ─────────────────────────────
+
+#[test]
+fn distribute_taxes_with_helper_call_is_inconclusive() {
+    // `distributeTaxes` calls an internal helper function →
+    // Inconclusive (C2: cannot trace into callee without transitive analysis).
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 0 holders: 0 others: 500 }
+}
+state { totalSupply: u128 = 0, taxPool: u128 = 0 }
+init() {}
+pub fn transfer(to: Address, amount: u128) {}
+pub fn distributeTaxes(recipient: Address) {
+self.doDistribute(recipient)
+}
+fn doDistribute(recipient: Address) {
+let pool = self.taxPool
+self.taxPool = 0
+recipient.transfer(pool)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = tax_check(&contracts[0]);
+    let inconclusive: Vec<_> = violations
+        .iter()
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-020",
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        !inconclusive.is_empty(),
+        "distributeTaxes with helper call must produce Inconclusive(SAFETY-020); got {violations:?}"
+    );
+}
+
+// ─── SAFETY-020 C5 — no transfer-path entries is Inconclusive ────────────────
+
+#[test]
+fn tax_token_without_transfer_entry_is_inconclusive() {
+    // TaxToken with `distributeTaxes` but no `transfer`/`transferFrom`/`#[onTransfer]` →
+    // Inconclusive (C5: cannot verify separation without seeing the transfer path).
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -318,20 +519,29 @@ fees: { burn: 0 holders: 0 others: 500 }
 state { totalSupply: u128 = 0, taxPool: u128 = 0 }
 init() {}
 pub fn distributeTaxes(recipient: Address) {
-recipient.transfer(self.taxPool)
+let pool = self.taxPool
 self.taxPool = 0
+recipient.transfer(pool)
 }
 }"#,
     );
     let contracts = ast.contracts();
     let violations = tax_check(&contracts[0]);
-    let zero_violations: Vec<_> = violations
+    let inconclusive: Vec<_> = violations
         .iter()
-        .filter(|v| matches!(v, SafetyError::TaxPoolNotZeroedFirst { .. }))
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-020",
+                    ..
+                }
+            )
+        })
         .collect();
     assert!(
-        !zero_violations.is_empty(),
-        "ext call before taxPool zero must produce TaxPoolNotZeroedFirst; got {violations:?}"
+        !inconclusive.is_empty(),
+        "TaxToken with distributeTaxes but no transfer-path entries must produce Inconclusive(SAFETY-020); got {violations:?}"
     );
 }
 
@@ -340,7 +550,7 @@ self.taxPool = 0
 #[test]
 fn safety_021_no_is_taxable_passes() {
     // TaxToken with no `isTaxable` function → SAFETY-021 does not apply.
-    let ast = typed_ast(minimal_taxttoken_src());
+    let ast = typed_ast(minimal_tax_token_src());
     let contracts = ast.contracts();
     let violations: Vec<_> = tax_check(&contracts[0])
         .into_iter()
@@ -454,27 +664,22 @@ return self.checker.isBlocked(from)
     );
 }
 
-// ─── SAFETY-022 positive tests ────────────────────────────────────────────────
+// ─── SAFETY-021 C3 — SystemTime::now() is caught ─────────────────────────────
 
 #[test]
-fn safety_022_no_fees_setter_passes() {
-    // TaxToken with no function that writes `self.fees.*` → SAFETY-022 does not apply.
-    let ast = typed_ast(minimal_taxttoken_src());
-    let contracts = ast.contracts();
-    let violations: Vec<_> = tax_check(&contracts[0])
-        .into_iter()
-        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
-        .collect();
-    assert!(
-        violations.is_empty(),
-        "TaxToken with no fees setter must pass SAFETY-022; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_022_fees_setter_with_timelock_passes() {
-    // Fees setter writes `self.fees.burn` AND `self.feeEffectiveBlock` → passes.
-    let ast = typed_ast(
+fn is_taxable_with_system_time_is_impure() {
+    // `isTaxable` calls `SystemTime.now()` (path/method-call form) →
+    // rejected at the type-checker or safety-analyzer stage.
+    //
+    // In Lem, `SystemTime` is not a built-in identifier, so the type checker
+    // rejects it as `UndefinedName` before the safety analyzer runs.  The
+    // ImpurityScanner's C3 fix is defense-in-depth for future Lem versions
+    // that may expose `SystemTime` as a built-in.
+    //
+    // This test verifies the end-to-end guarantee: a contract with
+    // `SystemTime.now()` in `isTaxable` is REJECTED (either by the type
+    // checker or the safety analyzer).  The contract must not compile clean.
+    let tokens = crate::tokenize(
         r#"token T extends TaxToken {
 config {
 name: "T"
@@ -484,34 +689,58 @@ maxSupply: 1000000
 maxFeePercent: 2500
 fees: { burn: 500 holders: 0 others: 0 }
 }
-state { totalSupply: u128 = 0, feeEffectiveBlock: u64 = 0 }
+state { totalSupply: u128 = 0 }
 init() {}
-@onlyOwner
-pub fn setFees(newBurn: u128) {
-self.fees.burn = 500
-self.fees.holders = 0
-self.fees.others = 0
-self.feeEffectiveBlock = 7200
+pub fn isTaxable(from: Address, to: Address) -> bool {
+let t = SystemTime.now()
+return t > 0
 }
 }"#,
+    )
+    .expect("tokenize");
+    let ast = crate::parse(tokens).expect("parse");
+    // The type checker must reject this contract (SystemTime is undefined).
+    // If Lem ever adds SystemTime as a built-in, the safety analyzer's C3
+    // fix will catch it instead.
+    let result = crate::check(ast);
+    assert!(
+        result.is_err(),
+        "contract with SystemTime.now() in isTaxable must be rejected; got Ok"
     );
+}
+
+// ─── SAFETY-022 positive tests ────────────────────────────────────────────────
+
+#[test]
+fn safety_022_no_fees_setter_passes() {
+    // TaxToken with no function that writes `self.fees.*` → SAFETY-022 does not apply.
+    let ast = typed_ast(minimal_tax_token_src());
     let contracts = ast.contracts();
     let violations: Vec<_> = tax_check(&contracts[0])
         .into_iter()
-        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::FeeRaiseNoTimelock { .. }
+                    | SafetyError::Inconclusive {
+                        rule: "SAFETY-022",
+                        ..
+                    }
+            )
+        })
         .collect();
     assert!(
         violations.is_empty(),
-        "fees setter with timelock must pass SAFETY-022; got {violations:?}"
+        "TaxToken with no fees setter must pass SAFETY-022; got {violations:?}"
     );
 }
 
-// ─── SAFETY-022 negative tests ────────────────────────────────────────────────
+// ─── SAFETY-022 C4 — direct self.fees write is Inconclusive ──────────────────
 
 #[test]
-fn safety_022_fees_setter_without_timelock_rejected() {
-    // Fees setter writes `self.fees.burn` without `self.feeEffectiveBlock`
-    // → FeeRaiseNoTimelock.
+fn fees_direct_write_is_inconclusive() {
+    // Any function that writes `self.fees.*` directly → Inconclusive (C4).
+    // The canonical `pendingFees + effectiveBlock` pattern is required.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -534,30 +763,29 @@ self.fees.others = 0
     );
     let contracts = ast.contracts();
     let violations = tax_check(&contracts[0]);
-    let timelock_violations: Vec<_> = violations
+    let inconclusive: Vec<_> = violations
         .iter()
-        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-022",
+                    ..
+                }
+            )
+        })
         .collect();
     assert!(
-        !timelock_violations.is_empty(),
-        "fees setter without timelock must produce FeeRaiseNoTimelock; got {violations:?}"
-    );
-    assert!(
-        matches!(
-            &timelock_violations[0],
-            SafetyError::FeeRaiseNoTimelock { func }
-            if func == "setFees"
-        ),
-        "violation must be FeeRaiseNoTimelock(func=setFees); got {:?}",
-        timelock_violations[0]
+        !inconclusive.is_empty(),
+        "direct self.fees write must produce Inconclusive(SAFETY-022); got {violations:?}"
     );
 }
 
-// ─── Boundary tests ───────────────────────────────────────────────────────────
-
 #[test]
-fn safety_020_distribute_taxes_no_ext_call_passes() {
-    // `distributeTaxes` with no external call — zero-before-interaction does not apply.
+fn safety_022_fees_setter_with_timelock_is_inconclusive() {
+    // Even a fees setter that writes `self.fees.burn` AND `self.feeEffectiveBlock`
+    // is rejected as Inconclusive (C4: direct write cannot be verified safe without
+    // branch-aware CFG analysis — deferred to P3·Step 7).
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -566,32 +794,87 @@ symbol: "T"
 decimals: 18
 maxSupply: 1000000
 maxFeePercent: 2500
-fees: { burn: 0 holders: 0 others: 500 }
+fees: { burn: 500 holders: 0 others: 0 }
 }
-state { totalSupply: u128 = 0, taxPool: u128 = 0 }
+state { totalSupply: u128 = 0, feeEffectiveBlock: u64 = 0 }
 init() {}
-pub fn distributeTaxes(recipient: Address) {
-let pool = self.taxPool
-self.taxPool = 0
-self.totalSupply = self.totalSupply - pool
+@onlyOwner
+pub fn setFees(newBurn: u128) {
+self.fees.burn = 500
+self.fees.holders = 0
+self.fees.others = 0
+self.feeEffectiveBlock = 7200
 }
 }"#,
     );
     let contracts = ast.contracts();
-    let violations: Vec<_> = tax_check(&contracts[0])
-        .into_iter()
-        .filter(|v| matches!(v, SafetyError::TaxPoolNotZeroedFirst { .. }))
+    let violations = tax_check(&contracts[0]);
+    let inconclusive: Vec<_> = violations
+        .iter()
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-022",
+                    ..
+                }
+            )
+        })
         .collect();
     assert!(
-        violations.is_empty(),
-        "distributeTaxes with no ext call must pass zero-before-interaction; got {violations:?}"
+        !inconclusive.is_empty(),
+        "fees setter with direct write (even with timelock marker) must produce Inconclusive(SAFETY-022); got {violations:?}"
     );
 }
 
 #[test]
-fn safety_022_fees_setter_single_component_without_timelock_rejected() {
-    // A setter that writes only `self.fees.burn` without `self.feeEffectiveBlock`
-    // is flagged — the analyzer cannot prove it only decreases (reject on doubt).
+fn safety_022_fees_setter_without_timelock_is_inconclusive() {
+    // Fees setter writes `self.fees.burn` without `self.feeEffectiveBlock`
+    // → Inconclusive (C4: any direct fees write is rejected).
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 500 holders: 0 others: 0 }
+}
+state { totalSupply: u128 = 0 }
+init() {}
+@onlyOwner
+pub fn setFees() {
+self.fees.burn = 500
+self.fees.holders = 0
+self.fees.others = 0
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = tax_check(&contracts[0]);
+    let inconclusive: Vec<_> = violations
+        .iter()
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-022",
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert!(
+        !inconclusive.is_empty(),
+        "fees setter without timelock must produce Inconclusive(SAFETY-022); got {violations:?}"
+    );
+}
+
+#[test]
+fn safety_022_fees_setter_single_component_is_inconclusive() {
+    // A setter that writes only `self.fees.burn` (any direct fees write)
+    // → Inconclusive (C4: reject-on-doubt).
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -612,13 +895,65 @@ self.fees.burn = 100
     );
     let contracts = ast.contracts();
     let violations = tax_check(&contracts[0]);
-    let timelock_violations: Vec<_> = violations
+    let inconclusive: Vec<_> = violations
         .iter()
-        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::Inconclusive {
+                    rule: "SAFETY-022",
+                    ..
+                }
+            )
+        })
         .collect();
-    // The rule flags any fees component write without a timelock marker (reject on doubt).
     assert!(
-        !timelock_violations.is_empty(),
-        "fees component write without timelock marker must produce FeeRaiseNoTimelock; got {violations:?}"
+        !inconclusive.is_empty(),
+        "single fees component write must produce Inconclusive(SAFETY-022); got {violations:?}"
+    );
+}
+
+// ─── Boundary tests ───────────────────────────────────────────────────────────
+
+#[test]
+fn safety_020_distribute_taxes_no_ext_call_passes() {
+    // `distributeTaxes` with no external call — zero-before-interaction does not apply.
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 0 holders: 0 others: 500 }
+}
+state { totalSupply: u128 = 0, taxPool: u128 = 0 }
+init() {}
+pub fn transfer(to: Address, amount: u128) {}
+pub fn distributeTaxes(recipient: Address) {
+let pool = self.taxPool
+self.taxPool = 0
+self.totalSupply = self.totalSupply - pool
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations: Vec<_> = tax_check(&contracts[0])
+        .into_iter()
+        .filter(|v| {
+            matches!(
+                v,
+                SafetyError::TaxPoolNotZeroedFirst { .. }
+                    | SafetyError::Inconclusive {
+                        rule: "SAFETY-020",
+                        ..
+                    }
+            )
+        })
+        .collect();
+    assert!(
+        violations.is_empty(),
+        "distributeTaxes with no ext call must pass zero-before-interaction; got {violations:?}"
     );
 }

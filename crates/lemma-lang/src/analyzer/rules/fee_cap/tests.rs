@@ -29,7 +29,7 @@ fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
 // ─── Positive tests (safe contracts → empty Vec) ──────────────────────────────
 
 #[test]
-fn fee_cap_taxttoken_fees_within_cap_passes() {
+fn fee_cap_tax_token_fees_within_cap_passes() {
     // TaxToken with fees sum (500+0+0 = 500) ≤ maxFeePercent (2500) → passes.
     let ast = typed_ast(
         r#"token T extends TaxToken {
@@ -54,7 +54,7 @@ init() {}
 }
 
 #[test]
-fn fee_cap_taxttoken_fees_equal_to_max_passes() {
+fn fee_cap_tax_token_fees_equal_to_max_passes() {
     // Boundary: fees sum == maxFeePercent (2500) → passes (not strictly greater).
     // Use burn=2500, holders=0, others=0 to avoid WF-014 distributeTaxes requirement.
     let ast = typed_ast(
@@ -122,7 +122,7 @@ let y = amount + 1
 }
 
 #[test]
-fn fee_cap_taxttoken_no_fees_setter_passes() {
+fn fee_cap_tax_token_no_fees_setter_passes() {
     // TaxToken with no function that writes self.fees.* → no setter violations.
     let ast = typed_ast(
         r#"token T extends TaxToken {
@@ -150,7 +150,7 @@ return self.totalSupply
 }
 
 #[test]
-fn fee_cap_taxttoken_fees_setter_all_components_within_cap_passes() {
+fn fee_cap_tax_token_fees_setter_all_components_within_cap_passes() {
     // Fees setter writes all three components with literals summing to 500 ≤ 2500 → passes.
     let ast = typed_ast(
         r#"token T extends TaxToken {
@@ -184,7 +184,7 @@ self.feeEffectiveBlock = 7200
 // ─── Negative tests (violations → exact SafetyError variant) ─────────────────
 
 #[test]
-fn fee_cap_taxttoken_initial_fees_sum_exceeds_declared_max_rejected() {
+fn fee_cap_tax_token_initial_fees_sum_exceeds_declared_max_rejected() {
     // Initial fees config sum (3000) > maxFeePercent (2500) → FeeTooHigh.
     // Note: WF-014 also catches this; this test verifies SAFETY-002 defense-in-depth.
     // We bypass WF-014 by using a sum that WF-014 would also reject — but since
@@ -232,7 +232,7 @@ self.feeEffectiveBlock = 7200
 }
 
 #[test]
-fn fee_cap_taxttoken_fees_setter_exceeds_protocol_ceiling_rejected() {
+fn fee_cap_tax_token_fees_setter_exceeds_protocol_ceiling_rejected() {
     // A fees setter writes total 2501 which exceeds PROTOCOL_MAX_FEE_BPS (2500)
     // even when no maxFeePercent is declared → FeeTooHigh.
     let ast = typed_ast(
@@ -319,7 +319,7 @@ self.feeEffectiveBlock = 7200
 // ─── Boundary tests ───────────────────────────────────────────────────────────
 
 #[test]
-fn fee_cap_taxttoken_fees_sum_one_above_max_rejected() {
+fn fee_cap_tax_token_fees_sum_one_above_max_rejected() {
     // Boundary: fees setter sum == maxFeePercent + 1 (2501) → FeeTooHigh.
     let ast = typed_ast(
         r#"token T extends TaxToken {
