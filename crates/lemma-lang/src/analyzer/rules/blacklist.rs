@@ -60,6 +60,7 @@ use crate::type_checker::typed_contract::TypedContract;
 use crate::visit::{walk_expr, walk_stmt, Visitor};
 
 use crate::analyzer::error::SafetyError;
+use crate::analyzer::util::is_self;
 
 /// Check a contract for SAFETY-005 blacklist-governance violations.
 ///
@@ -244,11 +245,6 @@ impl ParamKeyedWriteScanner<'_> {
     fn is_param(&self, expr: &Expr) -> bool {
         matches!(expr, Expr::Ident(name, _) if self.params.contains(name.as_str()))
     }
-}
-
-/// Returns `true` if `expr` is the identifier `self`.
-fn is_self(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "self")
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

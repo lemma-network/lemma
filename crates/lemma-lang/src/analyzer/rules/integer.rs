@@ -37,6 +37,7 @@
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-012`.
 
 use crate::analyzer::error::SafetyError;
+use crate::analyzer::util::is_self;
 use crate::parser::{BinaryOp, Expr, Stmt};
 use crate::type_checker::typed_contract::TypedContract;
 use crate::visit::{walk_expr, walk_stmt, Visitor};
@@ -166,11 +167,6 @@ fn is_state_write(expr: &Expr) -> bool {
         }
         _ => false,
     }
-}
-
-/// Returns `true` if the expression is the identifier `self`.
-fn is_self(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "self")
 }
 
 /// Walk an expression tree and return the string representation of the first

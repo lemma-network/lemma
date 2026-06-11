@@ -46,6 +46,7 @@ use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_stmt, Visitor};
 
 use super::cfg::{walk_function, CallGraph, CfgNode};
+use super::util::{block_contains_revert, is_self};
 
 // ─── TaintOrigin / TaintedVar ────────────────────────────────────────────────
 
@@ -302,13 +303,6 @@ impl Visitor for DenialFieldScanner<'_> {
     }
 }
 
-/// Returns `true` if `stmts` contains a `revert` at its top level (the direct
-/// body of the `if`/`else` branch).  Nested control flow is handled by the
-/// outer visitor's recursion into those sub-`if`s.
-fn block_contains_revert(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| matches!(s, Stmt::Revert { .. }))
-}
-
 /// Collect the field names of every `self.<field>` / `self.<field>[key]` read
 /// in `expr` into `out`.
 fn collect_self_field_reads(expr: &Expr, out: &mut BTreeSet<String>) {
@@ -356,11 +350,6 @@ fn collect_self_field_reads(expr: &Expr, out: &mut BTreeSet<String>) {
         // Literals, Ident, and other forms carry no self.field read of interest.
         _ => {}
     }
-}
-
-/// Returns `true` if `expr` is the identifier `self`.
-fn is_self(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "self")
 }
 
 // ─── Private helpers ─────────────────────────────────────────────────────────

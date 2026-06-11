@@ -32,6 +32,7 @@
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-003`.
 
 use crate::analyzer::error::SafetyError;
+use crate::analyzer::util::is_self;
 use crate::lexer::token::Span;
 use crate::parser::{AssignOp, BinaryOp, ConfigValue, Expr, MatchBody, Stmt};
 use crate::type_checker::typed_contract::TypedContract;
@@ -286,11 +287,6 @@ fn is_increasing_supply_write(target: &Expr, op: &AssignOp, value: &Expr) -> boo
 /// Returns `true` if `expr` is `self.field` where `field == name`.
 fn is_self_field(expr: &Expr, field: &str) -> bool {
     matches!(expr, Expr::Member(obj, f, _) if is_self(obj) && f == field)
-}
-
-/// Returns `true` if the expression is the identifier `self`.
-fn is_self(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "self")
 }
 
 /// Returns `true` if `expr` contains `BinaryOp::Add` with `self.totalSupply`

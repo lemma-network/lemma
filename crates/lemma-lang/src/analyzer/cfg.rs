@@ -35,6 +35,8 @@ use crate::parser::{Expr, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_expr, walk_stmt, Visitor};
 
+use super::util::is_self;
+
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 /// Intra-contract call graph: function name → internal callees.
@@ -220,11 +222,6 @@ pub fn cfg_nodes(func: &ContractFunction<'_>) -> Vec<CfgNode> {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Returns `true` if the expression is the identifier `self`.
-fn is_self(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "self")
-}
 
 /// If `expr` is a state-write target (`self.field` or `self.map[k]`), return
 /// the field/map name; otherwise return `None`.

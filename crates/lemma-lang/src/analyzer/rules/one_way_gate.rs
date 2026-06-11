@@ -54,6 +54,7 @@ use crate::type_checker::types::ResolvedType;
 use crate::visit::{walk_stmt, Visitor};
 
 use crate::analyzer::error::SafetyError;
+use crate::analyzer::util::{block_contains_revert, is_self};
 
 /// Check a contract for SAFETY-009 one-way-gate violations.
 ///
@@ -439,16 +440,6 @@ impl BlockingWriteScanner<'_> {
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
-
-/// Returns `true` if `stmts` contains a top-level `revert`.
-fn block_contains_revert(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| matches!(s, Stmt::Revert { .. }))
-}
-
-/// Returns `true` if `expr` is the identifier `self`.
-fn is_self(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "self")
-}
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

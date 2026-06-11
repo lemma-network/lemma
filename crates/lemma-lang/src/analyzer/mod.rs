@@ -49,6 +49,7 @@ pub(crate) mod dataflow;
 pub mod error;
 pub(crate) mod rules;
 pub(crate) mod safety;
+pub(crate) mod util;
 
 pub use error::SafetyError;
 pub use safety::analyze_safety;
