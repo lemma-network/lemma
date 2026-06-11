@@ -179,36 +179,37 @@ self.balances[to] = amount
 }
 
 #[test]
-fn honeypot_asymmetric_owner_sell_rejected() {
-    // Public transfer (buy/move possible) + an @onlyOwner `sell` balance-mutator
-    // → asymmetric disposal lever (the §109 "@onlyOwner sell while buy public").
+fn honeypot_restricted_mint_with_public_transfer_passes() {
+    // CRITICAL false-positive guard (CR finding): a legitimate @onlyOwner mint
+    // (acquisition-side, restricting is normal) alongside a public transfer must
+    // NOT be flagged. Restricting acquisition never blocks a sell (spec §3-001
+    // step 1 vs step 2). A direction-blind "restricted balance-mutator" check
+    // would wrongly reject every mintable antiHoneypot token — this test pins
+    // that the rule does NOT do that.
     let ast = typed_ast(
         r#"token T extends Token {
-config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 antiHoneypot: true }
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 antiHoneypot: true mintable: true }
 state { balances: Map<Address, u128> }
 init() {}
 pub fn transfer(to: Address, amount: u128) {
 self.balances[to] = amount
 }
-@onlyOwner pub fn sell(seller: Address, amount: u128) {
-self.balances[seller] = amount
+@onlyOwner pub fn mint(to: Address, amount: u128) {
+self.balances[to] = amount
 }
 }"#,
     );
     let contracts = ast.contracts();
     let violations = honeypot_check(&contracts[0]);
     assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::Honeypot { reason } if reason.contains("sell"))),
-        "asymmetric @onlyOwner sell must be a honeypot; got {violations:?}"
+        violations.is_empty(),
+        "@onlyOwner mint (acquisition-side) with public transfer must NOT be a honeypot; got {violations:?}"
     );
 }
 
 #[test]
-fn honeypot_symmetric_public_mutators_pass() {
-    // Public transfer + a public (unrestricted) extra balance-mutator → symmetric,
-    // no honeypot.
+fn honeypot_extra_public_mutator_passes() {
+    // Public transfer + a public (unrestricted) extra balance-mutator → safe.
     let ast = typed_ast(
         r#"token T extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 antiHoneypot: true }
@@ -226,6 +227,6 @@ self.balances[holder] = amount
     let violations = honeypot_check(&contracts[0]);
     assert!(
         violations.is_empty(),
-        "symmetric public balance-mutators must pass; got {violations:?}"
+        "extra public balance-mutator must pass; got {violations:?}"
     );
 }

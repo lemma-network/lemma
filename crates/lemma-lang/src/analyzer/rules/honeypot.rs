@@ -21,15 +21,28 @@
 //!
 //! ## Enforced (decidable over-approximation, option B — §24.1 realization)
 //!
-//! When `config.antiHoneypot == true`:
-//! 1. **Disposal path must exist and be public**: `transfer` (and `transferFrom`
-//!    if present) must be declared and access-unrestricted (`EffAuth`/`Auth` has
-//!    no `@onlyOwner` / `@onlyRole`).  A missing or owner/role-gated `transfer` ⇒
-//!    `Honeypot` (holders cannot freely sell).
-//! 2. **No asymmetric balance-mutator guard**: if any `pub` function mutates
-//!    `balances` and is access-restricted while another `pub` balance-mutator is
-//!    public, the restricted one is an asymmetric disposal lever ⇒ `Honeypot`
-//!    (catches `@onlyOwner sell()` alongside a public buy path).
+//! When `config.antiHoneypot == true`, the **disposal path must exist and be
+//! public**: `transfer` (and `transferFrom` if present) must be declared and
+//! access-unrestricted (`Auth` has no `@onlyOwner` / `@onlyRole`).  A missing or
+//! owner/role-gated `transfer` ⇒ `Honeypot` (holders cannot freely sell).  In the
+//! §24.1 single-transfer model this *is* the decidable honeypot surface: the one
+//! transfer entry handles every buy and sell, so an accessible-to-all `transfer`
+//! means anyone who holds can dispose.
+//!
+//! ## Why NOT a "balance-mutator guard-symmetry" check (soundness)
+//!
+//! A naive "any restricted `pub` balance-mutator alongside a public one ⇒
+//! honeypot" check is **unsound (false-positive)**: it would reject a legitimate
+//! `@onlyOwner mint(to, amount)` — restricting *acquisition* is normal and never
+//! blocks a sell (spec §3-001 step 1 vs step 2: only *disposal* mutations —
+//! `balances[msg.sender]` *decrease* + value-out — matter).  Distinguishing a
+//! restricted acquisition lever (`mint`, fine) from a restricted disposal lever
+//! (a separate `@onlyOwner sell()`, a honeypot) requires **balance-direction
+//! `EffAuth` analysis** (the literal §3-001 step-3 form, option A).  That is
+//! deliberately **out of option-B scope** and is Tier-2 residue here — a separate
+//! hand-written `@onlyOwner sell()` function (non-canonical in the §24.1 model)
+//! slips to the runtime sell-success-rate score + SAFETY-010, rather than being
+//! flagged by an unsound direction-blind heuristic.
 //!
 //! ## Cross-rule (not re-implemented here)
 //!
@@ -53,9 +66,8 @@
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-001`, `03-LANGUAGE_SPEC §24.1`.
 
 use crate::analyzer::authset::{auth_set, is_access_unrestricted};
-use crate::parser::{ConfigValue, Expr, Stmt};
-use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
-use crate::visit::{walk_stmt, Visitor};
+use crate::parser::ConfigValue;
+use crate::type_checker::typed_contract::TypedContract;
 
 use crate::analyzer::error::SafetyError;
 
@@ -106,35 +118,6 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
         }
     }
 
-    // Check 2: no asymmetric balance-mutator guard.  If some pub balance-mutator
-    // is public (buy possible) and another pub balance-mutator is restricted, the
-    // restricted one is an asymmetric disposal lever.
-    let balance_mutators: Vec<&ContractFunction<'_>> = functions
-        .iter()
-        .filter(|f| is_public(f) && mutates_balances(f))
-        .collect();
-    let any_public = balance_mutators
-        .iter()
-        .any(|f| is_access_unrestricted(&auth_set(f)));
-    if any_public {
-        for f in &balance_mutators {
-            // `transfer`/`transferFrom` already handled by Check 1 — avoid
-            // duplicate violations.
-            if f.name == "transfer" || f.name == "transferFrom" {
-                continue;
-            }
-            if !is_access_unrestricted(&auth_set(f)) {
-                violations.push(SafetyError::Honeypot {
-                    reason: format!(
-                        "`{}` mutates balances but is access-restricted while another \
-                         balance-mutating entry is public — an asymmetric disposal lever",
-                        f.name
-                    ),
-                });
-            }
-        }
-    }
-
     violations
 }
 
@@ -147,77 +130,6 @@ fn anti_honeypot_enabled(contract: &TypedContract<'_>) -> bool {
         .iter()
         .find(|e| e.key == "antiHoneypot")
         .is_some_and(|e| matches!(e.value, ConfigValue::Bool(true)))
-}
-
-/// Returns `true` if `func` is publicly callable (`pub` / external visibility).
-fn is_public(func: &ContractFunction<'_>) -> bool {
-    use crate::parser::Visibility;
-    matches!(func.visibility, Visibility::Pub | Visibility::External)
-}
-
-/// Returns `true` if `func` writes the `balances` state field (`self.balances[k]
-/// = …` or `self.balances.set(k, …)`).
-fn mutates_balances(func: &ContractFunction<'_>) -> bool {
-    let Some(body) = func.body else {
-        return false;
-    };
-    let mut scanner = BalanceWriteScanner { found: false };
-    scanner.visit_stmts(body);
-    scanner.found
-}
-
-/// Visitor detecting a write to `self.balances`.
-struct BalanceWriteScanner {
-    found: bool,
-}
-
-impl Visitor for BalanceWriteScanner {
-    fn visit_stmt(&mut self, stmt: &Stmt) {
-        if let Stmt::Assign { target, .. } = stmt {
-            if is_balances_write_target(target) {
-                self.found = true;
-            }
-        }
-        walk_stmt(self, stmt);
-    }
-
-    fn visit_expr(&mut self, expr: &Expr) {
-        match expr {
-            Expr::Assign_(target, _, _, _) if is_balances_write_target(target) => {
-                self.found = true;
-            }
-            // self.balances.set(k, v) — collection-method write.
-            Expr::Call { callee, .. } => {
-                if let Expr::Member(recv, method, _) = callee.as_ref() {
-                    if method == "set" {
-                        if let Expr::Member(obj, field, _) = recv.as_ref() {
-                            if is_self(obj) && field == "balances" {
-                                self.found = true;
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        crate::visit::walk_expr(self, expr);
-    }
-}
-
-/// Returns `true` if `target` is `self.balances` or `self.balances[k]`.
-fn is_balances_write_target(target: &Expr) -> bool {
-    match target {
-        Expr::Member(obj, field, _) => is_self(obj) && field == "balances",
-        Expr::Index(base, _, _) => {
-            matches!(base.as_ref(), Expr::Member(obj, field, _) if is_self(obj) && field == "balances")
-        }
-        _ => false,
-    }
-}
-
-/// Returns `true` if `expr` is the identifier `self`.
-fn is_self(expr: &Expr) -> bool {
-    matches!(expr, Expr::Ident(name, _) if name == "self")
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
