@@ -65,6 +65,7 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     // Batch 3 (4f): authority/declaration rules (wired per-rule as each lands).
     violations.extend(rules::upgrade::check(contract)); // SAFETY-007
     violations.extend(rules::one_way_gate::check(contract)); // SAFETY-009
+    violations.extend(rules::blacklist::check(contract)); // SAFETY-005
 
     if violations.is_empty() {
         Ok(())

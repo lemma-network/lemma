@@ -17,5 +17,6 @@ pub(crate) mod integer;
 pub(crate) mod reentrancy;
 
 // Batch 3 (4f): authority/declaration rules.
+pub(crate) mod blacklist;
 pub(crate) mod one_way_gate;
 pub(crate) mod upgrade;
