@@ -42,7 +42,9 @@ use crate::codegen::types::{is_i64, is_signed, is_sub_word, wasm_valtype};
 use crate::error::LangError;
 use crate::lexer::token::Span;
 use crate::parser::expr_span;
-use crate::parser::{AssignOp, BinaryOp, Expr, Literal, Pattern, Stmt, UnaryOp, Visibility};
+use crate::parser::{
+    AssignOp, BinaryOp, Expr, Literal, ModifierDef, Pattern, Stmt, UnaryOp, Visibility,
+};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::type_checker::types::{ResolvedType, SymbolSig};
 
@@ -220,6 +222,42 @@ fn storage_byte_width(ty: &ResolvedType) -> Result<u32, LangError> {
             ),
         }),
     }
+}
+
+// ─── Modifier inlining helpers (P3·Step 6f) ──────────────────────────────────
+
+/// Split a modifier body at the `Stmt::Placeholder` position.
+///
+/// Returns `(pre, post)` where `pre` is everything before `_` and `post` is
+/// everything after `_`. Returns `Err` if no `_` is found (defensive; WF-006
+/// should have caught this — AGENTS §7.2, no panics in codegen).
+fn split_at_placeholder(stmts: &[Stmt]) -> Result<(&[Stmt], &[Stmt]), LangError> {
+    for (i, stmt) in stmts.iter().enumerate() {
+        if matches!(stmt, Stmt::Placeholder(_)) {
+            return Ok((&stmts[..i], &stmts[i + 1..]));
+        }
+    }
+    Err(LangError::Codegen {
+        message: "modifier body has no `_` placeholder (WF-006 should have caught this)".into(),
+    })
+}
+
+/// Look up a modifier definition by name from the contract's modifiers.
+///
+/// Returns `Err` if the modifier is not found — this indicates an annotation
+/// referencing a non-existent modifier (should have been caught by the type
+/// checker, but codegen handles it defensively).
+fn find_modifier<'a>(
+    contract: &'a TypedContract<'a>,
+    name: &str,
+) -> Result<&'a ModifierDef, LangError> {
+    contract
+        .modifiers()
+        .into_iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| LangError::Codegen {
+            message: format!("modifier '{name}' not found in contract"),
+        })
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -608,11 +646,25 @@ fn emit_contract_fn_body(
         }
     }
 
+    // Collect modifier annotations: annotations that reference a modifier definition.
+    // Modifiers are applied outermost-first (left-to-right annotation order).
+    let contract_modifiers = contract.modifiers();
+    let modifier_names: Vec<&str> = func
+        .annotations
+        .iter()
+        .filter(|a| contract_modifiers.iter().any(|m| m.name == a.name))
+        .map(|a| a.name.as_str())
+        .collect();
+
     // Pass 1: emit to discover locals
     let mut ctx1 = LowerCtx::new(contract, &params);
     ctx1.alloc_fn_idx = alloc_idx;
     ctx1.state_fields = field_map.clone();
-    ctx1.emit_block(body)?;
+    if modifier_names.is_empty() {
+        ctx1.emit_block(body)?;
+    } else {
+        ctx1.emit_with_modifiers(body, &modifier_names, contract)?;
+    }
     ctx1.func.instruction(&Instruction::End);
 
     let local_count = ctx1.local_types.len();
@@ -638,7 +690,11 @@ fn emit_contract_fn_body(
         state_fields: field_map,
     };
 
-    ctx2.emit_block(body)?;
+    if modifier_names.is_empty() {
+        ctx2.emit_block(body)?;
+    } else {
+        ctx2.emit_with_modifiers(body, &modifier_names, contract)?;
+    }
     ctx2.func.instruction(&Instruction::End);
 
     // Verify pass consistency
@@ -874,6 +930,54 @@ impl<'a> LowerCtx<'a> {
         for stmt in stmts {
             self.emit_stmt(stmt)?;
         }
+        Ok(())
+    }
+
+    /// Emit a function body with modifier inlining applied (P3·Step 6f).
+    ///
+    /// Processes modifiers outermost-first (left-to-right annotation order):
+    /// `@a @b fn f()` → `a.pre → b.pre → f.body → b.post → a.post`.
+    ///
+    /// Each modifier body is split at `Stmt::Placeholder` (`_`) into pre/post
+    /// segments. The inner body (remaining modifiers + function body) replaces
+    /// the `_` position.
+    ///
+    /// ## Parameterized modifiers
+    ///
+    /// Modifiers with parameters are not yet supported in codegen — returns
+    /// an honest deferral error (DB-A37 mod.2 scope).
+    fn emit_with_modifiers(
+        &mut self,
+        inner_body: &[Stmt],
+        modifiers: &[&str],
+        contract: &TypedContract<'_>,
+    ) -> Result<(), LangError> {
+        if modifiers.is_empty() {
+            // Base case: no more modifiers — emit the function body directly.
+            return self.emit_block(inner_body);
+        }
+
+        let modifier_name = modifiers[0];
+        let remaining = &modifiers[1..];
+
+        let modifier_def = find_modifier(contract, modifier_name)?;
+
+        // Reject parameterized modifiers for now (honest deferral).
+        if !modifier_def.params.is_empty() {
+            return Err(LangError::Codegen {
+                message: format!(
+                    "parameterized modifier '{modifier_name}' not yet supported in codegen"
+                ),
+            });
+        }
+
+        let (pre, post) = split_at_placeholder(&modifier_def.body)?;
+
+        // Emit: pre → (inner modifiers + body) → post
+        self.emit_block(pre)?;
+        self.emit_with_modifiers(inner_body, remaining, contract)?;
+        self.emit_block(post)?;
+
         Ok(())
     }
 
@@ -1146,7 +1250,9 @@ impl<'a> LowerCtx<'a> {
                 message: "unchecked block lowering not yet implemented".into(),
             }),
             Stmt::Placeholder(..) => Err(LangError::Codegen {
-                message: "modifier placeholder lowering not yet implemented (6f)".into(),
+                message: "unexpected `_` placeholder in codegen — modifier inlining should \
+                          have removed it (did split_at_placeholder miss?)"
+                    .into(),
             }),
             // Forward-compatibility for #[non_exhaustive]
             #[allow(unreachable_patterns)]
