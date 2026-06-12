@@ -19,11 +19,13 @@
 //! - [`wasm`]     — WASM section builder (wasm-encoder backend, DB-A52)
 //! - [`abi`]      — ABI emission stub (full implementation in P3·Step 6i)
 //! - [`metadata`] — Custom-section metadata stub (full implementation in P3·Step 6i)
+//! - [`types`]    — Lem → WASM type mapping (P3·Step 6c)
 //!
 //! ## Phase status
 //!
 //! - **6a** (this file): skeleton + minimal valid WASM with `call` entry point.
-//! - **6b–6e**: expression/statement/function lowering (not yet implemented).
+//! - **6c**: expression lowering (literals, checked arithmetic, comparison, local var read).
+//! - **6d–6e**: statement/function lowering (not yet implemented).
 //! - **6i**: ABI + metadata emission.
 //! - **6j**: wire into `lib.rs` public pipeline.
 //!
@@ -35,6 +37,7 @@
 
 pub(crate) mod abi;
 pub(crate) mod metadata;
+pub(crate) mod types;
 pub(crate) mod wasm;
 
 use crate::error::LangError;

@@ -18,7 +18,7 @@ fn build_metadata_returns_empty_bytes_in_stub_phase() {
     let metadata_bytes = build_metadata();
     assert_eq!(
         metadata_bytes,
-        vec![],
+        Vec::<u8>::new(),
         "expected empty metadata bytes in stub phase, got {} bytes",
         metadata_bytes.len()
     );

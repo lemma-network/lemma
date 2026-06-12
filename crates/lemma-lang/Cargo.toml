@@ -16,3 +16,7 @@ wasm-encoder = { workspace = true }
 # WASM validator — used in codegen tests to verify emitted bytes are valid WASM.
 # Test-only; not a workspace dep since no other crate uses wasmparser in production.
 wasmparser = "0.221"
+# WASM runtime — used in codegen execution tests to verify emitted WASM produces
+# correct runtime results (not just structural validity). Direct dep, NOT via
+# lemma-vm (AGENTS §8). Workspace dep pinned in root Cargo.toml.
+wasmtime = { workspace = true }

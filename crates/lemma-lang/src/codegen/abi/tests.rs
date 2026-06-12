@@ -321,7 +321,7 @@ fn build_abi_returns_empty_bytes_in_stub_phase() {
     let abi_bytes = build_abi(&contracts[0]);
     assert_eq!(
         abi_bytes,
-        vec![],
+        Vec::<u8>::new(),
         "expected empty ABI bytes in stub phase, got {} bytes",
         abi_bytes.len()
     );
