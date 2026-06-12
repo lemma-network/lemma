@@ -268,6 +268,62 @@ pub enum SafetyError {
         func: String,
     },
 
+    // ── SAFETY-023 — maxWallet Exempt Interface ───────────────────────────────
+    /// A contract with `maxWallet` enabled does not consult the wallet-exempt
+    /// interface on the enforcement path.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-quater SAFETY-023`.
+    #[error(
+        "SAFETY-023 maxWallet exempt: `{func}` enforces maxWallet but does not \
+         consult isWalletExempt / walletExempt — exempt interface unreachable"
+    )]
+    MaxWalletNoExempt {
+        /// The function that enforces maxWallet without consulting the exempt interface.
+        func: String,
+    },
+
+    // ── SAFETY-024 — Fair Launch Anti-Snipe ──────────────────────────────────
+    /// Anti-snipe logic blocks/reverts a transfer instead of applying a bounded
+    /// fee, or a sniper-tracking field gates the sell path.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-quater SAFETY-024`.
+    #[error(
+        "SAFETY-024 anti-snipe block: `{func}` blocks transfers on the snipe path \
+         instead of applying a bounded fee — anti-snipe must be a fee, never a sell-block"
+    )]
+    AntiSnipeIsBlock {
+        /// The function that blocks transfers on the snipe path.
+        func: String,
+    },
+
+    /// Launch-control logic has no expiry or can be re-armed, making it permanent.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-quater SAFETY-024`.
+    #[error(
+        "SAFETY-024 non-expiring launch: `{func}` applies launch controls without \
+         consulting the duration expiry — launch controls must be self-expiring"
+    )]
+    LaunchControlNotExpiring {
+        /// The function that applies launch controls without consulting duration.
+        func: String,
+    },
+
+    // ── P3-own-3 — Missing Required Trait ────────────────────────────────────
+    /// A function uses an annotation that requires a trait the contract does not declare.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §2.1 P3-own-3`.
+    #[error(
+        "P3-own-3 missing trait: `{func}` uses `{annotation}` but contract does not \
+         have state field `owner` — add `owner: Address` state field or use the \
+         appropriate standard"
+    )]
+    MissingRequiredTrait {
+        /// The function that uses the annotation.
+        func: String,
+        /// The annotation that requires the missing trait (e.g. `"onlyOwner"`).
+        annotation: String,
+    },
+
     // ── Inconclusive ──────────────────────────────────────────────────────────
     /// Analysis is inconclusive for a sound rule: the contract cannot be
     /// *proven* safe, so it is **rejected** (soundness over completeness).

@@ -20,6 +20,7 @@
 //!   declared.rs     — SAFETY-010  (4f)
 //!   honeypot.rs     — SAFETY-001  (4f)
 //!   tax.rs          — SAFETY-020/021/022  (4f-tax, TaxToken fee-model rules)
+//!   launch.rs       — SAFETY-023/024 + P3-own-3 (a)(c)  (4f-launch)
 //! ```
 //!
 //! Note: SAFETY-013 (ticker registration) retired per decision DB-A48 —
@@ -30,7 +31,7 @@ use crate::type_checker::typed_contract::TypedContract;
 use super::error::SafetyError;
 use super::rules;
 
-/// Analyze a contract for compile-time safety violations (SAFETY-001…022).
+/// Analyze a contract for compile-time safety violations (SAFETY-001…024).
 ///
 /// Runs all enabled rules and **collects every violation** before returning
 /// (`Err(violations)` is never fail-fast — the developer sees all problems in
@@ -44,6 +45,7 @@ use super::rules;
 /// **Batch 2 (4e)**: SAFETY-002 (reworked to DB-A41 in 4f-tax), SAFETY-003, SAFETY-006 — active.
 /// **Batch 3 (4f)**: SAFETY-007, SAFETY-009, SAFETY-005, SAFETY-001, SAFETY-010 — active.
 /// **Batch 3 (4f-tax)**: SAFETY-020, SAFETY-021, SAFETY-022 (TaxToken fee-model) — active.
+/// **Batch 3 (4f-launch)**: SAFETY-023, SAFETY-024 (launch/holding-control) + P3-own-3 (a)(c) — active.
 /// SAFETY-013 retired per decision DB-A48 (auto-injected by codegen).
 ///
 /// ## Caller
@@ -75,6 +77,13 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     // Batch 3 (4f-tax): TaxToken fee-model rules.
     // Returns empty Vec immediately for non-TaxToken contracts.
     violations.extend(rules::tax::check(contract)); // SAFETY-020/021/022
+
+    // Batch 3 (4f-launch): launch/holding-control rules + P3-own-3 (a)(c).
+    // SAFETY-023: maxWallet exempt interface consultation.
+    // SAFETY-024: anti-snipe bounded fee (not block), self-expiring, no sniper-field disposal.
+    // P3-own-3 (a): @onlyOwner requires owner state field.
+    // P3-own-3 (c): renounced-owner treatment (via is_renounce_aware in blacklist/one_way_gate).
+    violations.extend(rules::launch::check(contract)); // SAFETY-023/024 + P3-own-3(a)(c)
 
     if violations.is_empty() {
         Ok(())

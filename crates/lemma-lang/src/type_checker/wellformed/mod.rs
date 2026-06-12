@@ -2967,13 +2967,14 @@ fn check_wf014_token_schema(
     }
 
     // Conditional (§24.8): fairLaunch block if present →
-    // { cooldownBetweenBuys: Int, antiSnipeBlocks: Int } both mandatory.
+    // { cooldownBetweenBuys: Int, antiSnipeBlocks: Int, duration: Int } all mandatory.
     // Token and TaxToken both support fairLaunch (spec §24.8).
+    // `duration` added per DB-A43 — SAFETY-024 requires a self-expiring launch window.
     if let Some(fl_entry) = entry_map.get("fairLaunch") {
         if let ConfigValue::Object(fl_entries) = &fl_entry.value {
             let fl_map: BTreeMap<&str, &crate::parser::ConfigEntry> =
                 fl_entries.iter().map(|e| (e.key.as_str(), e)).collect();
-            for key in &["cooldownBetweenBuys", "antiSnipeBlocks"] {
+            for key in &["cooldownBetweenBuys", "antiSnipeBlocks", "duration"] {
                 match fl_map.get(key) {
                     None => {
                         out.push(TypeError {
@@ -3414,13 +3415,14 @@ fn check_wf014_taxtoken_schema(
     }
 
     // Conditional (DB-A43): fairLaunch block if present →
-    // { cooldownBetweenBuys: Int, antiSnipeBlocks: Int } both mandatory.
+    // { cooldownBetweenBuys: Int, antiSnipeBlocks: Int, duration: Int } all mandatory.
+    // `duration` added per DB-A43 — SAFETY-024 requires a self-expiring launch window.
     if let Some(fl_entry) = entry_map.get("fairLaunch") {
         match &fl_entry.value {
             ConfigValue::Object(fl_entries) => {
                 let fl_map: BTreeMap<&str, &crate::parser::ConfigEntry> =
                     fl_entries.iter().map(|e| (e.key.as_str(), e)).collect();
-                for key in &["cooldownBetweenBuys", "antiSnipeBlocks"] {
+                for key in &["cooldownBetweenBuys", "antiSnipeBlocks", "duration"] {
                     match fl_map.get(key) {
                         None => {
                             out.push(TypeError {

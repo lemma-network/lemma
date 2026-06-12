@@ -205,11 +205,13 @@ pub fn requires_governance(guards: &BTreeSet<Guard>) -> bool {
 /// Returns `true` if the guard set requires owner-only access.
 ///
 /// Part of the guard-predicate trio (`requires_governance` /
-/// `requires_owner_only` / `is_access_unrestricted`).  No current SAFETY rule
-/// queries owner-only *positively* (rules check `requires_governance` /
-/// `is_access_unrestricted`); retained for the deferred renounced-owner
-/// treatment (P3-own-3, Step 5).
-#[allow(dead_code)] // consumer: renounced-owner Auth treatment (P3-own-3, Step 5)
+/// `requires_owner_only` / `is_access_unrestricted`).
+///
+/// Consumers:
+/// - `is_renounce_aware()` guard in `rules/launch.rs` (P3-own-3 c, 4f-launch)
+/// - Renounced-owner skip in `rules/blacklist.rs` (SAFETY-005, P3-own-3 c)
+/// - Renounced-owner skip in `rules/one_way_gate.rs` (SAFETY-009, P3-own-3 c)
+/// - `check_own3a_missing_required_trait` in `rules/launch.rs` (P3-own-3 a)
 #[must_use]
 pub fn requires_owner_only(guards: &BTreeSet<Guard>) -> bool {
     guards.contains(&Guard::OnlyOwner)

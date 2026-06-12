@@ -2068,6 +2068,7 @@ fn check_wf014_accepts_taxtoken_with_anti_honeypot() {
 #[test]
 fn check_wf014_accepts_token_with_fair_launch() {
     // (pos) Token with fairLaunch block (§24.8 — available to both Token and TaxToken).
+    // `duration` is now mandatory per DB-A43 (WF-014 fix, 4f-launch).
     assert_passes(
         r#"
         token MyToken extends Token {
@@ -2079,6 +2080,7 @@ fn check_wf014_accepts_token_with_fair_launch() {
                 fairLaunch: {
                     cooldownBetweenBuys: 30
                     antiSnipeBlocks: 3
+                    duration: 100
                 }
             }
             init() {}

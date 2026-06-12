@@ -52,9 +52,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::analyzer::authset::{auth_set, requires_governance};
+use crate::analyzer::authset::{auth_set, requires_governance, requires_owner_only};
 use crate::analyzer::cfg::build_call_graph;
 use crate::analyzer::dataflow::restriction_fields;
+use crate::analyzer::rules::launch::is_renounce_aware;
 use crate::parser::{CallArg, Expr, Stmt};
 use crate::type_checker::typed_contract::TypedContract;
 use crate::visit::{walk_expr, walk_stmt, Visitor};
@@ -96,16 +97,31 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     let levers = transitive_callers(&direct, &call_graph);
 
     // Step 3: each lever must be GOVERNANCE-gated.
+    //
+    // P3-own-3 (c): if the lever is @onlyOwner AND the contract is renounce-aware
+    // (has a `renounce` function that writes `self.owner`), the lever is LOCKED
+    // post-renounce — nobody can call it.  A permanently-locked blacklist lever
+    // is SAFER than governance (it cannot be exercised at all), so we skip the
+    // violation.  Consumer: is_renounce_aware() in rules/launch.rs (4f-launch).
+    let renounce_aware = is_renounce_aware(contract);
+
     for func in contract.functions() {
         if !levers.contains(func.name) {
             continue;
         }
         let guards = auth_set(&func);
-        if !requires_governance(&guards) {
-            violations.push(SafetyError::UngovernedBlacklist {
-                func: func.name.to_owned(),
-            });
+        // Skip: governance-gated levers are always allowed.
+        if requires_governance(&guards) {
+            continue;
         }
+        // Skip: @onlyOwner lever on a renounce-aware contract — lever is LOCKED
+        // post-renounce (P3-own-3 c).  Not a governance risk.
+        if requires_owner_only(&guards) && renounce_aware {
+            continue;
+        }
+        violations.push(SafetyError::UngovernedBlacklist {
+            func: func.name.to_owned(),
+        });
     }
 
     violations
