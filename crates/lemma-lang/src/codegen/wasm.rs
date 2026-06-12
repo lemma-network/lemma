@@ -5,7 +5,9 @@
 //! was added in P3·Step 6c. Statement and control-flow lowering (let, assign,
 //! if/else, while, loop, break, continue, return, assert, revert) was added
 //! in P3·Step 6d. Function dispatch, storage access, and production wiring
-//! were added in P3·Step 6e.
+//! were added in P3·Step 6e. Modifier inlining was added in P3·Step 6f.
+//! Built-in Address constants and isZero()/isBurn() predicates were added
+//! in P3·Step 6g.
 //!
 //! ## Backend choice
 //!
@@ -19,7 +21,23 @@
 //! Type → Import → Function → Table → Memory → Global → Export →
 //! Start → Element → DataCount → Code → Data → Custom
 //!
-//! This module emits: Type → Import → Function → Memory → Global → Export → Code.
+//! This module emits:
+//! Type → Import → Function → Memory → Global → Export → DataCount → Code → Data.
+//!
+//! DataCount is required before Code when active data segments are present
+//! (WebAssembly bulk-memory proposal). We always emit 3 active segments for
+//! the Address constants (P3·Step 6g), so DataCount is always present.
+//!
+//! ## Address constants in linear memory (P3·Step 6g)
+//!
+//! Three 20-byte Address constants are placed in page 0 at fixed offsets:
+//! - offset 0..20:  Address::zero   (20 zero bytes)
+//! - offset 20..40: Address::burn   (BURN_BYTES from lemma-core)
+//! - offset 40..60: Address::native_lem (NATIVE_LEM_BYTES from lemma-core)
+//!
+//! These are below the heap base (65536 = page 1 start) and never conflict
+//! with the bump allocator. Bytes are sourced from `lemma_core::Address`
+//! (single source of truth — AGENTS §2 DRY).
 //!
 //! ## Determinism guarantee (AGENTS §7.1)
 //!
@@ -31,10 +49,11 @@
 
 use std::collections::BTreeMap;
 
+use lemma_core::Address;
 use wasm_encoder::{
-    CodeSection, ConstExpr, EntityType, ExportKind, ExportSection, Function, FunctionSection,
-    GlobalSection, GlobalType, ImportSection, Instruction, MemorySection, MemoryType, Module,
-    TypeSection, ValType,
+    CodeSection, ConstExpr, DataCountSection, DataSection, EntityType, ExportKind, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction,
+    MemorySection, MemoryType, Module, TypeSection, ValType,
 };
 
 use crate::codegen::abi::{self, HOST_IMPORT_COUNT, IMPORT_MODULE, IMPORT_ORDER};
@@ -61,6 +80,30 @@ const INITIAL_MEMORY_PAGES: u64 = 2;
 /// Set to page 1 start (65536 = 64 KiB). The guest bump allocator starts
 /// here and grows upward. See 08-EXECUTION_SPEC §4.5.
 const HEAP_BASE_ADDR: i32 = 65536;
+
+// ─── Address constant data-segment offsets (P3·Step 6g) ──────────────────────
+//
+// Three 20-byte Address constants are placed in page 0 at fixed offsets.
+// These are compile-time constants mirroring lemma-core::Address (AGENTS §2 DRY).
+// Layout (page 0, starting at offset 0):
+//   offset 0..20:  Address::zero   (20 zero bytes)
+//   offset 20..40: Address::burn   (BURN_BYTES from lemma-core)
+//   offset 40..60: Address::native_lem (NATIVE_LEM_BYTES from lemma-core)
+//
+// All offsets are well below the heap base (65536), so they never conflict
+// with the bump allocator.
+
+/// Byte offset in page 0 for the `Address::zero` constant (20 zero bytes).
+pub(crate) const ADDR_ZERO_OFFSET: u32 = 0;
+
+/// Byte offset in page 0 for the `Address::burn` constant (BURN_BYTES).
+pub(crate) const ADDR_BURN_OFFSET: u32 = 20;
+
+/// Byte offset in page 0 for the `Address::native_lem` constant (NATIVE_LEM_BYTES).
+pub(crate) const ADDR_NATIVE_OFFSET: u32 = 40;
+
+/// Number of active data segments emitted for Address constants.
+const ADDR_DATA_SEGMENT_COUNT: u32 = 3;
 
 // ─── Host function type signatures ───────────────────────────────────────────
 
@@ -410,6 +453,14 @@ pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangE
     exports.export(abi::HEAP_BASE_GLOBAL, ExportKind::Global, 0);
     module.section(&exports);
 
+    // ── 6.5 DataCount section ─────────────────────────────────────────────
+    // Required before the Code section when active data segments are present
+    // (WebAssembly bulk-memory proposal). We always emit 3 segments for the
+    // Address constants (P3·Step 6g).
+    module.section(&DataCountSection {
+        count: ADDR_DATA_SEGMENT_COUNT,
+    });
+
     // ── 7. Code section ───────────────────────────────────────────────────
     let mut codes = CodeSection::new();
 
@@ -429,6 +480,36 @@ pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangE
     }
 
     module.section(&codes);
+
+    // ── 8. Data section ───────────────────────────────────────────────────
+    // Three active data segments for Address constants (P3·Step 6g).
+    // Bytes sourced from lemma-core::Address — single source of truth (AGENTS §2).
+    let mut data = DataSection::new();
+
+    // Segment 0: Address::zero — 20 zero bytes at offset ADDR_ZERO_OFFSET
+    data.active(
+        0,
+        &ConstExpr::i32_const(ADDR_ZERO_OFFSET as i32),
+        [0u8; 20].iter().copied(),
+    );
+
+    // Segment 1: Address::burn — BURN_BYTES at offset ADDR_BURN_OFFSET
+    let burn_bytes = *Address::burn().as_bytes();
+    data.active(
+        0,
+        &ConstExpr::i32_const(ADDR_BURN_OFFSET as i32),
+        burn_bytes.iter().copied(),
+    );
+
+    // Segment 2: Address::native_lem — NATIVE_LEM_BYTES at offset ADDR_NATIVE_OFFSET
+    let native_bytes = *Address::native_lem().as_bytes();
+    data.active(
+        0,
+        &ConstExpr::i32_const(ADDR_NATIVE_OFFSET as i32),
+        native_bytes.iter().copied(),
+    );
+
+    module.section(&data);
 
     Ok(module.finish())
 }
@@ -900,15 +981,55 @@ impl<'a> LowerCtx<'a> {
 
             Expr::Unary(op, inner, span) => self.emit_unary(op, inner, span),
 
-            // self.field → storage read (P3·Step 6e)
+            // Member access: self.field → storage read (P3·Step 6e)
+            // Address.zero / Address.burn / Address.nativeLem → constant pointer (P3·Step 6g)
             Expr::Member(receiver, field, _span) => {
                 if let Expr::Ident(name, _) = receiver.as_ref() {
                     if name == "self" {
                         return self.emit_storage_read(field);
                     }
+                    if name == "Address" {
+                        return self.emit_address_constant(field);
+                    }
                 }
                 Err(LangError::Codegen {
-                    message: "member access on non-self receiver not yet implemented".into(),
+                    message: format!(
+                        "member access on receiver '{receiver:?}' not yet implemented"
+                    ),
+                })
+            }
+
+            // Function calls: addr.isZero() / addr.isBurn() / addr.isContract() (P3·Step 6g)
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Member(receiver, method, _) = callee.as_ref() {
+                    // Address predicate methods: isZero, isBurn, isNativeLem
+                    let predicate_offset = match method.as_str() {
+                        "isZero" => Some(ADDR_ZERO_OFFSET),
+                        "isBurn" => Some(ADDR_BURN_OFFSET),
+                        "isNativeLem" => Some(ADDR_NATIVE_OFFSET),
+                        _ => None,
+                    };
+                    if let Some(offset) = predicate_offset {
+                        if args.is_empty() {
+                            return self.emit_address_predicate(receiver, offset);
+                        }
+                        return Err(LangError::Codegen {
+                            message: format!("address predicate '{method}' takes no arguments"),
+                        });
+                    }
+                    if method == "isContract" {
+                        // isContract() requires a host call to check if an address has
+                        // code deployed. The current ABI has no has_code host function.
+                        // Deferred: P3·Step 6g scope (DB-A37).
+                        return Err(LangError::Codegen {
+                            message: "addr.isContract() not yet implemented \
+                                      (requires has_code host function — deferred)"
+                                .into(),
+                        });
+                    }
+                }
+                Err(LangError::Codegen {
+                    message: "general function call lowering not yet implemented".into(),
                 })
             }
 
@@ -1418,6 +1539,134 @@ impl<'a> LowerCtx<'a> {
             message: format!("undefined local variable: {name}"),
         })?;
         self.func.instruction(&Instruction::LocalGet(*local_idx));
+        Ok(())
+    }
+
+    // ── Address constants and predicates (P3·Step 6g) ────────────────────
+
+    /// Emit an i32 pointer to a built-in Address constant in linear memory.
+    ///
+    /// The three constants (`zero`, `burn`, `nativeLem`) are placed in page 0
+    /// at fixed offsets by the data section (see `emit_module`). This method
+    /// pushes the corresponding offset as an i32 constant onto the WASM stack.
+    ///
+    /// The caller receives an i32 pointer into linear memory where the 20-byte
+    /// address bytes reside.
+    fn emit_address_constant(&mut self, field: &str) -> Result<(), LangError> {
+        let offset = match field {
+            "zero" => ADDR_ZERO_OFFSET,
+            "burn" => ADDR_BURN_OFFSET,
+            "nativeLem" => ADDR_NATIVE_OFFSET,
+            other => {
+                return Err(LangError::Codegen {
+                    message: format!("Address has no constant '{other}'"),
+                })
+            }
+        };
+        self.func.instruction(&Instruction::I32Const(offset as i32));
+        Ok(())
+    }
+
+    /// Emit a byte-comparison predicate for an address value.
+    ///
+    /// Compares the 20 bytes at the address pointer produced by `addr_expr`
+    /// against the 20-byte constant at `constant_offset` in linear memory.
+    /// Returns i32: 1 if equal, 0 if not equal.
+    ///
+    /// ## Comparison strategy
+    ///
+    /// Unrolled into 2×i64 loads (bytes 0..8, 8..16) + 1×i32 load (bytes 16..20),
+    /// compared against compile-time constants derived from `lemma_core::Address`.
+    /// This avoids a runtime loop and is deterministic (AGENTS §7.1).
+    ///
+    /// The constant bytes are embedded as i64/i32 immediates — no runtime memory
+    /// access for the reference side.
+    fn emit_address_predicate(
+        &mut self,
+        addr_expr: &Expr,
+        constant_offset: u32,
+    ) -> Result<(), LangError> {
+        // Evaluate addr_expr → i32 pointer to the address bytes in memory
+        self.emit_expr(addr_expr)?;
+        let addr_ptr = self.alloc_temp_local(ValType::I32);
+        self.func.instruction(&Instruction::LocalSet(addr_ptr));
+
+        // Retrieve the 20 constant bytes from lemma-core (single source of truth).
+        // AGENTS §2 DRY: bytes come from Address::burn()/native_lem(), not hardcoded.
+        let const_bytes: [u8; 20] = match constant_offset {
+            ADDR_ZERO_OFFSET => [0u8; 20],
+            ADDR_BURN_OFFSET => *Address::burn().as_bytes(),
+            ADDR_NATIVE_OFFSET => *Address::native_lem().as_bytes(),
+            other => {
+                return Err(LangError::Codegen {
+                    message: format!("unknown address constant offset {other}"),
+                })
+            }
+        };
+
+        // chunk 0: bytes 0..8 — compare as i64 (little-endian)
+        let chunk0 = i64::from_le_bytes([
+            const_bytes[0],
+            const_bytes[1],
+            const_bytes[2],
+            const_bytes[3],
+            const_bytes[4],
+            const_bytes[5],
+            const_bytes[6],
+            const_bytes[7],
+        ]);
+        self.func.instruction(&Instruction::LocalGet(addr_ptr));
+        self.func
+            .instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 1,
+                memory_index: 0,
+            }));
+        self.func.instruction(&Instruction::I64Const(chunk0));
+        self.func.instruction(&Instruction::I64Eq);
+
+        // chunk 1: bytes 8..16 — compare as i64 (little-endian)
+        let chunk1 = i64::from_le_bytes([
+            const_bytes[8],
+            const_bytes[9],
+            const_bytes[10],
+            const_bytes[11],
+            const_bytes[12],
+            const_bytes[13],
+            const_bytes[14],
+            const_bytes[15],
+        ]);
+        self.func.instruction(&Instruction::LocalGet(addr_ptr));
+        self.func
+            .instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                offset: 8,
+                align: 1,
+                memory_index: 0,
+            }));
+        self.func.instruction(&Instruction::I64Const(chunk1));
+        self.func.instruction(&Instruction::I64Eq);
+        // AND the two i64 comparisons (both return i32 0/1 from I64Eq)
+        self.func.instruction(&Instruction::I32And);
+
+        // chunk 2: bytes 16..20 — compare as i32 (little-endian)
+        let chunk2 = i32::from_le_bytes([
+            const_bytes[16],
+            const_bytes[17],
+            const_bytes[18],
+            const_bytes[19],
+        ]);
+        self.func.instruction(&Instruction::LocalGet(addr_ptr));
+        self.func
+            .instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 16,
+                align: 1,
+                memory_index: 0,
+            }));
+        self.func.instruction(&Instruction::I32Const(chunk2));
+        self.func.instruction(&Instruction::I32Eq);
+        // AND with the previous result
+        self.func.instruction(&Instruction::I32And);
+
         Ok(())
     }
 
