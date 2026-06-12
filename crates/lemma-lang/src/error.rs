@@ -4,8 +4,8 @@
 //! stages. The lexer stage uses [`LangError::Lex`]; the parser stage uses
 //! [`LangError::Parse`]; the type checker uses [`LangError::Type`];
 //! the well-formedness pass uses [`LangError::WellFormed`];
-//! the safety analyzer uses [`LangError::Safety`].
-//! The `Codegen` variant will be added in Step 6.
+//! the safety analyzer uses [`LangError::Safety`];
+//! the code generator uses [`LangError::Codegen`].
 //!
 //! ## Usage
 //!
@@ -37,7 +37,7 @@ use crate::type_checker::error::TypeError;
 /// - `Type`       — type checker (type inference + name resolution)
 /// - `WellFormed` — well-formedness pass (WF-001…015, structural/semantic checks)
 /// - `Safety`     — safety analyzer (SAFETY-001…013 token rules)
-/// - `Codegen`    — planned for Step 6
+/// - `Codegen`    — code generator (Lem → WASM, P3·Step 6)
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LangError {
@@ -87,6 +87,20 @@ pub enum LangError {
         .0.len()
     )]
     WellFormed(Vec<TypeError>),
+
+    /// A code generation error encountered while emitting WASM from the typed AST.
+    ///
+    /// Produced by `codegen::compile` (P3·Step 6). The `message` field carries a
+    /// human-readable description of what went wrong during WASM emission.
+    ///
+    /// Codegen trusts a well-formed, type-checked AST (DB-A38, P3·Step 4e-bis) —
+    /// this variant covers structural WASM emission failures, not semantic errors
+    /// (those are caught by earlier pipeline stages).
+    #[error("codegen error: {message}")]
+    Codegen {
+        /// Human-readable description of the code generation failure.
+        message: String,
+    },
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

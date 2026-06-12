@@ -37,6 +37,7 @@
 //! ```
 
 pub mod analyzer;
+pub(crate) mod codegen;
 pub mod error;
 pub mod lexer;
 pub mod parser;

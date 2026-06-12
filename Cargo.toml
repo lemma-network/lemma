@@ -76,6 +76,10 @@ libp2p = { version = "0.56", features = [
 # VM (fuel metering, OSS-Fuzz, formal verification — chosen over wasmer for metered execution)
 wasmtime = "45"
 
+# WASM emitter (codegen backend — deterministic byte emission, bytecodealliance/wasm-tools suite)
+# Pinned exact per AGENTS §9.3; versioned in lockstep with wasmtime. See decisions-log DB-A50.
+wasm-encoder = "=0.251.0"
+
 # ZK (Veil — BLS12-377 + decaf377, Penumbra stack).
 # PINNED to arkworks 0.4.x to match Penumbra's audited circuits + trusted-setup
 # parameters (reuse requires byte-identical circuits + matching crate versions).

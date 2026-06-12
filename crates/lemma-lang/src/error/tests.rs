@@ -108,3 +108,48 @@ fn lex_error_different_spans_are_not_equal() {
     };
     assert_ne!(a, b);
 }
+
+// ── LangError::Codegen — Display + Clone + PartialEq ─────────────────────────
+
+#[test]
+fn codegen_error_displays_message() {
+    let err = LangError::Codegen {
+        message: "unsupported instruction in emit_module".to_string(),
+    };
+    let s = err.to_string();
+    assert!(s.starts_with("codegen error:"), "got: {s}");
+    assert!(
+        s.contains("unsupported instruction in emit_module"),
+        "got: {s}"
+    );
+}
+
+#[test]
+fn codegen_error_clones_equal_to_original() {
+    let err = LangError::Codegen {
+        message: "wasm section overflow".to_string(),
+    };
+    assert_eq!(err.clone(), err);
+}
+
+#[test]
+fn codegen_error_same_message_are_equal() {
+    let a = LangError::Codegen {
+        message: "emit failed".to_string(),
+    };
+    let b = LangError::Codegen {
+        message: "emit failed".to_string(),
+    };
+    assert_eq!(a, b);
+}
+
+#[test]
+fn codegen_error_different_messages_are_not_equal() {
+    let a = LangError::Codegen {
+        message: "error A".to_string(),
+    };
+    let b = LangError::Codegen {
+        message: "error B".to_string(),
+    };
+    assert_ne!(a, b);
+}

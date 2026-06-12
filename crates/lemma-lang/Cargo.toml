@@ -9,3 +9,10 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 bech32 = { workspace = true }
 lemma-core = { path = "../lemma-core" }
+# WASM emitter backend — deterministic byte emission (decisions-log DB-A50, AGENTS §9.3)
+wasm-encoder = { workspace = true }
+
+[dev-dependencies]
+# WASM validator — used in codegen tests to verify emitted bytes are valid WASM.
+# Test-only; not a workspace dep since no other crate uses wasmparser in production.
+wasmparser = "0.221"
