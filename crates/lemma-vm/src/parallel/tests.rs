@@ -50,6 +50,8 @@ fn block() -> BlockContext {
         msg_sender: addr(0),
         msg_value: Amount::zero(),
         tx_origin: addr(0),
+        // Placeholder — execute_call injects the real contract address (M3 fix).
+        contract: addr(0),
     }
 }
 

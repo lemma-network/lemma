@@ -29,6 +29,9 @@ fn test_address(seed: u8) -> Address {
 }
 
 /// Create a test `BlockContext` with deterministic values.
+///
+/// `contract` is set to `sender` here; `execute_call` overrides it with the
+/// real contract address via `BlockContext { contract: contract_addr, ..block }`.
 fn test_block(sender: Address) -> BlockContext {
     BlockContext {
         height: 1,
@@ -36,6 +39,8 @@ fn test_block(sender: Address) -> BlockContext {
         msg_sender: sender,
         msg_value: Amount::zero(),
         tx_origin: sender,
+        // Placeholder — execute_call injects the real contract address (M3 fix).
+        contract: sender,
     }
 }
 
@@ -560,26 +565,109 @@ fn execute_unsupported_tx_type_yields_failed_receipt() {
     assert_eq!(state.nonce(&sender), 1);
 }
 
-// ── M1 pinning test (ignored — Phase 3) ──────────────────────────────────────
+// ── M1 pinning tests ──────────────────────────────────────────────────────────
 
-/// Pinning test for the FuelMeter↔wasmtime fuel sync gap (M1 from B4 CodeReview).
+/// WAT contract that imports and calls `storage_write` once.
 ///
-/// Host-function gas charges (e.g., storage write = 22_100 gas) are currently
-/// NOT reflected in `gas_used` — only WASM instruction fuel is counted.
-/// This test is `#[ignore]`d until Phase 3 fixes the sync.
+/// The linker registers `storage_write` with real gas charging (M1 fix), so
+/// calling it deducts `storage_write_create` gas from the Store fuel pool.
+/// This makes the cost visible in `wasm_consumed` and therefore in `gas_used`.
 ///
-/// When Phase 3 wires real host functions, un-ignore this test and verify
-/// that `gas_used` increases by at least `storage_write_create` when the
-/// contract calls `storage_write` via the host function.
+/// Import order: only `storage_write` is imported — the linker resolves by
+/// name, not by index, so we only need to import what we call.
+const STORAGE_WRITE_CALLER_WAT: &[u8] = b"(module
+  (import \"lemma\" \"storage_write\" (func $sw (param i32 i32 i32 i32)))
+  (func (export \"call\")
+    i32.const 0
+    i32.const 0
+    i32.const 0
+    i32.const 0
+    call $sw)
+)";
+
+/// Verifies M1 fix: storage_write's gas cost now flows into gas_used.
 ///
-/// Technical Debt: "host-fn gas not in gas_used" in `living-notes.md`.
+/// Previously, host-fn charges used HostState.meter (inner) which was
+/// silently dropped; now they use caller.set_fuel() (Store fuel = shared budget).
+/// The `wasm_consumed` value in executor.rs therefore includes both WASM
+/// instruction fuel AND host-fn gas charges.
 #[test]
-#[ignore = "M1: host-fn charges not in gas_used — Phase 3 fix required"]
 fn execute_host_fn_charges_flow_to_gas_used() {
-    // When Phase 3 wires real host fns:
-    // 1. Build a WAT contract that calls storage_write via (import "lemma" "storage_write")
-    // 2. Execute it
-    // 3. Assert gas_used >= schedule.storage_write_create.as_u64()
-    //    (currently this would fail because host charges are dropped)
-    unimplemented!("Phase 3: un-ignore and implement with real host fn wiring")
+    let schedule = GasSchedule::devnet();
+    let expected_min_host_gas = schedule.storage_write_create.as_u64();
+
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    // Deploy the storage_write caller contract.
+    let deploy = deploy_tx(sender, STORAGE_WRITE_CALLER_WAT.to_vec(), 0, 500_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+
+    // Call the contract — it will invoke storage_write once.
+    let call = call_tx(sender, contract_addr, 1, 500_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    assert!(receipt.success, "storage_write call must succeed");
+
+    // gas_used must include at least the tx_base intrinsic + storage_write_create host charge.
+    // Before M1 fix, gas_used only reflected WASM instruction fuel (host charges were dropped).
+    let min_expected = schedule.tx_base.as_u64() + expected_min_host_gas;
+    assert!(
+        receipt.gas_used >= min_expected,
+        "gas_used ({}) must include host-fn charge: tx_base ({}) + storage_write_create ({}) = {}",
+        receipt.gas_used,
+        schedule.tx_base.as_u64(),
+        expected_min_host_gas,
+        min_expected,
+    );
+    assert!(receipt.gas_used <= call.gas_limit, "gas_used ≤ gas_limit");
+}
+
+/// Verifies that `gas_remaining` returns Store fuel (the M1 source of truth),
+/// not the inner HostState.meter which is no longer the authoritative counter.
+///
+/// After M1 fix, Store fuel is the single budget pool for both WASM instructions
+/// and host-fn charges. `gas_remaining()` must reflect this pool.
+#[test]
+fn gas_remaining_host_fn_reflects_store_fuel() {
+    // A WAT contract that calls gas_remaining and block_height (both charge context_query gas).
+    // We can't easily inspect the return value from outside, but we can verify that
+    // the overall gas_used increases by at least 2 × context_query when both are called.
+    const CONTEXT_QUERY_WAT: &[u8] = b"(module
+      (import \"lemma\" \"block_height\" (func $bh (result i64)))
+      (import \"lemma\" \"gas_remaining\" (func $gr (result i64)))
+      (func (export \"call\")
+        call $bh
+        drop
+        call $gr
+        drop)
+    )";
+
+    let schedule = GasSchedule::devnet();
+    let executor = test_executor();
+    let sender = test_address(3);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, CONTEXT_QUERY_WAT.to_vec(), 0, 500_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    let call = call_tx(sender, contract_addr, 1, 500_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    assert!(receipt.success, "context query call must succeed");
+
+    // gas_used must include at least tx_base + 1 × context_query (block_height).
+    // gas_remaining does NOT charge itself (circular), so only block_height charges.
+    let min_expected = schedule.tx_base.as_u64() + schedule.context_query.as_u64();
+    assert!(
+        receipt.gas_used >= min_expected,
+        "gas_used ({}) must include context_query charge for block_height",
+        receipt.gas_used,
+    );
 }

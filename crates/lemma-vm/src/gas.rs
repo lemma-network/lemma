@@ -163,6 +163,12 @@ pub struct GasSchedule {
     // ── Memory ────────────────────────────────────────────────────────────────
     /// Cost per 64 KiB WASM linear-memory page grown (super-linear to bound blowup).
     pub memory_grow_per_page: Gas,
+
+    // ── Context queries ───────────────────────────────────────────────────────
+    /// Base gas for a context-query host function call (block_height, block_timestamp,
+    /// gas_remaining, msg_value). Covers the host↔guest boundary overhead.
+    /// No free host functions (spec §3.1 rule 2 — else DoS vector).
+    pub context_query: Gas,
 }
 
 impl GasSchedule {
@@ -208,6 +214,10 @@ impl GasSchedule {
 
             // Memory
             memory_grow_per_page: Gas(3), // per 64 KiB page
+
+            // Context queries
+            // EVM COINBASE/NUMBER context opcode ≈ 2–5 gas; 3 is conservative.
+            context_query: Gas(3),
         }
     }
 }

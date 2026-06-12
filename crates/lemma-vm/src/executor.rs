@@ -315,23 +315,20 @@ impl Executor {
         // This satisfies the 'static bound on the linker's func_wrap closures.
         let snapshot = scratch.snapshot();
 
-        // ⚠️ Phase-3 limitation: storage ops key on `block.msg_sender` (the EOA
-        // caller), not `contract_addr` (the executing contract). In `host.rs`,
-        // `storage_read/write/delete` all use `self.block.msg_sender` as the
-        // contract namespace. This means WASM storage reads/writes go to the
-        // *caller's* storage slot namespace, not the contract's. Correct
-        // semantics require a `contract: Address` field in `BlockContext`
-        // (distinct from `msg_sender`) so the host can distinguish "who is
-        // calling" from "whose storage is being accessed".
-        // Tracked in `living-notes.md` Technical Debt: "storage keyed on msg_sender".
-        // Latent today (linker stubs are no-ops); MUST be fixed before Phase 3
-        // wires real storage marshalling.
+        // M3 fix: pass contract_addr so host functions use the correct storage namespace.
+        // Previously storage ops keyed on block.msg_sender (caller) instead of the
+        // executing contract — all state reads/writes went to the wrong address namespace.
+        // See 08-EXECUTION_SPEC §4.5 and DB-A53. M3 closed.
         let host = HostState::new(
             FuelMeter::new(meter.remaining()),
             self.schedule,
             CallContext::new(),
-            block,
+            BlockContext {
+                contract: contract_addr,
+                ..block
+            },
             snapshot,
+            tx.data.clone(), // calldata for input() host fn (DB-A53 §4.5)
         );
 
         let (wasm_consumed, host_after) = self.run_wasm(&module, host)?;
@@ -346,21 +343,10 @@ impl Executor {
         // Merge host state writes back into scratch.
         scratch.merge_snapshot(snap);
 
-        // ⚠️ Phase-3 limitation: WASM instruction fuel (wasm_consumed) is charged
-        // to the outer meter here, but host-function gas charges (made to the
-        // inner `host.meter` during execution) are silently dropped — the inner
-        // FuelMeter is not returned and reconciled. This means host-fn costs
-        // (storage, crypto, events) are NOT reflected in `gas_used`.
-        //
-        // With B4's linker stubs being no-ops (no host charges), this gap is
-        // latent. It MUST be fixed before Phase 3 wires real host functions —
-        // otherwise all host-fn operations are effectively free (DoS vector,
-        // spec §3.1 rule 5). Fix: make host fns charge wasmtime Store fuel
-        // directly (`caller.set_fuel(caller.get_fuel()? - cost)`) or add the
-        // inner meter's consumption (`initial_fuel - host_after.meter.remaining()`)
-        // to `wasm_consumed`.
-        // Tracked in `living-notes.md` Technical Debt: "host-fn gas not in gas_used".
-        // Pinning test: `execute_host_fn_charges_flow_to_gas_used` (ignored, Phase 3).
+        // M1 closed: host-fn charges are deducted from Store fuel via caller.set_fuel()
+        // in linker.rs, so wasm_consumed (= initial_fuel - store.get_fuel()) already
+        // includes both WASM-instruction fuel AND host-function gas charges.
+        // The outer meter.charge(wasm_consumed) therefore reflects total gas correctly.
         let _ = meter.charge(wasm_consumed);
 
         // Collect events from the host (cleared on failure in settle).
@@ -717,7 +703,7 @@ pub(crate) struct ScratchSnapshot {
 impl ContractStateView for ScratchSnapshot {
     /// Read a storage slot from this snapshot.
     ///
-    /// # ⚠️ Phase-3 limitation: NO read-through to inner state
+    /// # ⚠️ M4 — Intentional-deferred: NO read-through to inner state
     ///
     /// `ScratchSnapshot` is an *owned copy* of the current-tx scratch writes.
     /// It does NOT fall through to the underlying canonical state for keys that
@@ -726,10 +712,10 @@ impl ContractStateView for ScratchSnapshot {
     ///
     /// This diverges from `ScratchState::read`, which *does* fall through.
     ///
-    /// **Phase 3** (real Lem ABI + multi-frame state stack) must replace this
-    /// with a proper read-through implementation. Until then, any WASM contract
-    /// that reads a storage slot set by a *previous* committed transaction will
-    /// observe `None`.
+    /// **Intentional-deferred** — Phase 3 multi-frame state stack (beyond 6b-vm-1 scope).
+    /// Phase 3 (real Lem ABI + multi-frame state stack) must replace this with a proper
+    /// read-through implementation. Until then, any WASM contract that reads a storage
+    /// slot set by a *previous* committed transaction will observe `None`.
     ///
     /// Tracked in `living-notes.md` Technical Debt: "ScratchSnapshot no read-through".
     fn read(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>> {

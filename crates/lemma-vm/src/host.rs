@@ -24,7 +24,7 @@
 //! Every host function returns `Result` — never panics (AGENTS.md §7.2,
 //! §9.3). OOG, reentrancy, and insufficient funds all produce typed errors.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lemma_core::{address::Address, amount::Amount, hash::Hash, transaction::Log};
 
@@ -54,6 +54,13 @@ pub struct BlockContext {
     pub msg_value: Amount,
     /// The original transaction sender (tx.origin — the EOA that signed).
     pub tx_origin: Address,
+    /// The address of the contract currently executing.
+    ///
+    /// Used for storage namespace isolation (storage_read/write/delete, transfer.from).
+    /// Distinct from `msg_sender` (the caller) — `contract` is the callee whose
+    /// storage is being accessed. See decisions-log DB-A53 §4.5 and
+    /// 08-EXECUTION_SPEC §4.5.
+    pub contract: Address,
 }
 
 // ── CallContext ───────────────────────────────────────────────────────────────
@@ -159,6 +166,18 @@ pub struct HostState<S: ContractStateView> {
     ///
     /// `BTreeSet` for deterministic ordering (AGENTS.md §7.1).
     pub warm_keys: BTreeSet<(Address, Vec<u8>)>,
+    /// Register channel — variable-length host results (DB-A53 §4.5).
+    ///
+    /// `BTreeMap` for deterministic ordering (AGENTS §7.1 — never HashMap).
+    /// Populated by host functions that return variable-length data; consumed
+    /// by the guest via register-read host functions (6b-vm-2).
+    pub registers: BTreeMap<u32, Vec<u8>>,
+    /// Transaction calldata, pre-loaded by the executor before invoking "call".
+    ///
+    /// Populated by executor.rs; consumed by the `input()` host function (6b-vm-2).
+    pub calldata: Vec<u8>,
+    /// Return data written by the guest via `value_return()` (6b-vm-2).
+    pub return_data: Vec<u8>,
 }
 
 impl<S: ContractStateView> HostState<S> {
@@ -171,12 +190,14 @@ impl<S: ContractStateView> HostState<S> {
     /// * `call_ctx` — reentrancy / depth tracker (typically `CallContext::new()`).
     /// * `block` — deterministic context from consensus.
     /// * `state` — contract storage and balance backend.
+    /// * `calldata` — transaction calldata for the `input()` host function (6b-vm-2).
     pub fn new(
         meter: FuelMeter,
         schedule: GasSchedule,
         call_ctx: CallContext,
         block: BlockContext,
         state: S,
+        calldata: Vec<u8>,
     ) -> Self {
         Self {
             meter,
@@ -186,6 +207,9 @@ impl<S: ContractStateView> HostState<S> {
             state,
             events: Vec::new(),
             warm_keys: BTreeSet::new(),
+            registers: BTreeMap::new(),
+            calldata,
+            return_data: Vec::new(),
         }
     }
 
@@ -370,7 +394,8 @@ pub trait HostFunctions {
 
 impl<S: ContractStateView> HostFunctions for HostState<S> {
     fn storage_read(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, VmError> {
-        let contract = self.block.msg_sender;
+        // M3 fix: use contract address, not msg_sender
+        let contract = self.block.contract;
         let cost = if self.is_warm(&contract, key) {
             self.schedule.storage_read_warm
         } else {
@@ -382,7 +407,8 @@ impl<S: ContractStateView> HostFunctions for HostState<S> {
     }
 
     fn storage_write(&mut self, key: &[u8], value: &[u8]) -> Result<(), VmError> {
-        let contract = self.block.msg_sender;
+        // M3 fix: use contract address, not msg_sender
+        let contract = self.block.contract;
         let cost = if self.state.exists(&contract, key) {
             self.schedule.storage_write_update
         } else {
@@ -395,7 +421,8 @@ impl<S: ContractStateView> HostFunctions for HostState<S> {
     }
 
     fn storage_delete(&mut self, key: &[u8]) -> Result<(), VmError> {
-        let contract = self.block.msg_sender;
+        // M3 fix: use contract address, not msg_sender
+        let contract = self.block.contract;
         self.meter.charge(self.schedule.storage_delete)?;
         self.state.delete(&contract, key);
         self.meter.refund(self.schedule.storage_delete_refund);
@@ -427,7 +454,9 @@ impl<S: ContractStateView> HostFunctions for HostState<S> {
         // Charge before any state mutation (CEI — charge is the "check").
         self.meter.charge(self.schedule.call_value_transfer)?;
 
-        let from = self.block.msg_sender;
+        // M3 fix: use contract address, not msg_sender
+        // The contract's OWN balance is what it transfers from, not the caller's balance.
+        let from = self.block.contract;
         let from_balance = self.state.balance(&from);
 
         // Checked subtraction — insufficient funds → typed error, no panic.
@@ -517,7 +546,10 @@ impl<S: ContractStateView> HostFunctions for HostState<S> {
             self.schedule.emit_event_per_byte,
             data.len(),
         )?;
-        let contract = self.block.msg_sender;
+        // M3 fix: events are attributed to the EXECUTING CONTRACT, not the caller.
+        // msg_sender is who called the contract; contract is what emitted the event.
+        // See 08-EXECUTION_SPEC §4 and DB-A53; same namespace fix as storage ops.
+        let contract = self.block.contract;
         self.events
             .push(Log::new(contract, topics.to_vec(), data.to_vec()));
         Ok(())

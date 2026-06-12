@@ -32,6 +32,9 @@ fn test_block(sender: Address) -> BlockContext {
         msg_sender: sender,
         msg_value: Amount::zero(),
         tx_origin: sender,
+        // In host tests, contract == sender (single-frame, no cross-contract calls).
+        // M3: storage ops use block.contract, not block.msg_sender.
+        contract: sender,
     }
 }
 
@@ -43,7 +46,8 @@ fn make_host(budget: u64, balances: BTreeMap<Address, Amount>) -> HostState<InMe
     let call_ctx = CallContext::new();
     let block = test_block(sender);
     let state = InMemoryStateView::with_balances(balances);
-    HostState::new(meter, schedule, call_ctx, block, state)
+    // Pass empty calldata — host tests don't exercise the input() host function.
+    HostState::new(meter, schedule, call_ctx, block, state, vec![])
 }
 
 /// Build a `HostState` with no pre-seeded balances.
@@ -379,6 +383,34 @@ fn emit_event_charges_per_byte_and_stores_log() {
     assert_eq!(host.events[0].topics, topics);
 }
 
+// M3 regression: emit_event must attribute to block.contract, not block.msg_sender.
+// In single-frame tests contract==sender hides this; this test uses distinct addresses.
+#[test]
+fn emit_event_log_address_is_executing_contract_not_caller() {
+    let sender = Address::from_public_key(&[0xAA; 32]);
+    let contract = Address::from_public_key(&[0xBB; 32]); // distinct from sender
+    let mut block = test_block(sender);
+    block.contract = contract;
+    let mut host = HostState::new(
+        FuelMeter::new(Gas::new(1_000_000)),
+        GasSchedule::devnet(),
+        CallContext::new(),
+        block,
+        InMemoryStateView::with_balances(BTreeMap::new()),
+        vec![],
+    );
+    host.emit_event(&[Hash::zero()], b"data")
+        .expect("emit should succeed");
+    assert_eq!(
+        host.events[0].address, contract,
+        "event.address must be the executing contract (block.contract), not msg_sender"
+    );
+    assert_ne!(
+        host.events[0].address, sender,
+        "event.address must NOT be msg_sender"
+    );
+}
+
 // ── Gas remaining test ────────────────────────────────────────────────────────
 
 #[test]
@@ -439,8 +471,9 @@ fn oog_before_side_effect_storage_write() {
     assert!(matches!(err, VmError::OutOfGas));
 
     // State must be unchanged — no side effect on OOG.
+    // M3: storage is namespaced by block.contract, not block.msg_sender.
     assert!(
-        host.state.read(&host.block.msg_sender, b"key").is_none(),
+        host.state.read(&host.block.contract, b"key").is_none(),
         "state must be unchanged after OOG"
     );
 }

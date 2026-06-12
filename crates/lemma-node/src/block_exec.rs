@@ -25,12 +25,13 @@
 //!
 //! Contract storage writes are persisted to `CF_STORAGE` for intra-block
 //! read-through but do NOT yet update `Account.storage_root` — this is
-//! **C·Step 13-residual**, gated on M3 (Technical Debt):
-//! - **M3**: `BlockContext.contract` field missing; host storage ops currently
-//!   use `msg_sender` instead of the executing contract's address.
-//! - Until M3 is fixed, `Account.storage_root` stays `Hash::zero()` for all
-//!   contracts and storage does NOT contribute to `state_root`.
-//! - This is intentional-deferred (dependency named), NOT silent loss.
+//! **C·Step 13-residual** — `Account.storage_root` wire-up (newly unblocked):
+//! - **M3 CLOSED (P3·Step 6b-vm-1)**: `BlockContext.contract` field added;
+//!   host storage ops now use the executing contract's address (not `msg_sender`).
+//! - **Remaining blocker**: `apply_writes` does not yet call `WorldState::put_storage`
+//!   via a contract trie and update `Account.storage_root`. Until this lands,
+//!   storage does NOT contribute to `state_root`. Record as newly-unblocked debt.
+//! - This is intentional-deferred (dependency now resolved), NOT silent loss.
 //!
 //! ## Determinism (AGENTS §7.1)
 //!
@@ -150,6 +151,8 @@ pub fn execute_committed_block(
         msg_sender: proposer,
         msg_value: Amount::zero(),
         tx_origin: proposer,
+        // contract is set per-call by execute_call (M3 fix); proposer is a safe placeholder.
+        contract: proposer,
     };
 
     // Base state: read-only view of committed state from the parent block.
@@ -215,8 +218,9 @@ pub fn execute_committed_block(
 ///
 /// `StateKey::Storage` writes are persisted to `CF_STORAGE` for intra-block
 /// read-through correctness. `Account.storage_root` is NOT updated here —
-/// this is **gated on M3** (Technical Debt: `BlockContext.contract` +
-/// namespace fix). Storage does not yet contribute to `state_root`.
+/// **M3 is now CLOSED** (`BlockContext.contract` landed in P3·Step 6b-vm-1).
+/// The remaining work is the storage_root trie wire-up (C·Step 13-residual,
+/// newly unblocked). Storage does not yet contribute to `state_root`.
 fn apply_writes(
     db: Arc<LemmaDb>,
     base_state_root: Hash,
@@ -285,7 +289,7 @@ fn apply_one_write(
 
         // ── Storage ───────────────────────────────────────────────────────────
         // Persist to CF_STORAGE for read-through correctness within the block.
-        // Account.storage_root NOT updated — C·Step 13-residual (M3 debt).
+        // Account.storage_root NOT updated — C·Step 13-residual (M3 CLOSED; storage_root wire-up is the remaining work).
         (
             StateKey::Storage {
                 contract,

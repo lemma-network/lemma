@@ -25,14 +25,14 @@
 //! - `code()` always returns `None`: no WASM bytecode store exists in Phase 2
 //!   (only `Account.code_hash` is stored; the bytecode bytes live in Phase 3).
 //! - `read()` / `exists()`: storage slots always absent in Phase 2 (contract
-//!   storage namespace is M3 debt: `BlockContext.contract` not yet distinct from
-//!   `msg_sender` — intentional-deferred, gated on M3 fix).
+//!   storage namespace: M3 CLOSED in P3·Step 6b-vm-1 — `BlockContext.contract`
+//!   now distinct from `msg_sender`. Remaining: storage_root wire-up in apply_writes).
 //!
 //! ## Debt record (C·Step 13-residual)
 //!
 //! Contract storage writes (StateKey::Storage → `Account.storage_root`) are
-//! gated on **M3**: `BlockContext.contract` field + correct namespace.
-//! Until M3, storage slots written by Flux are persisted via `WorldState::put_storage`
+//! **M3 CLOSED (P3·Step 6b-vm-1)**: `BlockContext.contract` field + namespace fix done.
+//! Remaining: storage_root trie wire-up. Storage slots written by Flux are persisted via `WorldState::put_storage`
 //! (so intra-block reads see them) but `Account.storage_root` is NOT updated,
 //! meaning storage does NOT yet contribute to `state_root`. This is honest
 //! deferral, not silent loss: state_root is structurally correct for
@@ -79,7 +79,8 @@ impl ContractStateView for WorldStateView {
     fn read(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>> {
         // Hash the arbitrary key bytes to derive a 32-byte CF_STORAGE slot.
         // NOTE: Phase 2 scope — no contracts deployed, always returns None.
-        // M3 debt: namespace will be corrected when BlockContext.contract lands.
+        // M3 CLOSED (P3·Step 6b-vm-1): namespace uses BlockContext.contract correctly.
+        // Phase 2 scope: no contracts deployed, always returns None regardless.
         let slot = lemma_crypto::hash_bytes(key);
         self.inner.get_storage(contract, &slot).ok().flatten()
     }
