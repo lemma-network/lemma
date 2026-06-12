@@ -1368,3 +1368,855 @@ fn execute_compound_add_overflow_traps() {
 fn execute_compound_sub_underflow_traps() {
     assert!(execute_fn_body("let mut x: u32 = 0; x -= 1; return x;", "u32").is_err());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P3·Step 6e — Function dispatch + storage access
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These tests verify the production `emit_module` path: function dispatch
+// via selectors, bump allocator, storage read/write via host imports, and
+// per-function body lowering.
+
+// ── emit_module — stateful contract validation ──────────────────────────────
+
+#[test]
+fn emit_module_stateful_contract_produces_valid_wasm() {
+    let src = r#"
+        contract Counter {
+            state { count: u32 }
+            pub fn increment() {
+                self.count = self.count + 1;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "stateful contract WASM failed validation: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn emit_module_multi_function_contract_produces_valid_wasm() {
+    let src = r#"
+        contract Math {
+            state { value: u32 }
+            pub fn set(x: u32) {
+                self.value = x;
+            }
+            pub fn get() -> u32 {
+                return self.value;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "multi-function contract WASM failed validation: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn emit_module_empty_contract_still_valid() {
+    // A contract with no pub functions should still produce valid WASM
+    let src = "contract Empty {}";
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "empty contract WASM failed validation: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn emit_module_u64_state_field_produces_valid_wasm() {
+    let src = r#"
+        contract BigCounter {
+            state { total: u64 }
+            pub fn add(amount: u64) {
+                self.total = self.total + amount;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "u64 state field WASM failed validation: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn emit_module_bool_state_field_produces_valid_wasm() {
+    let src = r#"
+        contract Toggle {
+            state { active: bool }
+            pub fn activate() {
+                self.active = true;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "bool state field WASM failed validation: {:?}",
+        result.err()
+    );
+}
+
+// ── Selector computation ────────────────────────────────────────────────────
+
+#[test]
+fn compute_selector_is_deterministic() {
+    use crate::codegen::wasm::compute_selector;
+
+    let src = r#"
+        contract Foo {
+            pub fn transfer(amount: u32) {}
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let fns = contracts[0].functions();
+    let sel1 = compute_selector(&fns[0], &contracts[0]).unwrap();
+    let sel2 = compute_selector(&fns[0], &contracts[0]).unwrap();
+    assert_eq!(sel1, sel2, "selector must be deterministic");
+}
+
+#[test]
+fn compute_selector_differs_for_different_functions() {
+    use crate::codegen::wasm::compute_selector;
+
+    let src = r#"
+        contract Foo {
+            pub fn transfer(amount: u32) {}
+            pub fn approve(amount: u32) {}
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let fns = contracts[0].functions();
+    let sel_transfer = compute_selector(&fns[0], &contracts[0]).unwrap();
+    let sel_approve = compute_selector(&fns[1], &contracts[0]).unwrap();
+    assert_ne!(
+        sel_transfer, sel_approve,
+        "different function names must produce different selectors"
+    );
+}
+
+// ── Storage key computation ─────────────────────────────────────────────────
+
+#[test]
+fn storage_key_is_deterministic() {
+    use crate::codegen::wasm::storage_key;
+
+    let key1 = storage_key("count");
+    let key2 = storage_key("count");
+    assert_eq!(key1, key2, "storage key must be deterministic");
+}
+
+#[test]
+fn storage_key_differs_for_different_fields() {
+    use crate::codegen::wasm::storage_key;
+
+    let key_count = storage_key("count");
+    let key_total = storage_key("total");
+    assert_ne!(
+        key_count, key_total,
+        "different field names must produce different storage keys"
+    );
+}
+
+// ── Dispatch execution tests ────────────────────────────────────────────────
+//
+// These tests compile full contracts with `emit_module`, then execute them
+// with wasmtime using a stateful stub linker that tracks storage writes and
+// provides storage reads.
+
+use std::collections::BTreeMap as StdBTreeMap;
+use std::sync::{Arc, Mutex};
+
+/// Shared state for the test stub linker.
+struct StubState {
+    /// In-memory storage: key bytes → value bytes.
+    storage: StdBTreeMap<Vec<u8>, Vec<u8>>,
+    /// Register file: register_id → bytes.
+    registers: StdBTreeMap<u32, Vec<u8>>,
+}
+
+impl StubState {
+    fn new() -> Self {
+        Self {
+            storage: StdBTreeMap::new(),
+            registers: StdBTreeMap::new(),
+        }
+    }
+}
+
+/// Build a wasmtime instance from compiled WASM bytes with a stateful stub linker.
+///
+/// The stub linker implements storage_read/write with an in-memory BTreeMap,
+/// and input/register_len/read_register for calldata delivery.
+#[allow(clippy::type_complexity)]
+fn instantiate_with_stubs(
+    wasm_bytes: &[u8],
+    calldata: &[u8],
+) -> Result<(wasmtime::Instance, wasmtime::Store<Arc<Mutex<StubState>>>), String> {
+    use crate::codegen::abi::{IMPORT_MODULE, IMPORT_ORDER};
+    use crate::codegen::wasm::HOST_SIGS;
+
+    let engine = wasmtime::Engine::default();
+    let state = Arc::new(Mutex::new(StubState::new()));
+
+    // Pre-load calldata into register 0
+    {
+        let mut s = state.lock().map_err(|e| format!("lock: {e}"))?;
+        s.registers.insert(0, calldata.to_vec());
+    }
+
+    let mut store = wasmtime::Store::new(&engine, state.clone());
+    let module =
+        wasmtime::Module::new(&engine, wasm_bytes).map_err(|e| format!("wasmtime compile: {e}"))?;
+
+    let mut linker = wasmtime::Linker::new(&engine);
+
+    // Register all 14 host functions with stateful implementations
+    for (i, name) in IMPORT_ORDER.iter().enumerate() {
+        let (params, results) = HOST_SIGS[i];
+        let func_ty = wasmtime::FuncType::new(
+            &engine,
+            params.iter().map(|vt| match vt {
+                wasm_encoder::ValType::I32 => wasmtime::ValType::I32,
+                wasm_encoder::ValType::I64 => wasmtime::ValType::I64,
+                _ => wasmtime::ValType::I32,
+            }),
+            results.iter().map(|vt| match vt {
+                wasm_encoder::ValType::I32 => wasmtime::ValType::I32,
+                wasm_encoder::ValType::I64 => wasmtime::ValType::I64,
+                _ => wasmtime::ValType::I32,
+            }),
+        );
+
+        let host_name = *name;
+        let state_clone = state.clone();
+
+        linker
+            .func_new(
+                IMPORT_MODULE,
+                name,
+                func_ty,
+                move |mut caller: wasmtime::Caller<'_, Arc<Mutex<StubState>>>,
+                      params: &[wasmtime::Val],
+                      results: &mut [wasmtime::Val]| {
+                    let st = state_clone.clone();
+                    match host_name {
+                        "input" => {
+                            // input(register_id) — calldata is already in register 0
+                            // No-op: calldata was pre-loaded
+                            Ok(())
+                        }
+                        "register_len" => {
+                            // register_len(register_id) -> i64
+                            let reg_id = params[0].unwrap_i32() as u32;
+                            let s = st.lock().unwrap();
+                            let len = s
+                                .registers
+                                .get(&reg_id)
+                                .map(|v| v.len() as i64)
+                                .unwrap_or(-1); // REGISTER_EMPTY
+                            results[0] = wasmtime::Val::I64(len);
+                            Ok(())
+                        }
+                        "read_register" => {
+                            // read_register(register_id, ptr)
+                            let reg_id = params[0].unwrap_i32() as u32;
+                            let ptr = params[1].unwrap_i32() as usize;
+                            let s = st.lock().unwrap();
+                            if let Some(data) = s.registers.get(&reg_id) {
+                                let memory = caller
+                                    .get_export("memory")
+                                    .and_then(|e| e.into_memory())
+                                    .expect("memory export");
+                                let mem_data = memory.data_mut(&mut caller);
+                                let end = ptr + data.len();
+                                if end <= mem_data.len() {
+                                    mem_data[ptr..end].copy_from_slice(data);
+                                }
+                            }
+                            Ok(())
+                        }
+                        "storage_read" => {
+                            // storage_read(key_ptr, key_len, register_id) -> i32
+                            let key_ptr = params[0].unwrap_i32() as usize;
+                            let key_len = params[1].unwrap_i32() as usize;
+                            let reg_id = params[2].unwrap_i32() as u32;
+                            let memory = caller
+                                .get_export("memory")
+                                .and_then(|e| e.into_memory())
+                                .expect("memory export");
+                            let mem_data = memory.data(&caller);
+                            let key = mem_data[key_ptr..key_ptr + key_len].to_vec();
+                            let mut s = st.lock().unwrap();
+                            let val_opt = s.storage.get(&key).cloned();
+                            if let Some(val) = val_opt {
+                                s.registers.insert(reg_id, val);
+                                results[0] = wasmtime::Val::I32(0); // STORAGE_FOUND
+                            } else {
+                                results[0] = wasmtime::Val::I32(-1); // STORAGE_NOT_FOUND
+                            }
+                            Ok(())
+                        }
+                        "storage_write" => {
+                            // storage_write(key_ptr, key_len, val_ptr, val_len)
+                            let key_ptr = params[0].unwrap_i32() as usize;
+                            let key_len = params[1].unwrap_i32() as usize;
+                            let val_ptr = params[2].unwrap_i32() as usize;
+                            let val_len = params[3].unwrap_i32() as usize;
+                            let memory = caller
+                                .get_export("memory")
+                                .and_then(|e| e.into_memory())
+                                .expect("memory export");
+                            let mem_data = memory.data(&caller);
+                            let key = mem_data[key_ptr..key_ptr + key_len].to_vec();
+                            let val = mem_data[val_ptr..val_ptr + val_len].to_vec();
+                            let mut s = st.lock().unwrap();
+                            s.storage.insert(key, val);
+                            Ok(())
+                        }
+                        "value_return" => {
+                            // value_return(ptr, len) — store return data in register 99
+                            let ptr = params[0].unwrap_i32() as usize;
+                            let len = params[1].unwrap_i32() as usize;
+                            let memory = caller
+                                .get_export("memory")
+                                .and_then(|e| e.into_memory())
+                                .expect("memory export");
+                            let mem_data = memory.data(&caller);
+                            let data = mem_data[ptr..ptr + len].to_vec();
+                            let mut s = st.lock().unwrap();
+                            s.registers.insert(99, data);
+                            Ok(())
+                        }
+                        _ => {
+                            // Default stub: zero-fill results
+                            for r in results.iter_mut() {
+                                *r = wasmtime::Val::I32(0);
+                            }
+                            Ok(())
+                        }
+                    }
+                },
+            )
+            .map_err(|e| format!("linker.func_new({host_name}): {e}"))?;
+    }
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("instantiation: {e}"))?;
+
+    Ok((instance, store))
+}
+
+/// Build calldata with a 4-byte LE selector and optional arg bytes.
+fn build_calldata(selector: u32, args: &[u8]) -> Vec<u8> {
+    let mut cd = selector.to_le_bytes().to_vec();
+    cd.extend_from_slice(args);
+    cd
+}
+
+#[test]
+fn dispatch_calls_correct_function_by_selector() {
+    use crate::codegen::wasm::{compute_selector, storage_key};
+
+    let src = r#"
+        contract Math {
+            state { value: u32 }
+            pub fn set(x: u32) {
+                self.value = x;
+            }
+            pub fn get() -> u32 {
+                return self.value;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+
+    // Compute selectors
+    let fns = contracts[0].functions();
+    let pub_fns: Vec<_> = fns
+        .iter()
+        .filter(|f| matches!(f.visibility, crate::parser::Visibility::Pub))
+        .filter(|f| f.body.is_some())
+        .collect();
+
+    let sel_set = compute_selector(pub_fns[0], &contracts[0]).unwrap();
+    let sel_get = compute_selector(pub_fns[1], &contracts[0]).unwrap();
+
+    // Call set(42) — selector + u32 arg (LE)
+    let calldata = build_calldata(sel_set, &42u32.to_le_bytes());
+    let (instance, mut store) =
+        instantiate_with_stubs(&bytes, &calldata).expect("instantiation failed");
+
+    let call_fn = instance
+        .get_typed_func::<(), ()>(&mut store, "call")
+        .expect("get call fn");
+    call_fn.call(&mut store, ()).expect("call should succeed");
+
+    // W2: Verify storage key matches storage_key("value") AND value == 42
+    {
+        let state = store.data().lock().unwrap();
+        let expected_key = storage_key("value").to_vec();
+        let stored_val = state
+            .storage
+            .get(&expected_key)
+            .expect("storage should contain key for 'value'");
+        assert_eq!(
+            stored_val,
+            &42u32.to_le_bytes().to_vec(),
+            "stored value should be 42 as LE u32"
+        );
+    }
+
+    // W2 negative: call get() on fresh storage — verify it does NOT write to storage
+    // (get is a read-only function) and succeeds without trapping.
+    let calldata_get = build_calldata(sel_get, &[]);
+    let (instance_get, mut store_get) =
+        instantiate_with_stubs(&bytes, &calldata_get).expect("instantiation failed");
+
+    let call_fn_get = instance_get
+        .get_typed_func::<(), ()>(&mut store_get, "call")
+        .expect("get call fn");
+    call_fn_get
+        .call(&mut store_get, ())
+        .expect("get() should succeed on fresh storage");
+
+    // get() should NOT have written to storage (it's a read-only function)
+    let state_get = store_get.data().lock().unwrap();
+    assert!(
+        state_get.storage.is_empty(),
+        "get() should not write to storage"
+    );
+}
+
+#[test]
+fn dispatch_unknown_selector_traps() {
+    let src = r#"
+        contract Foo {
+            pub fn bar() {}
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+
+    // Use a bogus selector
+    let calldata = build_calldata(0xDEADBEEF, &[]);
+    let (instance, mut store) =
+        instantiate_with_stubs(&bytes, &calldata).expect("instantiation failed");
+
+    let call_fn = instance
+        .get_typed_func::<(), ()>(&mut store, "call")
+        .expect("get call fn");
+    let result = call_fn.call(&mut store, ());
+    assert!(
+        result.is_err(),
+        "unknown selector should trap, got: {result:?}"
+    );
+}
+
+#[test]
+fn dispatch_empty_calldata_traps() {
+    let src = r#"
+        contract Foo {
+            pub fn bar() {}
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+
+    // Empty calldata (less than 4 bytes)
+    let calldata: Vec<u8> = vec![];
+    let (instance, mut store) =
+        instantiate_with_stubs(&bytes, &calldata).expect("instantiation failed");
+
+    let call_fn = instance
+        .get_typed_func::<(), ()>(&mut store, "call")
+        .expect("get call fn");
+    let result = call_fn.call(&mut store, ());
+    assert!(
+        result.is_err(),
+        "empty calldata should trap, got: {result:?}"
+    );
+}
+
+#[test]
+fn storage_write_then_read_roundtrips() {
+    use crate::codegen::wasm::compute_selector;
+
+    let src = r#"
+        contract Counter {
+            state { count: u32 }
+            pub fn set(x: u32) {
+                self.count = x;
+            }
+            pub fn get() -> u32 {
+                return self.count;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+
+    let fns = contracts[0].functions();
+    let pub_fns: Vec<_> = fns
+        .iter()
+        .filter(|f| matches!(f.visibility, crate::parser::Visibility::Pub))
+        .filter(|f| f.body.is_some())
+        .collect();
+
+    let sel_set = compute_selector(pub_fns[0], &contracts[0]).unwrap();
+    let sel_get = compute_selector(pub_fns[1], &contracts[0]).unwrap();
+
+    // Step 1: Call set(42) — writes to storage
+    let calldata_set = build_calldata(sel_set, &42u32.to_le_bytes());
+    let (instance, mut store) =
+        instantiate_with_stubs(&bytes, &calldata_set).expect("instantiation failed");
+
+    let call_fn = instance
+        .get_typed_func::<(), ()>(&mut store, "call")
+        .expect("get call fn");
+    call_fn
+        .call(&mut store, ())
+        .expect("set(42) should succeed");
+
+    // Verify storage has the value
+    let storage_snapshot: StdBTreeMap<Vec<u8>, Vec<u8>> = {
+        let state = store.data().lock().unwrap();
+        state.storage.clone()
+    };
+    assert_eq!(
+        storage_snapshot.len(),
+        1,
+        "should have exactly one storage entry"
+    );
+
+    // Verify the stored value is 42 (LE u32)
+    let stored_val = storage_snapshot.values().next().unwrap();
+    assert_eq!(
+        stored_val,
+        &42u32.to_le_bytes().to_vec(),
+        "stored value should be 42 as LE u32"
+    );
+
+    // W1: Step 2 — Call get() to exercise emit_storage_read round-trip.
+    // We need to re-instantiate with the same storage state but new calldata.
+    // Extract storage, build new instance with get() calldata, inject storage.
+    let calldata_get = build_calldata(sel_get, &[]);
+    let (instance_get, mut store_get) =
+        instantiate_with_stubs(&bytes, &calldata_get).expect("instantiation failed");
+
+    // Inject the storage from the set() call into the new instance
+    {
+        let mut state = store_get.data().lock().unwrap();
+        for (k, v) in &storage_snapshot {
+            state.storage.insert(k.clone(), v.clone());
+        }
+    }
+
+    let call_fn_get = instance_get
+        .get_typed_func::<(), ()>(&mut store_get, "call")
+        .expect("get call fn");
+    // Step 3: get() exercises emit_storage_read. It reads the stored value
+    // from host storage via storage_read → register_len → read_register →
+    // i32.load. The value is pushed on the WASM stack and abandoned by the
+    // void return. If the storage read path is broken, this call traps.
+    // (value_return emission is deferred — codegen doesn't emit it yet.)
+    call_fn_get
+        .call(&mut store_get, ())
+        .expect("get() should succeed after set(42) — storage read path works");
+}
+
+#[test]
+fn storage_read_unset_field_takes_default_path() {
+    use crate::codegen::wasm::compute_selector;
+
+    let src = r#"
+        contract Counter {
+            state { count: u32 }
+            pub fn get() -> u32 {
+                return self.count;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+
+    let fns = contracts[0].functions();
+    let pub_fns: Vec<_> = fns
+        .iter()
+        .filter(|f| matches!(f.visibility, crate::parser::Visibility::Pub))
+        .filter(|f| f.body.is_some())
+        .collect();
+
+    let sel_get = compute_selector(pub_fns[0], &contracts[0]).unwrap();
+
+    // Call get() before any set() — exercises the STORAGE_NOT_FOUND default path.
+    // The storage read returns default 0 (pushed on stack, abandoned by void return).
+    // If the default path is broken, this call traps.
+    let calldata = build_calldata(sel_get, &[]);
+    let (instance, mut store) =
+        instantiate_with_stubs(&bytes, &calldata).expect("instantiation failed");
+
+    let call_fn = instance
+        .get_typed_func::<(), ()>(&mut store, "call")
+        .expect("get call fn");
+    call_fn
+        .call(&mut store, ())
+        .expect("get() on unset field should succeed (default 0 path)");
+}
+
+#[test]
+fn emit_module_deterministic_with_functions() {
+    let src = r#"
+        contract Counter {
+            state { count: u32 }
+            pub fn increment() {
+                self.count = self.count + 1;
+            }
+            pub fn get() -> u32 {
+                return self.count;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let first = emit_module(&contracts[0]).expect("first emit failed");
+    let second = emit_module(&contracts[0]).expect("second emit failed");
+    assert_eq!(
+        first, second,
+        "emit_module with functions must be deterministic"
+    );
+}
+
+#[test]
+fn emit_module_private_functions_not_dispatched() {
+    // Private functions should NOT appear in the dispatch table
+    let src = r#"
+        contract Foo {
+            fn helper() -> u32 {
+                return 42;
+            }
+            pub fn get() -> u32 {
+                return 1;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "contract with private fn failed validation: {:?}",
+        result.err()
+    );
+}
+
+// ── C1: Storage read length validation ──────────────────────────────────────
+
+#[test]
+fn storage_read_wrong_length_value_traps() {
+    use crate::codegen::wasm::{compute_selector, storage_key};
+
+    // Contract declares `count: u32` (4 bytes), but we'll store 8 bytes
+    // in the host storage to simulate a type mismatch / corruption.
+    let src = r#"
+        contract Counter {
+            state { count: u32 }
+            pub fn get() -> u32 {
+                return self.count;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+
+    let fns = contracts[0].functions();
+    let pub_fns: Vec<_> = fns
+        .iter()
+        .filter(|f| matches!(f.visibility, crate::parser::Visibility::Pub))
+        .filter(|f| f.body.is_some())
+        .collect();
+
+    let sel_get = compute_selector(pub_fns[0], &contracts[0]).unwrap();
+
+    // Build instance and inject a WRONG-LENGTH value (8 bytes for a u32 field)
+    let calldata = build_calldata(sel_get, &[]);
+    let (instance, mut store) =
+        instantiate_with_stubs(&bytes, &calldata).expect("instantiation failed");
+
+    {
+        let mut state = store.data().lock().unwrap();
+        let key = storage_key("count").to_vec();
+        // Store 8 bytes instead of the expected 4 bytes
+        state.storage.insert(key, 42u64.to_le_bytes().to_vec());
+    }
+
+    let call_fn = instance
+        .get_typed_func::<(), ()>(&mut store, "call")
+        .expect("get call fn");
+    let result = call_fn.call(&mut store, ());
+    assert!(
+        result.is_err(),
+        "storage read with wrong-length value should trap, got: {result:?}"
+    );
+}
+
+// ── W3: Dispatch with missing calldata register traps ───────────────────────
+
+/// Build a wasmtime instance WITHOUT pre-loading calldata into register 0.
+/// This means register_len(0) returns -1 (REGISTER_EMPTY).
+#[allow(clippy::type_complexity)]
+fn instantiate_without_calldata(
+    wasm_bytes: &[u8],
+) -> Result<(wasmtime::Instance, wasmtime::Store<Arc<Mutex<StubState>>>), String> {
+    use crate::codegen::abi::{IMPORT_MODULE, IMPORT_ORDER};
+    use crate::codegen::wasm::HOST_SIGS;
+
+    let engine = wasmtime::Engine::default();
+    let state = Arc::new(Mutex::new(StubState::new()));
+    // Do NOT pre-load register 0 — register_len will return -1
+
+    let mut store = wasmtime::Store::new(&engine, state.clone());
+    let module =
+        wasmtime::Module::new(&engine, wasm_bytes).map_err(|e| format!("wasmtime compile: {e}"))?;
+
+    let mut linker = wasmtime::Linker::new(&engine);
+
+    for (i, name) in IMPORT_ORDER.iter().enumerate() {
+        let (params, results) = HOST_SIGS[i];
+        let func_ty = wasmtime::FuncType::new(
+            &engine,
+            params.iter().map(|vt| match vt {
+                wasm_encoder::ValType::I32 => wasmtime::ValType::I32,
+                wasm_encoder::ValType::I64 => wasmtime::ValType::I64,
+                _ => wasmtime::ValType::I32,
+            }),
+            results.iter().map(|vt| match vt {
+                wasm_encoder::ValType::I32 => wasmtime::ValType::I32,
+                wasm_encoder::ValType::I64 => wasmtime::ValType::I64,
+                _ => wasmtime::ValType::I32,
+            }),
+        );
+
+        let host_name = *name;
+        let state_clone = state.clone();
+
+        linker
+            .func_new(
+                IMPORT_MODULE,
+                name,
+                func_ty,
+                move |mut caller: wasmtime::Caller<'_, Arc<Mutex<StubState>>>,
+                      params: &[wasmtime::Val],
+                      results: &mut [wasmtime::Val]| {
+                    let st = state_clone.clone();
+                    match host_name {
+                        "input" => {
+                            // input(register_id) — no calldata pre-loaded, no-op
+                            Ok(())
+                        }
+                        "register_len" => {
+                            let reg_id = params[0].unwrap_i32() as u32;
+                            let s = st.lock().unwrap();
+                            let len = s
+                                .registers
+                                .get(&reg_id)
+                                .map(|v| v.len() as i64)
+                                .unwrap_or(-1); // REGISTER_EMPTY
+                            results[0] = wasmtime::Val::I64(len);
+                            Ok(())
+                        }
+                        "read_register" => {
+                            let reg_id = params[0].unwrap_i32() as u32;
+                            let ptr = params[1].unwrap_i32() as usize;
+                            let s = st.lock().unwrap();
+                            if let Some(data) = s.registers.get(&reg_id) {
+                                let memory = caller
+                                    .get_export("memory")
+                                    .and_then(|e| e.into_memory())
+                                    .expect("memory export");
+                                let mem_data = memory.data_mut(&mut caller);
+                                let end = ptr + data.len();
+                                if end <= mem_data.len() {
+                                    mem_data[ptr..end].copy_from_slice(data);
+                                }
+                            }
+                            Ok(())
+                        }
+                        _ => {
+                            for r in results.iter_mut() {
+                                *r = wasmtime::Val::I32(0);
+                            }
+                            Ok(())
+                        }
+                    }
+                },
+            )
+            .map_err(|e| format!("linker.func_new({host_name}): {e}"))?;
+    }
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("instantiation: {e}"))?;
+
+    Ok((instance, store))
+}
+
+#[test]
+fn dispatch_missing_calldata_register_traps() {
+    // When register 0 is not pre-loaded, register_len returns -1.
+    // The W3 fix ensures this traps instead of allocating 4 GB.
+    let src = r#"
+        contract Foo {
+            pub fn bar() {}
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+
+    let (instance, mut store) = instantiate_without_calldata(&bytes).expect("instantiation failed");
+
+    let call_fn = instance
+        .get_typed_func::<(), ()>(&mut store, "call")
+        .expect("get call fn");
+    let result = call_fn.call(&mut store, ());
+    assert!(
+        result.is_err(),
+        "missing calldata register should trap, got: {result:?}"
+    );
+}

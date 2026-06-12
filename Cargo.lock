@@ -2306,6 +2306,7 @@ name = "lemma-lang"
 version = "0.1.0"
 dependencies = [
  "bech32",
+ "blake3",
  "lemma-core",
  "serde",
  "thiserror 1.0.69",

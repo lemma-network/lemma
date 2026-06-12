@@ -4,7 +4,8 @@
 //! lowering (literals, checked arithmetic, comparison, local variable read)
 //! was added in P3·Step 6c. Statement and control-flow lowering (let, assign,
 //! if/else, while, loop, break, continue, return, assert, revert) was added
-//! in P3·Step 6d. Function dispatch + storage host calls are 6e.
+//! in P3·Step 6d. Function dispatch, storage access, and production wiring
+//! were added in P3·Step 6e.
 //!
 //! ## Backend choice
 //!
@@ -41,14 +42,17 @@ use crate::codegen::types::{is_i64, is_signed, is_sub_word, wasm_valtype};
 use crate::error::LangError;
 use crate::lexer::token::Span;
 use crate::parser::expr_span;
-use crate::parser::{AssignOp, BinaryOp, Expr, Literal, Pattern, Stmt, UnaryOp};
-use crate::type_checker::typed_contract::TypedContract;
-use crate::type_checker::types::ResolvedType;
+use crate::parser::{AssignOp, BinaryOp, Expr, Literal, Pattern, Stmt, UnaryOp, Visibility};
+use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
+use crate::type_checker::types::{ResolvedType, SymbolSig};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Initial linear memory size in pages (1 page = 64 KiB).
-const INITIAL_MEMORY_PAGES: u64 = 1;
+///
+/// Two pages: page 0 for static data, page 1+ for the bump heap.
+/// The bump allocator starts at HEAP_BASE_ADDR (page 1 start = 65536).
+const INITIAL_MEMORY_PAGES: u64 = 2;
 
 /// Bump-heap base address — first byte past the static data segment.
 ///
@@ -102,18 +106,148 @@ pub(crate) const HOST_SIGS: &[(&[ValType], &[ValType])] = &[
     (&[ValType::I32, ValType::I32], &[]),
 ];
 
+// ─── Function selector + storage key computation ─────────────────────────────
+
+/// Compute the 4-byte function selector for dispatch.
+///
+/// Selector = first 4 bytes of `blake3(fn_name + "(" + param_types + ")")`,
+/// interpreted as a **little-endian** u32 (matching WASM `i32.load` native
+/// endianness — AGENTS §7.1 determinism).
+///
+/// Example: `transfer(Address,u128)` → blake3("transfer(Address,u128)")[0..4] as LE u32.
+///
+/// This is Lemma-native (blake3, not keccak like Solidity). Deterministic.
+pub(crate) fn compute_selector(
+    func: &ContractFunction<'_>,
+    contract: &TypedContract<'_>,
+) -> Result<u32, LangError> {
+    let mut sig = func.name.to_string();
+    sig.push('(');
+
+    // Use resolved param types from the function signature for canonical names.
+    // The FnSig has (name, ResolvedType, has_default) tuples.
+    // If we can't get canonical param types from the type checker, this is
+    // an internal invariant violation — codegen must not emit a selector
+    // from Debug output (ABI-fragile).
+    let param_types: Vec<String> = if let Some(sym_id) = func.symbol_id {
+        if let Some(SymbolSig::Function(fn_sig)) = contract.sig(sym_id) {
+            fn_sig
+                .params
+                .iter()
+                .map(|(_, ty, _)| type_canonical_name(ty))
+                .collect()
+        } else {
+            return Err(LangError::Codegen {
+                message: format!(
+                    "cannot compute selector for function '{}': no resolved type signature",
+                    func.name
+                ),
+            });
+        }
+    } else {
+        return Err(LangError::Codegen {
+            message: format!(
+                "cannot compute selector for function '{}': no resolved type signature",
+                func.name
+            ),
+        });
+    };
+
+    sig.push_str(&param_types.join(","));
+    sig.push(')');
+
+    let hash = blake3::hash(sig.as_bytes());
+    let bytes = hash.as_bytes();
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// Canonical type name for selector signature computation.
+///
+/// Maps `ResolvedType` to a stable string used in the blake3 hash input.
+/// Must be deterministic and consistent across validators (AGENTS §7.1).
+fn type_canonical_name(ty: &ResolvedType) -> String {
+    match ty {
+        ResolvedType::Bool => "bool".into(),
+        ResolvedType::U8 => "u8".into(),
+        ResolvedType::U16 => "u16".into(),
+        ResolvedType::U32 => "u32".into(),
+        ResolvedType::U64 => "u64".into(),
+        ResolvedType::U128 => "u128".into(),
+        ResolvedType::U256 => "u256".into(),
+        ResolvedType::I8 => "i8".into(),
+        ResolvedType::I16 => "i16".into(),
+        ResolvedType::I32 => "i32".into(),
+        ResolvedType::I64 => "i64".into(),
+        ResolvedType::I128 => "i128".into(),
+        ResolvedType::I256 => "i256".into(),
+        ResolvedType::AddressTy => "Address".into(),
+        ResolvedType::StringTy => "string".into(),
+        ResolvedType::Bytes => "bytes".into(),
+        ResolvedType::HashTy => "Hash".into(),
+        // For compound types, use display_name (deterministic)
+        other => other.display_name(),
+    }
+}
+
+/// Derive the 32-byte storage key for a state field.
+///
+/// Key = blake3(field_name).as_bytes() (full 32 bytes).
+/// Deterministic, consistent across validators (AGENTS §7.1).
+pub(crate) fn storage_key(field_name: &str) -> [u8; 32] {
+    let hash = blake3::hash(field_name.as_bytes());
+    *hash.as_bytes()
+}
+
+/// Byte width of a resolved type in storage encoding.
+///
+/// Returns the number of bytes needed to store a value of this type in
+/// linear memory for storage read/write operations.
+fn storage_byte_width(ty: &ResolvedType) -> Result<u32, LangError> {
+    match ty {
+        ResolvedType::Bool => Ok(1),
+        ResolvedType::U8 | ResolvedType::I8 => Err(LangError::Codegen {
+            message: "sub-word types (u8/i8) in storage not yet implemented (M1)".into(),
+        }),
+        ResolvedType::U16 | ResolvedType::I16 => Err(LangError::Codegen {
+            message: "sub-word types (u16/i16) in storage not yet implemented (M1)".into(),
+        }),
+        ResolvedType::U32 | ResolvedType::I32 => Ok(4),
+        ResolvedType::U64 | ResolvedType::I64 => Ok(8),
+        _ => Err(LangError::Codegen {
+            message: format!(
+                "storage encoding for type {} not yet implemented",
+                ty.display_name()
+            ),
+        }),
+    }
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Emit a valid WASM module for the given contract.
 ///
 /// Builds the full section layout: Type → Import → Function → Memory →
-/// Global → Export → Code. Expression lowering (P3·Step 6c) handles
-/// literals, checked arithmetic, comparisons, and local variable reads.
+/// Global → Export → Code. Includes:
+/// - Expression lowering (P3·Step 6c): literals, checked arithmetic, comparisons
+/// - Statement/control flow lowering (P3·Step 6d): let, assign, if/else, while, etc.
+/// - Function dispatch + storage access (P3·Step 6e): selector-based dispatch in
+///   the `call` entry point, `alloc` bump allocator, storage read/write via host
+///   imports, per-function body lowering
+///
+/// ## Function layout
+///
+/// ```text
+/// WASM function indices:
+///   0..13  — host imports (IMPORT_ORDER)
+///   14     — call (entry point, dispatch prologue)
+///   15     — alloc (internal bump allocator)
+///   16..N  — contract functions (one per pub/external fn with a body)
+/// ```
 ///
 /// # Returns
 ///
 /// `Ok(Vec<u8>)` — a valid WebAssembly binary, or
-/// `Err(LangError::Codegen)` if expression lowering or section assembly fails.
+/// `Err(LangError::Codegen)` if lowering or section assembly fails.
 ///
 /// # Determinism
 ///
@@ -121,12 +255,41 @@ pub(crate) const HOST_SIGS: &[(&[ValType], &[ValType])] = &[
 /// output. See module-level doc for the determinism guarantee.
 // consumer: codegen::compile orchestrator (P3·Step 6a+); lib.rs pipeline (P3·Step 6j)
 #[allow(dead_code)]
-pub(crate) fn emit_module(_contract: &TypedContract<'_>) -> Result<Vec<u8>, LangError> {
+pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangError> {
     let mut module = Module::new();
 
+    // ── Collect dispatchable functions ─────────────────────────────────────
+    // Only pub/external functions with bodies are dispatchable.
+    let all_fns = contract.functions();
+    let pub_fns: Vec<&ContractFunction<'_>> = all_fns
+        .iter()
+        .filter(|f| matches!(f.visibility, Visibility::Pub | Visibility::External))
+        .filter(|f| f.body.is_some())
+        .collect();
+
+    // Compute selectors for each dispatchable function.
+    let mut selectors: Vec<(u32, usize)> = Vec::new();
+    for (i, f) in pub_fns.iter().enumerate() {
+        let sel = compute_selector(f, contract)?;
+        selectors.push((sel, i));
+    }
+
+    // Collect state fields for storage key computation.
+    let state_fields = contract.state_fields();
+
+    // ── Function index layout ─────────────────────────────────────────────
+    // call_idx  = HOST_IMPORT_COUNT     (first defined function)
+    // alloc_idx = HOST_IMPORT_COUNT + 1
+    // fn_base   = HOST_IMPORT_COUNT + 2 (first contract function)
+    let call_idx = HOST_IMPORT_COUNT;
+    let alloc_idx = HOST_IMPORT_COUNT + 1;
+    let fn_base = HOST_IMPORT_COUNT + 2;
+
     // ── 1. Type section ───────────────────────────────────────────────────
-    // First: one type per host function signature (indices 0..HOST_IMPORT_COUNT-1).
-    // Then: the `call` entry point type (index HOST_IMPORT_COUNT).
+    // Types 0..13: host function signatures
+    // Type 14: call entry point [] -> []
+    // Type 15: alloc (i32) -> (i32)
+    // Types 16..N: one per contract function (params → [])
     let mut types = TypeSection::new();
     for (params, results) in HOST_SIGS {
         types
@@ -135,11 +298,24 @@ pub(crate) fn emit_module(_contract: &TypedContract<'_>) -> Result<Vec<u8>, Lang
     }
     // call entry point: [] -> []
     types.ty().function([], []);
+    // alloc: (i32) -> (i32)
+    types.ty().function([ValType::I32], [ValType::I32]);
+    // Contract function types: each takes its params as WASM values, returns void.
+    // Return values are communicated via value_return host call, not WASM return.
+    for f in &pub_fns {
+        let mut param_valtypes = Vec::new();
+        if let Some(sym_id) = f.symbol_id {
+            if let Some(SymbolSig::Function(fn_sig)) = contract.sig(sym_id) {
+                for (_, ty, _) in &fn_sig.params {
+                    param_valtypes.push(wasm_valtype(ty)?);
+                }
+            }
+        }
+        types.ty().function(param_valtypes.iter().copied(), []);
+    }
     module.section(&types);
 
     // ── 2. Import section ─────────────────────────────────────────────────
-    // Import each host function in IMPORT_ORDER. Each import references its
-    // type index (position in HOST_SIGS = position in IMPORT_ORDER).
     let mut imports = ImportSection::new();
     for (i, name) in IMPORT_ORDER.iter().enumerate() {
         imports.import(IMPORT_MODULE, name, EntityType::Function(i as u32));
@@ -147,15 +323,16 @@ pub(crate) fn emit_module(_contract: &TypedContract<'_>) -> Result<Vec<u8>, Lang
     module.section(&imports);
 
     // ── 3. Function section ───────────────────────────────────────────────
-    // Declare the `call` entry point. Its type index is HOST_IMPORT_COUNT
-    // (the type we added after all host function types).
-    let call_type_index = HOST_IMPORT_COUNT;
+    // Declare: call, alloc, then each contract function.
     let mut functions = FunctionSection::new();
-    functions.function(call_type_index);
+    functions.function(call_idx); // call type index = HOST_IMPORT_COUNT
+    functions.function(call_idx + 1); // alloc type index = HOST_IMPORT_COUNT + 1
+    for (i, _) in pub_fns.iter().enumerate() {
+        functions.function(fn_base + i as u32); // type index = fn_base + i
+    }
     module.section(&functions);
 
     // ── 4. Memory section ─────────────────────────────────────────────────
-    // One page of linear memory (64 KiB). Exported as "memory" for host access.
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
         minimum: INITIAL_MEMORY_PAGES,
@@ -167,9 +344,17 @@ pub(crate) fn emit_module(_contract: &TypedContract<'_>) -> Result<Vec<u8>, Lang
     module.section(&memories);
 
     // ── 5. Global section ─────────────────────────────────────────────────
-    // __heap_base: mutable i32 global = HEAP_BASE_ADDR (page 1 start).
-    // Exported so the guest bump allocator knows where to start.
+    // Global 0: __heap_base (exported, mutable) — base of bump heap
+    // Global 1: __heap_ptr (NOT exported, mutable) — current allocation pointer
     let mut globals = GlobalSection::new();
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(HEAP_BASE_ADDR),
+    );
     globals.global(
         GlobalType {
             val_type: ValType::I32,
@@ -181,27 +366,298 @@ pub(crate) fn emit_module(_contract: &TypedContract<'_>) -> Result<Vec<u8>, Lang
     module.section(&globals);
 
     // ── 6. Export section ─────────────────────────────────────────────────
-    // Export "call" (entry point), "memory", and "__heap_base".
-    let call_func_index = HOST_IMPORT_COUNT; // first defined function
     let mut exports = ExportSection::new();
-    exports.export(abi::ENTRY_POINT, ExportKind::Func, call_func_index);
+    exports.export(abi::ENTRY_POINT, ExportKind::Func, call_idx);
     exports.export(abi::MEMORY_EXPORT, ExportKind::Memory, 0);
     exports.export(abi::HEAP_BASE_GLOBAL, ExportKind::Global, 0);
     module.section(&exports);
 
     // ── 7. Code section ───────────────────────────────────────────────────
-    // Build the `call` function body. The entry point body is still empty
-    // (dispatch logic is 6e). Expression lowering (6c) and statement/control
-    // flow lowering (6d) are tested via dedicated test helpers
-    // (emit_test_expr_module, emit_test_stmt_module). Production wiring of
-    // function bodies into the call entry point lands in 6e.
     let mut codes = CodeSection::new();
-    let mut call_fn = Function::new(vec![]);
-    call_fn.instruction(&Instruction::End);
-    codes.function(&call_fn);
+
+    // 7a. call entry point — dispatch prologue
+    let call_body = emit_dispatch_prologue(&selectors, &pub_fns, contract, alloc_idx, fn_base)?;
+    codes.function(&call_body);
+
+    // 7b. alloc — bump allocator
+    let alloc_body = emit_alloc_body();
+    codes.function(&alloc_body);
+
+    // 7c. Contract function bodies
+    for (i, f) in pub_fns.iter().enumerate() {
+        let fn_body = emit_contract_fn_body(f, contract, &state_fields, alloc_idx)?;
+        codes.function(&fn_body);
+        let _ = i; // suppress unused warning
+    }
+
     module.section(&codes);
 
     Ok(module.finish())
+}
+
+/// Emit the bump allocator function body.
+///
+/// ```wasm
+/// ;; alloc(size: i32) -> ptr: i32
+/// ;; ptr = global.get $heap_ptr
+/// ;; global.set $heap_ptr (ptr + size)
+/// ;; return ptr
+/// ```
+///
+/// Global 1 = `__heap_ptr` (mutable, starts at HEAP_BASE_ADDR).
+///
+/// ## Limitations (intentional-deferred)
+///
+/// Bump allocator: alloc(size) -> ptr. No overflow/bounds check.
+/// If __heap_ptr runs past the memory boundary, the next i32.store/i64.store
+/// traps on out-of-bounds — deterministic but implicit, not a designed limit.
+/// Storage key buffers (32 bytes per storage_read/write) are allocated per-op
+/// and never reused — a contract with many storage ops exhausts the heap
+/// faster than expected.
+///
+/// Intentional-deferred: memory.grow + key-buffer reuse land after 6e
+/// (tracked in living-notes Technical Debt).
+fn emit_alloc_body() -> Function {
+    let mut f = Function::new(vec![]);
+    // ptr = global.get 1 (__heap_ptr) — this is the return value
+    f.instruction(&Instruction::GlobalGet(1));
+    // __heap_ptr = __heap_ptr + size
+    f.instruction(&Instruction::GlobalGet(1));
+    f.instruction(&Instruction::LocalGet(0)); // size param
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::GlobalSet(1));
+    // ptr is already on the stack from the first GlobalGet
+    f.instruction(&Instruction::End);
+    f
+}
+
+/// Emit the `call` entry point dispatch prologue.
+///
+/// Reads calldata via host imports, extracts the 4-byte selector, and
+/// dispatches to the correct contract function. Unknown selectors trap.
+///
+/// ## Calldata layout
+///
+/// ```text
+/// [selector: 4 bytes LE u32] [arg0] [arg1] ...
+/// ```
+fn emit_dispatch_prologue(
+    selectors: &[(u32, usize)],
+    pub_fns: &[&ContractFunction<'_>],
+    contract: &TypedContract<'_>,
+    alloc_idx: u32,
+    fn_base: u32,
+) -> Result<Function, LangError> {
+    // Locals: cd_len_i64 (i64), cd_len (i32), cd_ptr (i32), selector (i32)
+    let mut f = Function::new(vec![
+        (1, ValType::I64), // local 0: cd_len_i64 (raw register_len result, for sentinel check)
+        (1, ValType::I32), // local 1: cd_len
+        (1, ValType::I32), // local 2: cd_ptr
+        (1, ValType::I32), // local 3: selector
+    ]);
+
+    // If no dispatchable functions, just return (empty contract)
+    if selectors.is_empty() {
+        f.instruction(&Instruction::End);
+        return Ok(f);
+    }
+
+    // input(REG_CALLDATA=0) — load calldata into register 0
+    f.instruction(&Instruction::I32Const(abi::REG_CALLDATA as i32));
+    f.instruction(&Instruction::Call(5)); // input = index 5
+
+    // register_len(0) → i64
+    // W3 fix: compare as i64 BEFORE wrapping to i32. register_len returns -1
+    // (REGISTER_EMPTY) when the register is unset. Wrapping -1i64 to i32 gives
+    // 0xFFFFFFFF which passes the `< 4` unsigned check — a 4 GB allocation.
+    // Signed i64 comparison catches -1 < 4 correctly.
+    f.instruction(&Instruction::I32Const(abi::REG_CALLDATA as i32));
+    f.instruction(&Instruction::Call(6)); // register_len = index 6
+    f.instruction(&Instruction::LocalTee(0)); // cd_len_i64 (i64)
+    f.instruction(&Instruction::I64Const(4));
+    f.instruction(&Instruction::I64LtS); // signed: -1 < 4 = true
+    f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+    f.instruction(&Instruction::Unreachable); // trap: calldata too short or missing
+    f.instruction(&Instruction::End);
+
+    // Now safe to truncate to i32 (we know cd_len_i64 >= 4)
+    f.instruction(&Instruction::LocalGet(0)); // cd_len_i64
+    f.instruction(&Instruction::I32WrapI64);
+    f.instruction(&Instruction::LocalSet(1)); // cd_len (i32)
+
+    // alloc(cd_len) → cd_ptr
+    f.instruction(&Instruction::LocalGet(1));
+    f.instruction(&Instruction::Call(alloc_idx));
+    f.instruction(&Instruction::LocalSet(2)); // cd_ptr
+
+    // read_register(REG_CALLDATA, cd_ptr) — copy calldata to memory
+    f.instruction(&Instruction::I32Const(abi::REG_CALLDATA as i32));
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::Call(7)); // read_register = index 7
+
+    // selector = i32.load(cd_ptr) — first 4 bytes as LE u32
+    f.instruction(&Instruction::LocalGet(2));
+    f.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+        offset: 0,
+        align: 2, // 4-byte alignment
+        memory_index: 0,
+    }));
+    f.instruction(&Instruction::LocalSet(3)); // selector
+
+    // Dispatch: if/else chain comparing selector to each function's selector
+    for (sel, fn_idx) in selectors {
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(*sel as i32));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+
+        // Decode args from calldata and call the function
+        let func = pub_fns[*fn_idx];
+        let param_types = get_fn_param_types(func, contract)?;
+        let mut offset: u32 = 4; // skip selector
+
+        for ty in &param_types {
+            f.instruction(&Instruction::LocalGet(2)); // cd_ptr
+            match ty {
+                ValType::I32 => {
+                    f.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                        offset: offset as u64,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+                    offset = offset.checked_add(4).ok_or_else(|| LangError::Codegen {
+                        message: "calldata offset overflow".into(),
+                    })?;
+                }
+                ValType::I64 => {
+                    f.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                        offset: offset as u64,
+                        align: 3,
+                        memory_index: 0,
+                    }));
+                    offset = offset.checked_add(8).ok_or_else(|| LangError::Codegen {
+                        message: "calldata offset overflow".into(),
+                    })?;
+                }
+                _ => {
+                    return Err(LangError::Codegen {
+                        message: format!("unsupported WASM param type in dispatch: {ty:?}"),
+                    });
+                }
+            }
+        }
+
+        // Call the contract function
+        let wasm_fn_idx = fn_base + *fn_idx as u32;
+        f.instruction(&Instruction::Call(wasm_fn_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+    }
+
+    // Unknown selector → trap
+    f.instruction(&Instruction::Unreachable);
+    f.instruction(&Instruction::End);
+    Ok(f)
+}
+
+/// Get the WASM param types for a contract function from its resolved signature.
+fn get_fn_param_types(
+    func: &ContractFunction<'_>,
+    contract: &TypedContract<'_>,
+) -> Result<Vec<ValType>, LangError> {
+    let mut param_valtypes = Vec::new();
+    if let Some(sym_id) = func.symbol_id {
+        if let Some(SymbolSig::Function(fn_sig)) = contract.sig(sym_id) {
+            for (_, ty, _) in &fn_sig.params {
+                param_valtypes.push(wasm_valtype(ty)?);
+            }
+        }
+    }
+    Ok(param_valtypes)
+}
+
+/// Emit a contract function body using the two-pass approach.
+///
+/// Pass 1: lower the function body to discover local allocations.
+/// Pass 2: rebuild with correct local declarations.
+fn emit_contract_fn_body(
+    func: &ContractFunction<'_>,
+    contract: &TypedContract<'_>,
+    state_fields: &[crate::type_checker::typed_contract::StateField<'_>],
+    alloc_idx: u32,
+) -> Result<Function, LangError> {
+    let body = func.body.ok_or_else(|| LangError::Codegen {
+        message: format!("function '{}' has no body", func.name),
+    })?;
+
+    // Build param list: (name, ValType) from the resolved signature
+    let mut params: Vec<(String, ValType)> = Vec::new();
+    if let Some(sym_id) = func.symbol_id {
+        if let Some(SymbolSig::Function(fn_sig)) = contract.sig(sym_id) {
+            for (name, ty, _) in &fn_sig.params {
+                params.push((name.clone(), wasm_valtype(ty)?));
+            }
+        }
+    }
+
+    // Build state field map for storage access: field_name → (ResolvedType, storage_key)
+    let mut field_map: BTreeMap<String, (&ResolvedType, [u8; 32])> = BTreeMap::new();
+    for sf in state_fields {
+        if !sf.is_immutable {
+            field_map.insert(sf.name.to_string(), (sf.ty, storage_key(sf.name)));
+        }
+    }
+
+    // Pass 1: emit to discover locals
+    let mut ctx1 = LowerCtx::new(contract, &params);
+    ctx1.alloc_fn_idx = alloc_idx;
+    ctx1.state_fields = field_map.clone();
+    ctx1.emit_block(body)?;
+    ctx1.func.instruction(&Instruction::End);
+
+    let local_count = ctx1.local_types.len();
+    let all_locals: Vec<(u32, ValType)> = ctx1.local_types;
+    let discovered_locals = ctx1.locals.clone();
+
+    // Pass 2: rebuild with correct local declarations
+    let mut ctx2 = LowerCtx {
+        contract,
+        func: Function::new(all_locals),
+        locals: {
+            let mut m = BTreeMap::new();
+            for (i, (name, _)) in params.iter().enumerate() {
+                m.insert(name.clone(), i as u32);
+            }
+            m
+        },
+        next_local: params.len() as u32,
+        local_types: Vec::new(),
+        loop_stack: Vec::new(),
+        block_depth: 0,
+        alloc_fn_idx: alloc_idx,
+        state_fields: field_map,
+    };
+
+    ctx2.emit_block(body)?;
+    ctx2.func.instruction(&Instruction::End);
+
+    // Verify pass consistency
+    if ctx2.next_local != params.len() as u32 + local_count as u32 {
+        return Err(LangError::Codegen {
+            message: format!(
+                "two-pass desync: pass-2 allocated {} locals but pass-1 allocated {}",
+                ctx2.next_local - params.len() as u32,
+                local_count,
+            ),
+        });
+    }
+    if ctx2.locals != discovered_locals {
+        return Err(LangError::Codegen {
+            message: "two-pass desync: named local map differs between passes".into(),
+        });
+    }
+
+    Ok(ctx2.func)
 }
 
 // ─── LoopCtx — break/continue label tracking ─────────────────────────────────
@@ -240,6 +696,12 @@ struct LoopCtx {
 /// `loop_stack` tracks nested loop contexts for break/continue resolution.
 /// `block_depth` tracks the current WASM block nesting depth (incremented
 /// by `block`/`loop`/`if`, decremented by `end`).
+///
+/// ## Storage access (P3·Step 6e)
+///
+/// `state_fields` maps field names to their resolved type and 32-byte storage
+/// key (blake3 hash of the field name). `alloc_fn_idx` is the WASM function
+/// index of the internal bump allocator.
 // consumer: emit_test_expr_module (P3·Step 6c tests); emit_module (P3·Step 6d/6e)
 #[allow(dead_code)]
 struct LowerCtx<'a> {
@@ -260,6 +722,12 @@ struct LowerCtx<'a> {
     loop_stack: Vec<LoopCtx>,
     /// Current WASM block nesting depth (incremented by block/loop/if).
     block_depth: u32,
+    /// WASM function index of the internal bump allocator.
+    /// Set to 0 for test helpers that don't use storage.
+    alloc_fn_idx: u32,
+    /// State field map: field_name → (resolved_type, 32-byte storage key).
+    /// BTreeMap for deterministic iteration (AGENTS §7.1).
+    state_fields: BTreeMap<String, (&'a ResolvedType, [u8; 32])>,
 }
 
 #[allow(dead_code)]
@@ -282,6 +750,8 @@ impl<'a> LowerCtx<'a> {
             local_types: Vec::new(),
             loop_stack: Vec::new(),
             block_depth: 0,
+            alloc_fn_idx: 0,
+            state_fields: BTreeMap::new(),
         }
     }
 
@@ -307,6 +777,43 @@ impl<'a> LowerCtx<'a> {
                     span.line, span.col
                 ),
             })
+    }
+
+    /// Resolve the type of an expression, with fallback for `self.field`.
+    ///
+    /// The type checker may store `Unknown` for `self.field` member access
+    /// in contract context (the inference pass handles struct fields but not
+    /// contract state fields). This method falls back to the state field map
+    /// when the expression is `Expr::Member(self, field_name)`.
+    fn resolve_expr_type(&self, expr: &Expr) -> Result<ResolvedType, LangError> {
+        // Try the type checker's span-based map first
+        let span = expr_span(expr);
+        if let Some(ty) = self.contract.type_of(&span) {
+            // If the type checker resolved it to a concrete type, use it.
+            // Unknown means the type checker couldn't resolve it — fall through.
+            if *ty != ResolvedType::Unknown {
+                return Ok(ty.clone());
+            }
+        }
+
+        // Fallback: if this is self.field, look up from state_fields
+        if let Expr::Member(receiver, field, _) = expr {
+            if let Expr::Ident(name, _) = receiver.as_ref() {
+                if name == "self" {
+                    if let Some((ty, _)) = self.state_fields.get(field.as_str()) {
+                        return Ok((*ty).clone());
+                    }
+                }
+            }
+        }
+
+        // No type found
+        Err(LangError::Codegen {
+            message: format!(
+                "no resolved type for expression at line {} col {}",
+                span.line, span.col
+            ),
+        })
     }
 
     /// Emit WASM instructions for an expression.
@@ -336,6 +843,18 @@ impl<'a> LowerCtx<'a> {
             Expr::Binary(op, lhs, rhs, span) => self.emit_binary(op, lhs, rhs, span),
 
             Expr::Unary(op, inner, span) => self.emit_unary(op, inner, span),
+
+            // self.field → storage read (P3·Step 6e)
+            Expr::Member(receiver, field, _span) => {
+                if let Expr::Ident(name, _) = receiver.as_ref() {
+                    if name == "self" {
+                        return self.emit_storage_read(field);
+                    }
+                }
+                Err(LangError::Codegen {
+                    message: "member access on non-self receiver not yet implemented".into(),
+                })
+            }
 
             _ => Err(LangError::Codegen {
                 message: format!(
@@ -696,10 +1215,25 @@ impl<'a> LowerCtx<'a> {
                 }
                 Ok(())
             }
-            // self.field assignment → 6e (storage write)
+            // self.field assignment → storage write (P3·Step 6e)
+            Expr::Member(receiver, field, _) => {
+                if let Expr::Ident(name, _) = receiver.as_ref() {
+                    if name == "self" {
+                        if !matches!(op, AssignOp::Assign) {
+                            return Err(LangError::Codegen {
+                                message: "compound assignment to self.field not yet implemented"
+                                    .into(),
+                            });
+                        }
+                        return self.emit_storage_write(field, value);
+                    }
+                }
+                Err(LangError::Codegen {
+                    message: "assignment to non-self member not yet implemented".into(),
+                })
+            }
             _ => Err(LangError::Codegen {
-                message: "non-local assignment (self.field, index) not yet implemented in codegen"
-                    .into(),
+                message: "non-local assignment (index) not yet implemented in codegen".into(),
             }),
         }
     }
@@ -781,6 +1315,271 @@ impl<'a> LowerCtx<'a> {
         Ok(())
     }
 
+    // ── Storage access (P3·Step 6e) ──────────────────────────────────────
+
+    /// Emit WASM instructions to read a state field from storage.
+    ///
+    /// Sequence:
+    /// 1. Allocate 32 bytes for the storage key, write key bytes to memory
+    /// 2. Call `storage_read(key_ptr, 32, REG_SCRATCH)` → status (i32)
+    /// 3. If status == STORAGE_NOT_FOUND: push default value (0)
+    /// 4. Else: read value from register into memory, load as typed value
+    fn emit_storage_read(&mut self, field_name: &str) -> Result<(), LangError> {
+        let (ty, key_bytes) =
+            self.state_fields
+                .get(field_name)
+                .ok_or_else(|| LangError::Codegen {
+                    message: format!("unknown state field: {field_name}"),
+                })?;
+        let ty = (*ty).clone();
+        let key_bytes = *key_bytes;
+        let byte_width = storage_byte_width(&ty)?;
+
+        // Allocate 32 bytes for the key and write key bytes to memory
+        let key_ptr = self.alloc_temp_local(ValType::I32);
+        self.func.instruction(&Instruction::I32Const(32));
+        self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
+        self.func.instruction(&Instruction::LocalSet(key_ptr));
+
+        // Write key bytes to memory (8 i32.store operations = 32 bytes)
+        for chunk_idx in 0..8u32 {
+            self.func.instruction(&Instruction::LocalGet(key_ptr));
+            let start = (chunk_idx * 4) as usize;
+            let word = u32::from_le_bytes([
+                key_bytes[start],
+                key_bytes[start + 1],
+                key_bytes[start + 2],
+                key_bytes[start + 3],
+            ]);
+            self.func.instruction(&Instruction::I32Const(word as i32));
+            self.func
+                .instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                    offset: (chunk_idx * 4) as u64,
+                    align: 2,
+                    memory_index: 0,
+                }));
+        }
+
+        // Call storage_read(key_ptr, 32, REG_SCRATCH) → status
+        let status = self.alloc_temp_local(ValType::I32);
+        self.func.instruction(&Instruction::LocalGet(key_ptr));
+        self.func.instruction(&Instruction::I32Const(32));
+        self.func
+            .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+        self.func.instruction(&Instruction::Call(8)); // storage_read = index 8
+        self.func.instruction(&Instruction::LocalSet(status));
+
+        // Check status: if STORAGE_NOT_FOUND → push default (0)
+        self.func.instruction(&Instruction::LocalGet(status));
+        self.func
+            .instruction(&Instruction::I32Const(abi::STORAGE_NOT_FOUND));
+        self.func.instruction(&Instruction::I32Eq);
+        if is_i64(&ty) {
+            self.func
+                .instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I64,
+                )));
+            self.block_depth += 1;
+            // Not found → default 0
+            self.func.instruction(&Instruction::I64Const(0));
+            self.func.instruction(&Instruction::Else);
+        } else {
+            self.func
+                .instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I32,
+                )));
+            self.block_depth += 1;
+            // Not found → default 0
+            self.func.instruction(&Instruction::I32Const(0));
+            self.func.instruction(&Instruction::Else);
+        }
+
+        // Found → validate register length matches expected byte width.
+        // Storage value length must match the declared field type's byte width.
+        // A mismatch indicates storage corruption or type migration — trap
+        // deterministically (AGENTS §7.2).
+        let val_len = self.alloc_temp_local(ValType::I32);
+        self.func
+            .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+        self.func.instruction(&Instruction::Call(6)); // register_len = index 6
+        self.func.instruction(&Instruction::I32WrapI64); // truncate to i32 (storage values < 2GB)
+        self.func.instruction(&Instruction::LocalTee(val_len));
+        self.func
+            .instruction(&Instruction::I32Const(byte_width as i32));
+        self.func.instruction(&Instruction::I32Ne);
+        self.func
+            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        self.block_depth += 1;
+        self.func.instruction(&Instruction::Unreachable); // trap: storage value length mismatch
+        self.block_depth -= 1;
+        self.func.instruction(&Instruction::End);
+
+        // Allocate buffer for value
+        let val_ptr = self.alloc_temp_local(ValType::I32);
+        self.func.instruction(&Instruction::LocalGet(val_len));
+        self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
+        self.func.instruction(&Instruction::LocalSet(val_ptr));
+
+        // read_register(REG_SCRATCH, val_ptr)
+        self.func
+            .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+        self.func.instruction(&Instruction::LocalGet(val_ptr));
+        self.func.instruction(&Instruction::Call(7)); // read_register = index 7
+
+        // Load value from memory based on type
+        self.func.instruction(&Instruction::LocalGet(val_ptr));
+        match &ty {
+            ResolvedType::Bool => {
+                self.func
+                    .instruction(&Instruction::I32Load8U(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+            }
+            ResolvedType::U32 | ResolvedType::I32 => {
+                self.func
+                    .instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+            }
+            ResolvedType::U64 | ResolvedType::I64 => {
+                self.func
+                    .instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 3,
+                        memory_index: 0,
+                    }));
+            }
+            _ => {
+                return Err(LangError::Codegen {
+                    message: format!(
+                        "storage read for type {} not yet implemented",
+                        ty.display_name()
+                    ),
+                });
+            }
+        }
+
+        self.block_depth -= 1;
+        self.func.instruction(&Instruction::End); // end if/else
+
+        Ok(())
+    }
+
+    /// Emit WASM instructions to write a value to a state field in storage.
+    ///
+    /// Sequence:
+    /// 1. Allocate 32 bytes for the storage key, write key bytes to memory
+    /// 2. Emit the value expression
+    /// 3. Encode value to bytes in memory
+    /// 4. Call `storage_write(key_ptr, 32, val_ptr, val_len)`
+    fn emit_storage_write(&mut self, field_name: &str, value: &Expr) -> Result<(), LangError> {
+        let (ty, key_bytes) =
+            self.state_fields
+                .get(field_name)
+                .ok_or_else(|| LangError::Codegen {
+                    message: format!("unknown state field: {field_name}"),
+                })?;
+        let ty = (*ty).clone();
+        let key_bytes = *key_bytes;
+        let byte_width = storage_byte_width(&ty)?;
+
+        // Allocate 32 bytes for the key and write key bytes to memory
+        let key_ptr = self.alloc_temp_local(ValType::I32);
+        self.func.instruction(&Instruction::I32Const(32));
+        self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
+        self.func.instruction(&Instruction::LocalSet(key_ptr));
+
+        // Write key bytes to memory
+        for chunk_idx in 0..8u32 {
+            self.func.instruction(&Instruction::LocalGet(key_ptr));
+            let start = (chunk_idx * 4) as usize;
+            let word = u32::from_le_bytes([
+                key_bytes[start],
+                key_bytes[start + 1],
+                key_bytes[start + 2],
+                key_bytes[start + 3],
+            ]);
+            self.func.instruction(&Instruction::I32Const(word as i32));
+            self.func
+                .instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                    offset: (chunk_idx * 4) as u64,
+                    align: 2,
+                    memory_index: 0,
+                }));
+        }
+
+        // Emit the value expression — result on stack
+        self.emit_expr(value)?;
+
+        // Allocate buffer for value and store it
+        let val_ptr = self.alloc_temp_local(ValType::I32);
+        self.func
+            .instruction(&Instruction::I32Const(byte_width as i32));
+        self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
+        self.func.instruction(&Instruction::LocalSet(val_ptr));
+
+        // Store value to memory based on type
+        // The value is on the stack from emit_expr; we need to save it to a temp
+        // because we need val_ptr on the stack first for the store instruction.
+        let val_tmp = if is_i64(&ty) {
+            self.alloc_temp_local(ValType::I64)
+        } else {
+            self.alloc_temp_local(ValType::I32)
+        };
+        self.func.instruction(&Instruction::LocalSet(val_tmp));
+
+        self.func.instruction(&Instruction::LocalGet(val_ptr));
+        self.func.instruction(&Instruction::LocalGet(val_tmp));
+        match &ty {
+            ResolvedType::Bool => {
+                self.func
+                    .instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+            }
+            ResolvedType::U32 | ResolvedType::I32 => {
+                self.func
+                    .instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+            }
+            ResolvedType::U64 | ResolvedType::I64 => {
+                self.func
+                    .instruction(&Instruction::I64Store(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 3,
+                        memory_index: 0,
+                    }));
+            }
+            _ => {
+                return Err(LangError::Codegen {
+                    message: format!(
+                        "storage write for type {} not yet implemented",
+                        ty.display_name()
+                    ),
+                });
+            }
+        }
+
+        // Call storage_write(key_ptr, 32, val_ptr, val_len)
+        self.func.instruction(&Instruction::LocalGet(key_ptr));
+        self.func.instruction(&Instruction::I32Const(32));
+        self.func.instruction(&Instruction::LocalGet(val_ptr));
+        self.func
+            .instruction(&Instruction::I32Const(byte_width as i32));
+        self.func.instruction(&Instruction::Call(9)); // storage_write = index 9
+
+        Ok(())
+    }
+
     // ── Binary expression emission ────────────────────────────────────────
 
     fn emit_binary(
@@ -792,8 +1591,8 @@ impl<'a> LowerCtx<'a> {
     ) -> Result<(), LangError> {
         // Resolve the operand type from the LHS. Both sides have the same type
         // after type checking (or IntLiteral which coerces to the other side's type).
-        let lhs_span = crate::parser::expr_span(lhs);
-        let ty = self.resolve_type(&lhs_span)?;
+        // Uses resolve_expr_type for self.field fallback (P3·Step 6e).
+        let ty = self.resolve_expr_type(lhs)?;
 
         // M1 — sub-word types (u8/u16/i8/i16) need range-check masking after
         // arithmetic to detect overflow within the narrower type range. Until
@@ -1446,6 +2245,8 @@ pub(crate) fn emit_test_expr_module(
         local_types: Vec::new(), // won't allocate more temps in second pass
         loop_stack: Vec::new(),
         block_depth: 0,
+        alloc_fn_idx: 0,
+        state_fields: BTreeMap::new(),
     };
 
     // We need to re-emit the expression. The temp local indices must match.
@@ -1576,6 +2377,8 @@ pub(crate) fn emit_test_stmt_module(
         local_types: Vec::new(),
         loop_stack: Vec::new(),
         block_depth: 0,
+        alloc_fn_idx: 0,
+        state_fields: BTreeMap::new(),
     };
 
     ctx2.emit_block(stmts)?;
