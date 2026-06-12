@@ -1063,3 +1063,308 @@ fn emit_sub_word_arithmetic_returns_codegen_error() {
 // type checker resolves literals to concrete types (which it does for
 // expressions with a return-type context), IntLiteral won't reach codegen.
 // The guard is defensive; we verify it exists via the sub-word test pattern.
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P3·Step 6d — Statement + control flow lowering
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These tests compile Lem function bodies (multiple statements) to WASM via
+// `emit_test_stmt_module`, then execute with wasmtime to verify runtime
+// behavior. This exercises the full pipeline: parse → type-check → codegen
+// → wasmtime execute.
+
+/// Compile a Lem function body (statements) to WASM, instantiate with wasmtime,
+/// call the exported "test" function, and return the i32 result.
+///
+/// The body is wrapped in `contract Test { pub fn f() -> {ret_ty} { {body} } }`.
+fn execute_fn_body(body: &str, ret_ty: &str) -> Result<i32, String> {
+    use super::emit_test_stmt_module;
+    use crate::codegen::abi::{IMPORT_MODULE, IMPORT_ORDER};
+    use crate::codegen::wasm::HOST_SIGS;
+
+    let src = format!("contract Test {{ pub fn f() -> {ret_ty} {{ {body} }} }}");
+    let typed = typed_ast_for(&src);
+    let contracts = typed.contracts();
+    let fns = contracts[0].functions();
+    let fn_body = fns[0].body.expect("function should have a body");
+
+    let wasm_bytes = emit_test_stmt_module(&contracts[0], fn_body, &[], wasm_encoder::ValType::I32)
+        .map_err(|e| format!("codegen failed: {e}"))?;
+
+    // Create wasmtime engine + store
+    let engine = wasmtime::Engine::default();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let module = wasmtime::Module::new(&engine, &wasm_bytes)
+        .map_err(|e| format!("wasmtime compile failed: {e}"))?;
+
+    // Build a linker with all 14 host imports as no-op stubs
+    let mut linker = wasmtime::Linker::new(&engine);
+    for (i, name) in IMPORT_ORDER.iter().enumerate() {
+        let (params, results) = HOST_SIGS[i];
+        let func_ty = wasmtime::FuncType::new(
+            &engine,
+            params.iter().map(|vt| match vt {
+                wasm_encoder::ValType::I32 => wasmtime::ValType::I32,
+                wasm_encoder::ValType::I64 => wasmtime::ValType::I64,
+                _ => wasmtime::ValType::I32,
+            }),
+            results.iter().map(|vt| match vt {
+                wasm_encoder::ValType::I32 => wasmtime::ValType::I32,
+                wasm_encoder::ValType::I64 => wasmtime::ValType::I64,
+                _ => wasmtime::ValType::I32,
+            }),
+        );
+        let result_types: Vec<wasm_encoder::ValType> = results.to_vec();
+        linker
+            .func_new(
+                IMPORT_MODULE,
+                name,
+                func_ty,
+                move |_caller, _params, results| {
+                    for (r, vt) in results.iter_mut().zip(result_types.iter()) {
+                        *r = match vt {
+                            wasm_encoder::ValType::I64 => wasmtime::Val::I64(0),
+                            _ => wasmtime::Val::I32(0),
+                        };
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("linker.func_new({name}) failed: {e}"))?;
+    }
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("instantiation failed: {e}"))?;
+
+    let test_fn = instance
+        .get_typed_func::<(), i32>(&mut store, "test")
+        .map_err(|e| format!("get_typed_func failed: {e}"))?;
+
+    test_fn
+        .call(&mut store, ())
+        .map_err(|e| format!("execution trapped: {e}"))
+}
+
+// ── Let binding ─────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_let_binding_returns_value() {
+    assert_eq!(
+        execute_fn_body("let x: u32 = 42; return x;", "u32").unwrap(),
+        42
+    );
+}
+
+#[test]
+fn execute_let_multiple_bindings() {
+    assert_eq!(
+        execute_fn_body("let a: u32 = 10; let b: u32 = 20; return a + b;", "u32").unwrap(),
+        30
+    );
+}
+
+// ── Assignment ──────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_assign_updates_local() {
+    assert_eq!(
+        execute_fn_body("let mut x: u32 = 10; x = 20; return x;", "u32").unwrap(),
+        20
+    );
+}
+
+#[test]
+fn execute_compound_add_assign() {
+    assert_eq!(
+        execute_fn_body("let mut x: u32 = 10; x += 5; return x;", "u32").unwrap(),
+        15
+    );
+}
+
+#[test]
+fn execute_compound_sub_assign() {
+    assert_eq!(
+        execute_fn_body("let mut x: u32 = 10; x -= 3; return x;", "u32").unwrap(),
+        7
+    );
+}
+
+#[test]
+fn execute_compound_mul_assign() {
+    assert_eq!(
+        execute_fn_body("let mut x: u32 = 6; x *= 7; return x;", "u32").unwrap(),
+        42
+    );
+}
+
+// ── If/Else ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_if_true_branch() {
+    assert_eq!(
+        execute_fn_body("if (true) { return 1; } return 0;", "u32").unwrap(),
+        1
+    );
+}
+
+#[test]
+fn execute_if_false_falls_through() {
+    assert_eq!(
+        execute_fn_body("if (false) { return 1; } return 0;", "u32").unwrap(),
+        0
+    );
+}
+
+#[test]
+fn execute_if_else_true_branch() {
+    // Trailing `return 0` is unreachable but satisfies WASM's type system:
+    // the function body must produce a value even after an if/else where
+    // both branches return. WASM validation requires stack-type consistency.
+    assert_eq!(
+        execute_fn_body(
+            "if (true) { return 1; } else { return 2; } return 0;",
+            "u32"
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn execute_if_else_false_branch() {
+    assert_eq!(
+        execute_fn_body(
+            "if (false) { return 1; } else { return 2; } return 0;",
+            "u32"
+        )
+        .unwrap(),
+        2
+    );
+}
+
+// ── While loop ──────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_while_loop_counts() {
+    assert_eq!(
+        execute_fn_body(
+            "let mut i: u32 = 0; while (i < 5) { i += 1; } return i;",
+            "u32"
+        )
+        .unwrap(),
+        5
+    );
+}
+
+#[test]
+fn execute_while_loop_accumulates() {
+    // Sum 1..5 = 10
+    assert_eq!(
+        execute_fn_body(
+            "let mut sum: u32 = 0; let mut i: u32 = 1; while (i <= 5) { sum += i; i += 1; } return sum;",
+            "u32"
+        )
+        .unwrap(),
+        15
+    );
+}
+
+// ── Loop + break ────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_break_exits_loop() {
+    assert_eq!(
+        execute_fn_body(
+            "let mut i: u32 = 0; loop { i += 1; if (i == 3) { break; } } return i;",
+            "u32"
+        )
+        .unwrap(),
+        3
+    );
+}
+
+// ── Continue ────────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_continue_skips_iteration() {
+    // Sum even numbers from 1..10: 2+4+6+8+10 = 30
+    // Increment i first, then skip odd values
+    assert_eq!(
+        execute_fn_body(
+            "let mut sum: u32 = 0; let mut i: u32 = 0; while (i < 10) { i += 1; if (i % 2 != 0) { continue; } sum += i; } return sum;",
+            "u32"
+        )
+        .unwrap(),
+        30
+    );
+}
+
+// ── Nested control flow ─────────────────────────────────────────────────────
+
+#[test]
+fn execute_nested_if_in_while() {
+    // Sum values < 5 from 0..9: 0+1+2+3+4 = 10
+    assert_eq!(
+        execute_fn_body(
+            "let mut sum: u32 = 0; let mut i: u32 = 0; while (i < 10) { if (i < 5) { sum += i; } i += 1; } return sum;",
+            "u32"
+        )
+        .unwrap(),
+        10
+    );
+}
+
+#[test]
+fn execute_nested_loops() {
+    // Outer loop 3 times, inner loop 4 times each = 12 total increments
+    assert_eq!(
+        execute_fn_body(
+            "let mut count: u32 = 0; let mut i: u32 = 0; while (i < 3) { let mut j: u32 = 0; while (j < 4) { count += 1; j += 1; } i += 1; } return count;",
+            "u32"
+        )
+        .unwrap(),
+        12
+    );
+}
+
+// ── Assert ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_assert_true_succeeds() {
+    assert_eq!(
+        execute_fn_body("assert(true); return 1;", "u32").unwrap(),
+        1
+    );
+}
+
+#[test]
+fn execute_assert_false_traps() {
+    assert!(execute_fn_body("assert(false); return 1;", "u32").is_err());
+}
+
+// ── Revert ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_revert_traps() {
+    assert!(execute_fn_body("revert(); return 1;", "u32").is_err());
+}
+
+// ── Return ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn execute_early_return() {
+    assert_eq!(execute_fn_body("return 42; return 99;", "u32").unwrap(), 42);
+}
+
+// ── Compound assign overflow traps (§7.4 compliance) ────────────────────────
+
+#[test]
+fn execute_compound_add_overflow_traps() {
+    assert!(execute_fn_body("let mut x: u32 = 4294967295; x += 1; return x;", "u32").is_err());
+}
+
+#[test]
+fn execute_compound_sub_underflow_traps() {
+    assert!(execute_fn_body("let mut x: u32 = 0; x -= 1; return x;", "u32").is_err());
+}

@@ -2,8 +2,9 @@
 //!
 //! Emits a valid WASM module from a type-checked Lem contract. Expression
 //! lowering (literals, checked arithmetic, comparison, local variable read)
-//! was added in P3·Step 6c. Statement/control-flow lowering is 6d; function
-//! dispatch + storage host calls are 6e.
+//! was added in P3·Step 6c. Statement and control-flow lowering (let, assign,
+//! if/else, while, loop, break, continue, return, assert, revert) was added
+//! in P3·Step 6d. Function dispatch + storage host calls are 6e.
 //!
 //! ## Backend choice
 //!
@@ -36,12 +37,11 @@ use wasm_encoder::{
 };
 
 use crate::codegen::abi::{self, HOST_IMPORT_COUNT, IMPORT_MODULE, IMPORT_ORDER};
-use crate::codegen::types::{is_i64, is_signed, is_sub_word};
+use crate::codegen::types::{is_i64, is_signed, is_sub_word, wasm_valtype};
 use crate::error::LangError;
 use crate::lexer::token::Span;
-#[cfg(test)]
 use crate::parser::expr_span;
-use crate::parser::{BinaryOp, Expr, Literal, UnaryOp};
+use crate::parser::{AssignOp, BinaryOp, Expr, Literal, Pattern, Stmt, UnaryOp};
 use crate::type_checker::typed_contract::TypedContract;
 use crate::type_checker::types::ResolvedType;
 
@@ -190,9 +190,11 @@ pub(crate) fn emit_module(_contract: &TypedContract<'_>) -> Result<Vec<u8>, Lang
     module.section(&exports);
 
     // ── 7. Code section ───────────────────────────────────────────────────
-    // Build the `call` function body. For 6c, the entry point body is empty
-    // (dispatch logic is 6e). Expression lowering is tested via dedicated
-    // test helpers that compile individual expressions.
+    // Build the `call` function body. The entry point body is still empty
+    // (dispatch logic is 6e). Expression lowering (6c) and statement/control
+    // flow lowering (6d) are tested via dedicated test helpers
+    // (emit_test_expr_module, emit_test_stmt_module). Production wiring of
+    // function bodies into the call entry point lands in 6e.
     let mut codes = CodeSection::new();
     let mut call_fn = Function::new(vec![]);
     call_fn.instruction(&Instruction::End);
@@ -202,7 +204,25 @@ pub(crate) fn emit_module(_contract: &TypedContract<'_>) -> Result<Vec<u8>, Lang
     Ok(module.finish())
 }
 
-// ─── LowerCtx — expression lowering context ──────────────────────────────────
+// ─── LoopCtx — break/continue label tracking ─────────────────────────────────
+
+/// Tracks the WASM block nesting for break/continue label resolution.
+///
+/// Each entry represents a loop construct (`while`/`loop`) with its
+/// break and continue targets expressed as *absolute* block depths.
+/// At the point of a `break`/`continue`, the relative `br` depth is
+/// computed as `current_block_depth - target_depth`.
+///
+/// This correctly handles nested control flow (if/else inside loops):
+/// the `br` depth adjusts for any intervening blocks.
+struct LoopCtx {
+    /// Absolute block depth of the outer `block` (break target).
+    break_target_depth: u32,
+    /// Absolute block depth of the inner `loop` (continue target).
+    continue_target_depth: u32,
+}
+
+// ─── LowerCtx — expression + statement lowering context ──────────────────────
 
 /// Codegen context for lowering a single function body.
 ///
@@ -215,10 +235,11 @@ pub(crate) fn emit_module(_contract: &TypedContract<'_>) -> Result<Vec<u8>, Lang
 /// then explicit locals. The `locals` map tracks `name → index`.
 /// Temp locals (for checked arithmetic) are allocated via `alloc_temp_local`.
 ///
-/// ## Dead-code note
+/// ## Loop tracking (P3·Step 6d)
 ///
-/// `LowerCtx` is consumed by `emit_test_expr_module` (test-only in 6c).
-/// Production wiring (emit_module → LowerCtx) lands in 6d/6e.
+/// `loop_stack` tracks nested loop contexts for break/continue resolution.
+/// `block_depth` tracks the current WASM block nesting depth (incremented
+/// by `block`/`loop`/`if`, decremented by `end`).
 // consumer: emit_test_expr_module (P3·Step 6c tests); emit_module (P3·Step 6d/6e)
 #[allow(dead_code)]
 struct LowerCtx<'a> {
@@ -234,6 +255,11 @@ struct LowerCtx<'a> {
     /// Accumulated local type declarations (count, type) for the function.
     /// Params are not included here — only explicitly declared locals.
     local_types: Vec<(u32, ValType)>,
+    /// Stack of loop contexts for break/continue resolution.
+    /// Pushed on entering while/loop, popped on exit.
+    loop_stack: Vec<LoopCtx>,
+    /// Current WASM block nesting depth (incremented by block/loop/if).
+    block_depth: u32,
 }
 
 #[allow(dead_code)]
@@ -254,6 +280,8 @@ impl<'a> LowerCtx<'a> {
             locals,
             next_local: params.len() as u32,
             local_types: Vec::new(),
+            loop_stack: Vec::new(),
+            block_depth: 0,
         }
     }
 
@@ -314,6 +342,364 @@ impl<'a> LowerCtx<'a> {
                     "expression lowering not yet implemented for {}",
                     expr_variant_name(expr)
                 ),
+            }),
+        }
+    }
+
+    // ── Statement + control flow lowering (P3·Step 6d) ──────────────────
+
+    /// Emit WASM instructions for a block of statements.
+    ///
+    /// Simply iterates and calls `emit_stmt` on each statement.
+    fn emit_block(&mut self, stmts: &[Stmt]) -> Result<(), LangError> {
+        for stmt in stmts {
+            self.emit_stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    /// Emit WASM instructions for a single statement.
+    ///
+    /// ## Supported statements (P3·Step 6d)
+    ///
+    /// - Let binding, Const binding (local variable allocation + init)
+    /// - Assign (simple and compound: +=, -=, *=, /=, %=)
+    /// - If/Else
+    /// - While loop, Loop (infinite), Break, Continue
+    /// - Return
+    /// - Assert (trap on false), Revert (unconditional trap)
+    /// - Expr (bare expression statement — result dropped)
+    ///
+    /// ## Deferred statements
+    ///
+    /// Match, For, Emit, Try, Unchecked, Placeholder → honest codegen error.
+    fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), LangError> {
+        match stmt {
+            // ── Let binding ───────────────────────────────────────────
+            Stmt::Let { pattern, expr, .. } => {
+                // Only support Pattern::Ident for now (destructuring deferred)
+                let name = match pattern {
+                    Pattern::Ident(name, _) => name.clone(),
+                    _ => {
+                        return Err(LangError::Codegen {
+                            message: "let destructuring not yet implemented in codegen".into(),
+                        })
+                    }
+                };
+                // Resolve the type from the expression
+                let expr_s = expr_span(expr);
+                let resolved = self.resolve_type(&expr_s)?;
+                let valtype = wasm_valtype(&resolved)?;
+                // Allocate a named local
+                let idx = self.next_local;
+                self.locals.insert(name, idx);
+                self.local_types.push((1, valtype));
+                self.next_local += 1;
+                // Emit the initializer and store
+                self.emit_expr(expr)?;
+                self.func.instruction(&Instruction::LocalSet(idx));
+                Ok(())
+            }
+
+            // ── Const binding (immutability is a semantic check, not codegen) ──
+            Stmt::Const(c) => {
+                let name = c.name.clone();
+                let expr_s = expr_span(&c.value);
+                let resolved = self.resolve_type(&expr_s)?;
+                let valtype = wasm_valtype(&resolved)?;
+                let idx = self.next_local;
+                self.locals.insert(name, idx);
+                self.local_types.push((1, valtype));
+                self.next_local += 1;
+                self.emit_expr(&c.value)?;
+                self.func.instruction(&Instruction::LocalSet(idx));
+                Ok(())
+            }
+
+            // ── Assignment ────────────────────────────────────────────
+            Stmt::Assign {
+                target,
+                op,
+                value,
+                span,
+            } => self.emit_assign(target, op, value, span),
+
+            // ── If/Else ───────────────────────────────────────────────
+            Stmt::If {
+                cond, then, else_, ..
+            } => {
+                self.emit_expr(cond)?;
+                if let Some(else_stmts) = else_ {
+                    self.func
+                        .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                    self.block_depth += 1;
+                    self.emit_block(then)?;
+                    self.func.instruction(&Instruction::Else);
+                    self.emit_block(else_stmts)?;
+                    self.block_depth -= 1;
+                    self.func.instruction(&Instruction::End);
+                } else {
+                    self.func
+                        .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                    self.block_depth += 1;
+                    self.emit_block(then)?;
+                    self.block_depth -= 1;
+                    self.func.instruction(&Instruction::End);
+                }
+                Ok(())
+            }
+
+            // ── While loop ────────────────────────────────────────────
+            // WASM pattern:
+            //   block $exit        ;; break target
+            //     loop $continue   ;; continue target
+            //       <cond>
+            //       i32.eqz
+            //       br_if 1        ;; if cond is false, exit outer block
+            //       <body>
+            //       br 0           ;; loop back to loop head
+            //     end
+            //   end
+            Stmt::While { cond, body, .. } => {
+                self.func
+                    .instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
+                let break_target = self.block_depth; // outer block
+
+                self.func
+                    .instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
+                let continue_target = self.block_depth; // loop head
+
+                self.loop_stack.push(LoopCtx {
+                    break_target_depth: break_target,
+                    continue_target_depth: continue_target,
+                });
+
+                self.emit_expr(cond)?;
+                self.func.instruction(&Instruction::I32Eqz);
+                // br depth to exit outer block = current_depth - break_target
+                let br_exit = self.block_depth.checked_sub(break_target).ok_or_else(|| {
+                    LangError::Codegen {
+                        message: "block depth underflow computing while break target".into(),
+                    }
+                })?;
+                self.func.instruction(&Instruction::BrIf(br_exit));
+
+                self.emit_block(body)?;
+
+                // br depth to loop head = current_depth - continue_target
+                let br_cont = self
+                    .block_depth
+                    .checked_sub(continue_target)
+                    .ok_or_else(|| LangError::Codegen {
+                        message: "block depth underflow computing while continue target".into(),
+                    })?;
+                self.func.instruction(&Instruction::Br(br_cont));
+
+                self.loop_stack.pop();
+                self.block_depth -= 1;
+                self.func.instruction(&Instruction::End); // end loop
+                self.block_depth -= 1;
+                self.func.instruction(&Instruction::End); // end block
+                Ok(())
+            }
+
+            // ── Loop (infinite) ───────────────────────────────────────
+            Stmt::Loop { body, .. } => {
+                self.func
+                    .instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
+                let break_target = self.block_depth;
+
+                self.func
+                    .instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
+                let continue_target = self.block_depth;
+
+                self.loop_stack.push(LoopCtx {
+                    break_target_depth: break_target,
+                    continue_target_depth: continue_target,
+                });
+
+                self.emit_block(body)?;
+                // br depth to loop head = current_depth - continue_target
+                let br_cont = self
+                    .block_depth
+                    .checked_sub(continue_target)
+                    .ok_or_else(|| LangError::Codegen {
+                        message: "block depth underflow computing loop continue target".into(),
+                    })?;
+                self.func.instruction(&Instruction::Br(br_cont));
+
+                self.loop_stack.pop();
+                self.block_depth -= 1;
+                self.func.instruction(&Instruction::End); // end loop
+                self.block_depth -= 1;
+                self.func.instruction(&Instruction::End); // end block
+                Ok(())
+            }
+
+            // ── Break ─────────────────────────────────────────────────
+            Stmt::Break(_) => {
+                let ctx = self.loop_stack.last().ok_or_else(|| LangError::Codegen {
+                    message: "break outside of loop".into(),
+                })?;
+                // Relative br depth = current nesting - target nesting
+                let depth = self
+                    .block_depth
+                    .checked_sub(ctx.break_target_depth)
+                    .ok_or_else(|| LangError::Codegen {
+                        message: "block depth underflow computing break target".into(),
+                    })?;
+                self.func.instruction(&Instruction::Br(depth));
+                Ok(())
+            }
+
+            // ── Continue ──────────────────────────────────────────────
+            Stmt::Continue(_) => {
+                let ctx = self.loop_stack.last().ok_or_else(|| LangError::Codegen {
+                    message: "continue outside of loop".into(),
+                })?;
+                // Relative br depth = current nesting - target nesting
+                let depth = self
+                    .block_depth
+                    .checked_sub(ctx.continue_target_depth)
+                    .ok_or_else(|| LangError::Codegen {
+                        message: "block depth underflow computing continue target".into(),
+                    })?;
+                self.func.instruction(&Instruction::Br(depth));
+                Ok(())
+            }
+
+            // ── Return ────────────────────────────────────────────────
+            Stmt::Return(expr, _) => {
+                if let Some(e) = expr {
+                    self.emit_expr(e)?;
+                }
+                self.func.instruction(&Instruction::Return);
+                Ok(())
+            }
+
+            // ── Assert (trap on false) ────────────────────────────────
+            Stmt::Assert { cond, .. } => {
+                self.emit_expr(cond)?;
+                self.func.instruction(&Instruction::I32Eqz);
+                self.func
+                    .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
+                self.func.instruction(&Instruction::Unreachable);
+                self.block_depth -= 1;
+                self.func.instruction(&Instruction::End);
+                Ok(())
+            }
+
+            // ── Revert (unconditional trap) ───────────────────────────
+            Stmt::Revert { .. } => {
+                self.func.instruction(&Instruction::Unreachable);
+                Ok(())
+            }
+
+            // ── Bare expression statement ─────────────────────────────
+            // Drop the result from the value stack. All expressions from
+            // 6c push exactly one value; void expressions (e.g. function
+            // calls returning void) will need special handling in 6e.
+            Stmt::Expr(expr, _) => {
+                self.emit_expr(expr)?;
+                self.func.instruction(&Instruction::Drop);
+                Ok(())
+            }
+
+            // ── Deferred statement variants ───────────────────────────
+            Stmt::Match { .. } => Err(LangError::Codegen {
+                message: "match lowering not yet implemented".into(),
+            }),
+            Stmt::For { .. } => Err(LangError::Codegen {
+                message: "for loop lowering not yet implemented".into(),
+            }),
+            Stmt::Emit { .. } => Err(LangError::Codegen {
+                message: "emit lowering not yet implemented (6e)".into(),
+            }),
+            Stmt::Try { .. } => Err(LangError::Codegen {
+                message: "try/catch lowering not yet implemented".into(),
+            }),
+            Stmt::Unchecked(..) => Err(LangError::Codegen {
+                message: "unchecked block lowering not yet implemented".into(),
+            }),
+            Stmt::Placeholder(..) => Err(LangError::Codegen {
+                message: "modifier placeholder lowering not yet implemented (6f)".into(),
+            }),
+            // Forward-compatibility for #[non_exhaustive]
+            #[allow(unreachable_patterns)]
+            _ => Err(LangError::Codegen {
+                message: "unknown statement variant in codegen".into(),
+            }),
+        }
+    }
+
+    /// Emit WASM instructions for an assignment statement.
+    ///
+    /// Handles simple assignment (`=`) and compound assignment (`+=`, `-=`,
+    /// `*=`, `/=`, `%=`). Compound assignment uses checked arithmetic from
+    /// 6c (AGENTS §7.4).
+    fn emit_assign(
+        &mut self,
+        target: &Expr,
+        op: &AssignOp,
+        value: &Expr,
+        _span: &Span,
+    ) -> Result<(), LangError> {
+        match target {
+            Expr::Ident(name, ident_span) => {
+                let idx = *self.locals.get(name).ok_or_else(|| LangError::Codegen {
+                    message: format!("undefined variable in assignment: {name}"),
+                })?;
+                if matches!(op, AssignOp::Assign) {
+                    // Simple assignment: evaluate value, store
+                    self.emit_expr(value)?;
+                    self.func.instruction(&Instruction::LocalSet(idx));
+                } else {
+                    // Compound assign: load current, evaluate value, checked op, store.
+                    // Resolve type from the target identifier (not the statement span),
+                    // because the type checker stores types by expression span.
+                    let ty = self.resolve_type(ident_span)?;
+                    // Sub-word compound assignment deferred (M1)
+                    if is_sub_word(&ty) {
+                        return Err(LangError::Codegen {
+                            message: format!(
+                                "sub-word compound assignment ({}) not yet implemented",
+                                ty.display_name()
+                            ),
+                        });
+                    }
+                    self.func.instruction(&Instruction::LocalGet(idx));
+                    self.emit_expr(value)?;
+                    match op {
+                        AssignOp::Add => self.emit_checked_add(&ty)?,
+                        AssignOp::Sub => self.emit_checked_sub(&ty)?,
+                        AssignOp::Mul => self.emit_checked_mul(&ty)?,
+                        AssignOp::Div => self.emit_checked_div(&ty)?,
+                        AssignOp::Rem => self.emit_checked_rem(&ty)?,
+                        // Forward-compatibility for #[non_exhaustive].
+                        // AssignOp::Assign is handled above; remaining
+                        // future variants get an honest error.
+                        #[allow(unreachable_patterns)]
+                        _ => {
+                            return Err(LangError::Codegen {
+                                message: format!(
+                                    "compound assignment operator {op:?} not yet implemented"
+                                ),
+                            })
+                        }
+                    }
+                    self.func.instruction(&Instruction::LocalSet(idx));
+                }
+                Ok(())
+            }
+            // self.field assignment → 6e (storage write)
+            _ => Err(LangError::Codegen {
+                message: "non-local assignment (self.field, index) not yet implemented in codegen"
+                    .into(),
             }),
         }
     }
@@ -1058,6 +1444,8 @@ pub(crate) fn emit_test_expr_module(
         },
         next_local: params.len() as u32 + temp_local_count as u32,
         local_types: Vec::new(), // won't allocate more temps in second pass
+        loop_stack: Vec::new(),
+        block_depth: 0,
     };
 
     // We need to re-emit the expression. The temp local indices must match.
@@ -1094,6 +1482,131 @@ pub(crate) fn emit_test_expr_module(
     types
         .ty()
         .function(param_valtypes.iter().copied(), [wasm_result]);
+    module.section(&types);
+
+    // Import section
+    let mut imports = ImportSection::new();
+    for (i, name) in IMPORT_ORDER.iter().enumerate() {
+        imports.import(IMPORT_MODULE, name, EntityType::Function(i as u32));
+    }
+    module.section(&imports);
+
+    // Function section
+    let test_type_index = HOST_IMPORT_COUNT;
+    let mut functions = FunctionSection::new();
+    functions.function(test_type_index);
+    module.section(&functions);
+
+    // Memory section
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: INITIAL_MEMORY_PAGES,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    module.section(&memories);
+
+    // Global section
+    let mut globals = GlobalSection::new();
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(HEAP_BASE_ADDR),
+    );
+    module.section(&globals);
+
+    // Export section
+    let test_func_index = HOST_IMPORT_COUNT;
+    let mut exports = ExportSection::new();
+    exports.export("test", ExportKind::Func, test_func_index);
+    exports.export(abi::MEMORY_EXPORT, ExportKind::Memory, 0);
+    module.section(&exports);
+
+    // Code section
+    let mut codes = CodeSection::new();
+    codes.function(&ctx2.func);
+    module.section(&codes);
+
+    Ok(module.finish())
+}
+
+/// Build a complete WASM module from a contract function body (statements).
+///
+/// This is the primary test vehicle for P3·Step 6d statement lowering.
+/// The function signature is `() -> [result_type]` so the function body
+/// can include `return <expr>` and the result can be validated.
+///
+/// Uses the same two-pass approach as `emit_test_expr_module`: pass 1
+/// discovers local allocations, pass 2 rebuilds with correct declarations.
+///
+/// Only available in test builds.
+#[cfg(test)]
+pub(crate) fn emit_test_stmt_module(
+    contract: &TypedContract<'_>,
+    stmts: &[Stmt],
+    params: &[(String, ValType)],
+    result_type: ValType,
+) -> Result<Vec<u8>, LangError> {
+    // Phase 1: emit instructions to discover local allocations
+    let mut ctx = LowerCtx::new(contract, params);
+    ctx.emit_block(stmts)?;
+    ctx.func.instruction(&Instruction::End);
+
+    let local_count = ctx.local_types.len();
+    let all_locals: Vec<(u32, ValType)> = ctx.local_types;
+    let discovered_locals = ctx.locals.clone();
+
+    // Phase 2: rebuild with correct local declarations
+    let mut ctx2 = LowerCtx {
+        contract,
+        func: Function::new(all_locals),
+        locals: {
+            let mut m = BTreeMap::new();
+            for (i, (name, _)) in params.iter().enumerate() {
+                m.insert(name.clone(), i as u32);
+            }
+            m
+        },
+        next_local: params.len() as u32,
+        local_types: Vec::new(),
+        loop_stack: Vec::new(),
+        block_depth: 0,
+    };
+
+    ctx2.emit_block(stmts)?;
+    ctx2.func.instruction(&Instruction::End);
+
+    // Verify pass-2 allocated the same locals as pass-1
+    assert_eq!(
+        ctx2.next_local,
+        params.len() as u32 + local_count as u32,
+        "BUG: pass-2 allocated {} locals but pass-1 allocated {} — desync",
+        ctx2.next_local - params.len() as u32,
+        local_count,
+    );
+    // Verify named locals match between passes
+    assert_eq!(
+        ctx2.locals, discovered_locals,
+        "BUG: named local map differs between pass-1 and pass-2"
+    );
+
+    // Build the module
+    let mut module = Module::new();
+
+    // Type section: host function types + test function type
+    let mut types = TypeSection::new();
+    for (p, r) in HOST_SIGS {
+        types.ty().function(p.iter().copied(), r.iter().copied());
+    }
+    let param_valtypes: Vec<ValType> = params.iter().map(|(_, vt)| *vt).collect();
+    types
+        .ty()
+        .function(param_valtypes.iter().copied(), [result_type]);
     module.section(&types);
 
     // Import section
