@@ -19,8 +19,12 @@
 //! Therefore the analyzer **over-approximates on doubt**: an unprovable keying
 //! becomes [`AccessKey::DynamicSlot`] (whole-field conflict), never a silently
 //! dropped access.  Under-approximation (missing a real write) is the only
-//! danger and is deliberately avoided — external calls and dynamic keys all
-//! widen the set and disqualify the Express fast-path.
+//! danger and is deliberately avoided — dynamic keys widen the set.
+//!
+//! External calls disqualify Express eligibility and are re-validated by Flux
+//! (08 §1.7 — hints are optimization-only; MVCC re-validates).
+//! The read/write SET is **NOT** widened for external calls — only the
+//! `has_external_call` flag is set, which prevents Express scheduling.
 //!
 //! ## Per-slot keying (why not a bare field name)
 //!
@@ -47,7 +51,7 @@ use crate::parser::{Expr, Param, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_expr, walk_stmt, Visitor};
 
-use super::cfg::{build_call_graph, walk_function, CfgNode};
+use super::cfg::{build_call_graph, is_collection_mutator, walk_function, CfgNode};
 use super::util::is_self;
 
 // ─── AccessKey ─────────────────────────────────────────────────────────────────
@@ -277,12 +281,34 @@ impl<'a> AccessWalker<'a> {
             self.visit_expr(idx);
         }
     }
+
+    /// Record `target` as a READ (mirror of `record_assign_target` for the
+    /// read set).  Used by compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`)
+    /// which **read** the target before writing it — the read is implicit in
+    /// the operator but real: `self.count += 1` reads `count` then writes it.
+    ///
+    /// Only the slot key itself is inserted; the index sub-expression is
+    /// already visited by `record_assign_target` (called first for the write).
+    fn record_target_read(&mut self, target: &Expr) {
+        if let Some(key) = classify_access_key(target, self.params) {
+            self.acc.reads.insert(key);
+        }
+    }
 }
 
 impl Visitor for AccessWalker<'_> {
     fn visit_stmt(&mut self, stmt: &Stmt) {
-        if let Stmt::Assign { target, value, .. } = stmt {
+        if let Stmt::Assign {
+            target, op, value, ..
+        } = stmt
+        {
             self.record_assign_target(target);
+            // Compound assignment (+=, -=, *=, /=, %=) also READS the target
+            // first — `self.count += 1` is "read count, add 1, write count".
+            // Pure `=` is a write-only; all other operators are read-then-write.
+            if !matches!(op, crate::parser::AssignOp::Assign) {
+                self.record_target_read(target);
+            }
             self.visit_expr(value);
             return;
         }
@@ -292,13 +318,21 @@ impl Visitor for AccessWalker<'_> {
     fn visit_expr(&mut self, expr: &Expr) {
         match expr {
             // Expression-form assignment: `self.field = …` — LHS is a write.
-            Expr::Assign_(target, _, value, _) => {
+            // Compound form (`+=` etc.) also reads the target first.
+            Expr::Assign_(target, op, value, _) => {
                 self.record_assign_target(target);
+                if !matches!(op, crate::parser::AssignOp::Assign) {
+                    self.record_target_read(target);
+                }
                 self.visit_expr(value);
                 return;
             }
             // Collection mutator on own state: `self.field.set(k, v)` — a write.
             // Continue walking (args are reads) via `walk_expr` below.
+            // TODO(step5/step7): set(msg.sender, v) could refine to SenderSlot
+            // instead of whole-Field — deferred behind msg.sender resolution
+            // (P3-checker-14, Step 7). Tracked: living-notes Technical Debt
+            // (collection-mutator-sender-slot).
             Expr::Call { callee, .. } => {
                 if let Expr::Member(recv, method, _) = callee.as_ref() {
                     if is_collection_mutator(method) {
@@ -384,30 +418,6 @@ fn self_field_name(expr: &Expr) -> Option<String> {
 fn is_msg_sender(expr: &Expr) -> bool {
     matches!(expr, Expr::Member(obj, field, _)
         if field == "sender" && matches!(obj.as_ref(), Expr::Ident(n, _) if n == "msg"))
-}
-
-/// Lem collection **mutator** method names — a call to one of these on a
-/// `self.<field>` receiver is a state write.
-///
-/// Mirrors `cfg::is_collection_mutator` (kept in sync — both reference spec
-/// `03 §11/§13`).  Duplicated narrowly here because `cfg`'s copy is private to
-/// that module; the canonical list is small and stable.
-fn is_collection_mutator(method: &str) -> bool {
-    matches!(
-        method,
-        "set"
-            | "delete"
-            | "add"
-            | "remove"
-            | "push"
-            | "pop"
-            | "insert"
-            | "removeAt"
-            | "clear"
-            | "sort"
-            | "sortBy"
-            | "reverse"
-    )
 }
 
 // ─── Step 2: transitive closure ──────────────────────────────────────────────────

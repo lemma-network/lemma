@@ -271,7 +271,10 @@ fn self_field_name(expr: &Expr) -> Option<String> {
 /// (reject on doubt).  If Lem later pins them as returning a new array, removing
 /// them here is a sound tightening (turns a possible false-positive into none);
 /// the reverse (omitting an in-place mutator) would be an unsound false-negative.
-fn is_collection_mutator(method: &str) -> bool {
+///
+/// `pub(crate)` so that `state_access` can reuse the canonical list (AGENTS §2.4
+/// — shared utilities live in the module that owns the concept; no duplication).
+pub(crate) fn is_collection_mutator(method: &str) -> bool {
     matches!(
         method,
         "set"
