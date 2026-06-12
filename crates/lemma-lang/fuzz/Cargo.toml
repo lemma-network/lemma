@@ -19,3 +19,9 @@ name = "fuzz_wellformed"
 path = "fuzz_targets/wellformed.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_safety"
+path = "fuzz_targets/fuzz_safety.rs"
+test = false
+doc = false

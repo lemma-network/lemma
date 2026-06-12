@@ -125,6 +125,20 @@ pub(crate) fn check_skip_wf(ast: Ast) -> Result<TypedAst, LangError> {
     checker.check_program_skip_wf(ast)
 }
 
+/// Run the type-checking + WF pipeline but skip the safety analyzer pass.
+///
+/// **For test use only.** WF-rule tests that need to verify WF-001…015 on
+/// contracts that are intentionally minimal (e.g. no `transfer` function)
+/// must use this entry point so the safety pass does not reject the contract
+/// before the WF rule under test can be exercised.
+///
+/// Production code must always use [`check`].
+#[cfg(test)]
+pub(crate) fn check_wf_only(ast: Ast) -> Result<TypedAst, LangError> {
+    let mut checker = Checker;
+    checker.check_program_wf_only(ast)
+}
+
 // ─── Internal checker ─────────────────────────────────────────────────────────
 
 /// The internal type-checking engine.
@@ -148,6 +162,16 @@ impl Checker {
     #[cfg(test)]
     fn check_program_skip_wf(&mut self, ast: Ast) -> Result<TypedAst, LangError> {
         self.run_pipeline(ast, false)
+    }
+
+    /// Same as [`check_program`] but skips the safety analyzer pass.
+    ///
+    /// For test use only — allows WF-rule tests to verify WF-001…015 on
+    /// contracts that are intentionally minimal (e.g. no `transfer` function)
+    /// without the safety pass rejecting them first.
+    #[cfg(test)]
+    fn check_program_wf_only(&mut self, ast: Ast) -> Result<TypedAst, LangError> {
+        self.run_pipeline_wf_only(ast)
     }
 
     /// Shared pipeline: tokenize → name-resolve → infer → (optionally) well-formedness.
@@ -235,7 +259,95 @@ impl Checker {
         // maps a non-empty vec to LangError::WellFormed (collect-all, never fail-fast).
         if run_wf {
             wellformed::check(&typed_ast).map_err(LangError::WellFormed)?;
+
+            // Safety analyzer pass (P3·Step 4g): runs after the WF pass succeeds.
+            // Collects all SAFETY-001…025 violations across every contract and maps
+            // a non-empty vec to LangError::Safety (collect-all, never fail-fast).
+            let mut safety_violations: Vec<crate::analyzer::error::SafetyError> = Vec::new();
+            for contract in typed_ast.contracts() {
+                if let Err(violations) = crate::analyzer::analyze_safety(&contract) {
+                    safety_violations.extend(violations);
+                }
+            }
+            if !safety_violations.is_empty() {
+                return Err(LangError::Safety(safety_violations));
+            }
         }
+
+        Ok(typed_ast)
+    }
+
+    /// Same as [`run_pipeline`] with `run_wf = true` but skips the safety
+    /// analyzer pass.
+    ///
+    /// For test use only — WF tests need WF to run but must not be blocked
+    /// by safety violations in intentionally minimal test contracts.
+    #[cfg(test)]
+    fn run_pipeline_wf_only(&mut self, ast: Ast) -> Result<TypedAst, LangError> {
+        // Pass 1 (3a): reject duplicate top-level declaration names.
+        self.check_no_duplicate_top_level_names(&ast.items)?;
+
+        // Pass 2 (3b/3d): name resolution + SymbolSig building.
+        let (
+            mut symbols,
+            resolutions,
+            sigs,
+            struct_traits,
+            trait_methods,
+            contract_methods,
+            interface_methods,
+            event_field_sigs,
+        ) = resolver::resolve(&ast)?;
+
+        let global_types: BTreeMap<String, SymbolId> = symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                matches!(
+                    s.kind,
+                    SymbolKind::Struct
+                        | SymbolKind::Enum
+                        | SymbolKind::Contract
+                        | SymbolKind::TypeAlias
+                        | SymbolKind::Interface
+                        | SymbolKind::Trait
+                )
+            })
+            .map(|(i, s)| (s.name.clone(), SymbolId((i + 1) as u32)))
+            .collect();
+
+        // Pass 3 (3c/3e/3f): expression + statement typing.
+        let mut expr_types = BTreeMap::new();
+        {
+            let mut inferer = infer::Inferer::new(
+                &mut symbols,
+                &resolutions,
+                &sigs,
+                &global_types,
+                &struct_traits,
+                &trait_methods,
+                &contract_methods,
+                &mut expr_types,
+            );
+            inferer.walk_ast(&ast)?;
+            inferer.validate_type_annotations(&ast)?;
+        }
+
+        let typed_ast = TypedAst::new(
+            ast,
+            expr_types,
+            resolutions,
+            symbols,
+            sigs,
+            struct_traits,
+            trait_methods,
+            contract_methods,
+            interface_methods,
+            event_field_sigs,
+        );
+
+        // Well-formedness pass only — safety pass intentionally skipped.
+        wellformed::check(&typed_ast).map_err(LangError::WellFormed)?;
 
         Ok(typed_ast)
     }

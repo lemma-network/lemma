@@ -6,12 +6,13 @@
 //! `@std` allow-list). The `self.<field>.<method>()` pattern is either present
 //! or absent. There is no `Inconclusive` path. No `Inconclusive→reject` needed.
 //!
-//! ## Cross-rule interaction and fuzz tests
+//! ## Cross-rule interaction tests (P3·Step 4g)
 //!
-//! Deferred to **P3·Step 4g**. Intentional deferral; tracked in living-notes.
+//! Cross-rule tests call `analyze_safety` directly to verify that multiple
+//! rules fire simultaneously on a single contract.
 
 use crate::analyzer::error::SafetyError;
-use crate::{check, parse, tokenize};
+use crate::{analyze_safety, parse, tokenize};
 
 use super::check as delegate_check;
 
@@ -19,7 +20,7 @@ use super::check as delegate_check;
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── Positive tests (safe contracts → empty Vec) ──────────────────────────────
@@ -157,5 +158,43 @@ fn delegate_empty_contract_passes() {
     assert!(
         violations.is_empty(),
         "empty contract must pass SAFETY-011; got {violations:?}"
+    );
+}
+
+// ─── Cross-rule interaction tests (P3·Step 4g) ────────────────────────────────
+
+#[test]
+fn cross_rule_safety_011_and_004_combined() {
+    // Contract with a dynamic delegate call (SAFETY-011) AND state written
+    // after an external call (SAFETY-004) in the same function → both detected.
+    let tokens = tokenize(
+        r#"contract C {
+state { implementation: Address bal: u128 = 0 }
+init(implementation: Address) {
+self.implementation = implementation
+}
+pub fn execute(data: u128) {
+let _ = self.implementation.execute(data)
+self.bal = self.bal + 1
+}
+}"#,
+    )
+    .expect("tokenize");
+    let ast = parse(tokens).expect("parse");
+    let typed = crate::type_checker::check_skip_wf(ast).expect("type check");
+    let contracts = typed.contracts();
+    let result = analyze_safety(&contracts[0]);
+    let violations = result.unwrap_err();
+    assert!(
+        violations
+            .iter()
+            .any(|e| matches!(e, SafetyError::UnsafeDelegate { .. })),
+        "SAFETY-011 UnsafeDelegate must be present; got {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|e| matches!(e, SafetyError::StateAfterCall { .. })),
+        "SAFETY-004 StateAfterCall must be present; got {violations:?}"
     );
 }

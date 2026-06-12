@@ -7,20 +7,21 @@
 //!
 //! ```text
 //! rules/
-//!   reentrancy.rs   — SAFETY-004
-//!   integer.rs      — SAFETY-012
-//!   hooks.rs        — SAFETY-008
-//!   delegate.rs     — SAFETY-011
-//!   fee_cap.rs      — SAFETY-002  (4e; reworked to DB-A41 model in 4f-tax)
-//!   supply_cap.rs   — SAFETY-003  (4e)
-//!   approvals.rs    — SAFETY-006  (4e)
-//!   blacklist.rs    — SAFETY-005  (4f)
-//!   one_way_gate.rs — SAFETY-009  (4f)
-//!   upgrade.rs      — SAFETY-007  (4f)
-//!   declared.rs     — SAFETY-010  (4f)
-//!   honeypot.rs     — SAFETY-001  (4f)
-//!   tax.rs          — SAFETY-020/021/022  (4f-tax, TaxToken fee-model rules)
-//!   launch.rs       — SAFETY-023/024 + P3-own-3 (a)(c)  (4f-launch)
+//!   reentrancy.rs      — SAFETY-004
+//!   integer.rs         — SAFETY-012
+//!   hooks.rs           — SAFETY-008
+//!   delegate.rs        — SAFETY-011
+//!   fee_cap.rs         — SAFETY-002  (4e; reworked to DB-A41 model in 4f-tax)
+//!   supply_cap.rs      — SAFETY-003  (4e)
+//!   approvals.rs       — SAFETY-006  (4e)
+//!   blacklist.rs       — SAFETY-005  (4f)
+//!   one_way_gate.rs    — SAFETY-009  (4f)
+//!   upgrade.rs         — SAFETY-007  (4f)
+//!   declared.rs        — SAFETY-010  (4f)
+//!   honeypot.rs        — SAFETY-001  (4f)
+//!   tax.rs             — SAFETY-020/021/022  (4f-tax, TaxToken fee-model rules)
+//!   launch.rs          — SAFETY-023/024 + P3-own-3 (a)(c)  (4f-launch)
+//!   sell_path_veto.rs  — SAFETY-025  (4g, sell-path external-call revert veto)
 //! ```
 //!
 //! Note: SAFETY-013 (ticker registration) retired per decision DB-A48 —
@@ -31,7 +32,7 @@ use crate::type_checker::typed_contract::TypedContract;
 use super::error::SafetyError;
 use super::rules;
 
-/// Analyze a contract for compile-time safety violations (SAFETY-001…024).
+/// Analyze a contract for compile-time safety violations (SAFETY-001…025).
 ///
 /// Runs all enabled rules and **collects every violation** before returning
 /// (`Err(violations)` is never fail-fast — the developer sees all problems in
@@ -46,12 +47,13 @@ use super::rules;
 /// **Batch 3 (4f)**: SAFETY-007, SAFETY-009, SAFETY-005, SAFETY-001, SAFETY-010 — active.
 /// **Batch 3 (4f-tax)**: SAFETY-020, SAFETY-021, SAFETY-022 (TaxToken fee-model) — active.
 /// **Batch 3 (4f-launch)**: SAFETY-023, SAFETY-024 (launch/holding-control) + P3-own-3 (a)(c) — active.
+/// **Batch 4 (4g)**: SAFETY-025 (sell-path external-call revert veto) — active.
 /// SAFETY-013 retired per decision DB-A48 (auto-injected by codegen).
 ///
 /// ## Caller
 ///
-/// Not yet wired into the compilation pipeline — wired in 4g after all rules
-/// are proven via tests and CodeReviewer-approved.
+/// Wired into the compilation pipeline in 4g — runs for every contract in
+/// `run_pipeline()` after the WF pass succeeds.
 pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyError>> {
     let mut violations: Vec<SafetyError> = Vec::new();
 
@@ -84,6 +86,10 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     // P3-own-3 (a): @onlyOwner requires owner state field.
     // P3-own-3 (c): renounced-owner treatment (via is_renounce_aware in blacklist/one_way_gate).
     violations.extend(rules::launch::check(contract)); // SAFETY-023/024 + P3-own-3(a)(c)
+
+    // Batch 4 (4g): sell-path external-call revert veto.
+    // SAFETY-025: any external call on the transfer path must be try-wrapped.
+    violations.extend(rules::sell_path_veto::check(contract)); // SAFETY-025
 
     if violations.is_empty() {
         Ok(())

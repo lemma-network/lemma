@@ -9,15 +9,15 @@
 //! # lemma-lang
 //!
 //! The Lem language compiler pipeline: lexer, parser, type checker,
-//! safety analyzer (SAFETY-001…013), and WASM codegen.
+//! safety analyzer (SAFETY-001…025), and WASM codegen.
 //!
 //! ## Current status
 //!
 //! - **P3·Step 1 (Lexer)** ✅ — `tokenize()` is the public entry point.
 //! - **P3·Step 2 (Parser)** ✅ — `parse()` produces the full AST.
 //! - **P3·Step 3 (Type checker)** ✅ — `check()` complete (3a–3h).
-//! - **P3·Step 4 (Safety analyzer)** 🔨 — `analyze_safety()` in progress (4a stub).
-//! - Codegen: Step 6.
+//! - **P3·Step 4 (Safety analyzer)** ✅ — SAFETY-001…025 complete. Wired into check() pipeline.
+//! - **P3·Step 5–8**: state access analyzer, codegen, VM, std library. See docs/04-BUILD_GUIDE.md.
 //!
 //! ## Usage
 //!

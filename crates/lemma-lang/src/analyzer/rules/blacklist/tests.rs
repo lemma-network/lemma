@@ -8,14 +8,14 @@
 //! global boolean gate. A non-param-keyed bool flag does NOT trigger 005.
 
 use crate::analyzer::error::SafetyError;
-use crate::{check, parse, tokenize};
+use crate::{parse, tokenize};
 
 use super::check as blacklist_check;
 
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── Positive tests (safe contracts → empty Vec) ──────────────────────────────

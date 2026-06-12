@@ -1,11 +1,11 @@
-use crate::{check, parse, tokenize};
+use crate::{parse, tokenize};
 
 use super::{build_call_graph, cfg_nodes, ext_calls, CfgNode};
 
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── build_call_graph ─────────────────────────────────────────────────────────

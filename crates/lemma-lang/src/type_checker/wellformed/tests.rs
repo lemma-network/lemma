@@ -33,18 +33,22 @@
 
 use crate::error::LangError;
 use crate::type_checker::error::TypeErrorKind;
-use crate::{check, parse, tokenize};
+use crate::{parse, tokenize};
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
-/// Run the full tokenize → parse → type-check pipeline on `src`.
+/// Run the tokenize → parse → type-check + WF pipeline on `src`.
+///
+/// Uses `check_wf_only` (WF pass runs; safety pass skipped) so that WF tests
+/// can verify WF-001…015 on intentionally minimal contracts (e.g. no `transfer`
+/// function) without the safety analyzer rejecting them first.
 ///
 /// Returns `Ok(TypedAst)` on success or `Err(LangError)` on any error
 /// (type error, parse error, or well-formedness violation).
 fn check_src(src: &str) -> Result<crate::type_checker::TypedAst, LangError> {
     let tokens = tokenize(src).expect("tokenize failed");
     let ast = parse(tokens).expect("parse failed");
-    check(ast)
+    crate::type_checker::check_wf_only(ast)
 }
 
 /// Assert that `check_src(src)` succeeds (no errors).

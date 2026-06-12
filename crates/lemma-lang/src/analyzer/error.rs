@@ -324,6 +324,22 @@ pub enum SafetyError {
         annotation: String,
     },
 
+    // ── SAFETY-025 — Sell-Path External Veto ─────────────────────────────────
+    /// An external call on the sell/transfer path is not try-wrapped — the called
+    /// contract can revert and block the sell (revert-veto over sells).
+    ///
+    /// Fix: wrap the external call in `try { … } catch { … }`.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-quinquies SAFETY-025`.
+    #[error(
+        "SAFETY-025 sell-path external veto: `{func}` makes an unwrapped external call \
+         that can revert and block sells — wrap in try/catch or remove from sell path"
+    )]
+    SellPathExternalVeto {
+        /// The transfer-path function containing the unguarded external call.
+        func: String,
+    },
+
     // ── Inconclusive ──────────────────────────────────────────────────────────
     /// Analysis is inconclusive for a sound rule: the contract cannot be
     /// *proven* safe, so it is **rejected** (soundness over completeness).

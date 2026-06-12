@@ -1,8 +1,8 @@
 //! Tests for the analyze_safety driver.
 //!
 //! 4a tests: stub returns Ok(()) for any well-typed contract.
-//! 4d–4f tests: per-rule positive + negative + boundary + cross-rule tests
-//! will be added here as each rule batch is implemented.
+//! 4g tests: end-to-end driver tests — plain token passes all rules,
+//!   TaxToken passes all rules, collect-all behavior verified.
 
 use crate::{check, parse, tokenize};
 
@@ -93,5 +93,117 @@ fn analyze_safety_returns_ok_not_err_in_stub_phase() {
         result,
         Ok(()),
         "stub must return Ok(()) for any input: {result:?}"
+    );
+}
+
+// ─── P3·Step 4g driver tests ──────────────────────────────────────────────────
+
+#[test]
+fn analyze_safety_plain_token_passes_all_rules() {
+    // A valid minimal Token contract with a transfer function must pass all
+    // SAFETY-001…025 rules (Ok(())).
+    let ast = typed_ast(
+        r#"token MinimalToken extends Token {
+config {
+name: "Minimal"
+symbol: "MIN"
+decimals: 18
+maxSupply: 1000000
+}
+state { totalSupply: u128 = 0 balances: Map<Address, u128> }
+init() {}
+pub fn transfer(to: Address, amount: u128) {
+self.balances[to] = amount
+}
+pub fn transferFrom(from: Address, to: Address, amount: u128) {
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    assert_eq!(contracts.len(), 1);
+    let result = super::analyze_safety(&contracts[0]);
+    assert!(
+        result.is_ok(),
+        "valid minimal Token must pass all SAFETY rules; got {result:?}"
+    );
+}
+
+#[test]
+fn analyze_safety_tax_token_passes_all_rules() {
+    // A valid minimal TaxToken with no distributeTaxes, no isTaxable, no fees
+    // setter must pass all SAFETY-001…025 rules (Ok(())).
+    // Uses fees.others = 0 to avoid WF-014 distributeTaxes requirement.
+    let ast = typed_ast(
+        r#"token MinimalTax extends TaxToken {
+config {
+name: "MinimalTax"
+symbol: "MTAX"
+decimals: 18
+maxSupply: 1000000
+fees: { burn: 0 holders: 0 others: 0 }
+}
+state { totalSupply: u128 = 0 balances: Map<Address, u128> }
+init() {}
+pub fn transfer(to: Address, amount: u128) {
+self.balances[to] = amount
+}
+pub fn transferFrom(from: Address, to: Address, amount: u128) {
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    assert_eq!(contracts.len(), 1);
+    let result = super::analyze_safety(&contracts[0]);
+    assert!(
+        result.is_ok(),
+        "valid minimal TaxToken must pass all SAFETY rules; got {result:?}"
+    );
+}
+
+#[test]
+fn analyze_safety_contract_with_multiple_violations_collects_all() {
+    // A contract with 2 distinct violations must return Err with both in the Vec
+    // (collect-all behavior — never fail-fast).
+    //
+    // Violations triggered:
+    // - SAFETY-004: state written after external call (CEI violation)
+    // - SAFETY-011: dynamic delegate call via self.implementation.execute()
+    let tokens = tokenize(
+        r#"contract MultiViolation {
+state { implementation: Address bal: u128 = 0 }
+init(implementation: Address) {
+self.implementation = implementation
+}
+pub fn execute(data: u128) {
+let _ = self.implementation.execute(data)
+self.bal = self.bal + 1
+}
+}"#,
+    )
+    .expect("tokenize");
+    let ast = parse(tokens).expect("parse");
+    let typed = crate::type_checker::check_skip_wf(ast).expect("type check");
+    let contracts = typed.contracts();
+    let result = super::analyze_safety(&contracts[0]);
+    let violations = result.unwrap_err();
+    assert!(
+        violations.len() >= 2,
+        "at least 2 violations expected (collect-all); got {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|e| matches!(
+            e,
+            crate::analyzer::error::SafetyError::StateAfterCall { .. }
+        )),
+        "SAFETY-004 StateAfterCall must be present; got {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|e| matches!(
+            e,
+            crate::analyzer::error::SafetyError::UnsafeDelegate { .. }
+        )),
+        "SAFETY-011 UnsafeDelegate must be present; got {violations:?}"
     );
 }

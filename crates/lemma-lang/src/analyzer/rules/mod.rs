@@ -30,3 +30,6 @@ pub(crate) mod tax;
 
 // Batch 3 (4f-launch): launch/holding-control rules (SAFETY-023/024 + P3-own-3 a/c).
 pub(crate) mod launch;
+
+// Batch 4 (4g): sell-path external-veto rule (SAFETY-025).
+pub(crate) mod sell_path_veto;

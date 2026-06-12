@@ -5,12 +5,13 @@
 //! SAFETY-008 is **decidable-exact** — `Ext(f)` is either empty or non-empty.
 //! There is no `Inconclusive` path. No `Inconclusive→reject` case needed.
 //!
-//! ## Cross-rule interaction and fuzz tests
+//! ## Cross-rule interaction tests (P3·Step 4g)
 //!
-//! Deferred to **P3·Step 4g**. Intentional deferral; tracked in living-notes.
+//! Cross-rule tests call `analyze_safety` directly to verify that multiple
+//! rules fire simultaneously on a single contract.
 
 use crate::analyzer::error::SafetyError;
-use crate::{check, parse, tokenize};
+use crate::{analyze_safety, parse, tokenize};
 
 use super::check as hooks_check;
 
@@ -18,7 +19,7 @@ use super::check as hooks_check;
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── Positive tests (safe contracts → empty Vec) ──────────────────────────────
@@ -153,5 +154,41 @@ self.balances.set(to, amount)
     assert!(
         violations.is_empty(),
         "hook writing own collection state must pass SAFETY-008 (P3-cfg-1); got {violations:?}"
+    );
+}
+
+// ─── Cross-rule interaction tests (P3·Step 4g) ────────────────────────────────
+
+#[test]
+fn cross_rule_safety_008_and_004_combined() {
+    // #[onTransfer] hook that makes an external call (SAFETY-008) AND writes
+    // state after it (SAFETY-004) → both violations must appear.
+    let tokens = tokenize(
+        r#"contract C {
+state { count: u128 = 0 }
+#[onTransfer]
+pub fn onTransfer(target: Address, amount: u128) {
+let _ = target.transfer(amount)
+self.count = self.count + 1
+}
+}"#,
+    )
+    .expect("tokenize");
+    let ast = parse(tokens).expect("parse");
+    let typed = crate::type_checker::check_skip_wf(ast).expect("type check");
+    let contracts = typed.contracts();
+    let result = analyze_safety(&contracts[0]);
+    let violations = result.unwrap_err();
+    assert!(
+        violations
+            .iter()
+            .any(|e| matches!(e, SafetyError::HookEscape { .. })),
+        "SAFETY-008 HookEscape must be present; got {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|e| matches!(e, SafetyError::StateAfterCall { .. })),
+        "SAFETY-004 StateAfterCall must be present; got {violations:?}"
     );
 }

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{check, parse, tokenize};
+use crate::{parse, tokenize};
 
 use super::{
     all_auth_sets, auth_set, compute_eff_auth, is_access_unrestricted, requires_governance,
@@ -11,7 +11,7 @@ use crate::analyzer::cfg::build_call_graph;
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── auth_set ─────────────────────────────────────────────────────────────────

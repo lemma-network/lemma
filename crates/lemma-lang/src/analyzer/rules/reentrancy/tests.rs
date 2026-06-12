@@ -8,13 +8,13 @@
 //! pass (empty `Vec`) or fail (one `StateAfterCall` per function). No
 //! `Inconclusive→reject` test case exists or is needed.
 //!
-//! ## Cross-rule interaction and fuzz tests (spec §5.2)
+//! ## Cross-rule interaction tests (P3·Step 4g)
 //!
-//! Deferred to **P3·Step 4g** (integration + fuzz + full pipeline wiring), as
-//! stated in `analyzer/mod.rs`. Intentional deferral; tracked in living-notes.
+//! Cross-rule tests call `analyze_safety` directly to verify that multiple
+//! rules fire simultaneously on a single contract.
 
 use crate::analyzer::error::SafetyError;
-use crate::{check, parse, tokenize};
+use crate::{analyze_safety, parse, tokenize};
 
 use super::check as reentrancy_check;
 
@@ -22,7 +22,7 @@ use super::check as reentrancy_check;
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── Positive tests (safe contracts → empty Vec) ──────────────────────────────
@@ -341,5 +341,44 @@ self.queue.sort()
             .iter()
             .any(|v| matches!(v, SafetyError::StateAfterCall { func, .. } if func == "badReorder")),
         "in-place sort after external call must be a SAFETY-004 violation; got {violations:?}"
+    );
+}
+
+// ─── Cross-rule interaction tests (P3·Step 4g) ────────────────────────────────
+
+#[test]
+fn cross_rule_safety_004_and_012_both_detected() {
+    // Contract with unchecked arithmetic AFTER an external call:
+    // → SAFETY-004 (state written after external call — CEI violation)
+    // → SAFETY-012 (unchecked arithmetic flows into a state field)
+    // Both violations must appear in the combined Vec<SafetyError>.
+    let tokens = tokenize(
+        r#"contract C {
+state { bal: u128 = 0 }
+pub fn badWithdraw(target: Address, amount: u128) {
+let _ = target.transfer(amount)
+unchecked {
+self.bal = self.bal - amount
+}
+}
+}"#,
+    )
+    .expect("tokenize");
+    let ast = parse(tokens).expect("parse");
+    let typed = crate::type_checker::check_skip_wf(ast).expect("type check");
+    let contracts = typed.contracts();
+    let result = analyze_safety(&contracts[0]);
+    let violations = result.unwrap_err();
+    assert!(
+        violations
+            .iter()
+            .any(|e| matches!(e, SafetyError::StateAfterCall { .. })),
+        "SAFETY-004 StateAfterCall must be present; got {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|e| matches!(e, SafetyError::UncheckedArithmetic { .. })),
+        "SAFETY-012 UncheckedArithmetic must be present; got {violations:?}"
     );
 }

@@ -1,4 +1,4 @@
-use crate::{check, parse, tokenize};
+use crate::{parse, tokenize};
 
 use super::{restriction_fields, state_write_reachability, taint_propagate, TaintedVar};
 use crate::analyzer::cfg::build_call_graph;
@@ -6,7 +6,7 @@ use crate::analyzer::cfg::build_call_graph;
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── taint_propagate ─────────────────────────────────────────────────────────

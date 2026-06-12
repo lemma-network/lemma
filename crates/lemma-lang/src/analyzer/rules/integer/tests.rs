@@ -7,12 +7,13 @@
 //! contracts either pass (no unchecked arithmetic on state fields) or fail
 //! (exact `UncheckedArithmetic` variant). No `Inconclusive→reject` case needed.
 //!
-//! ## Cross-rule interaction and fuzz tests
+//! ## Cross-rule interaction tests (P3·Step 4g)
 //!
-//! Deferred to **P3·Step 4g**. Intentional deferral; tracked in living-notes.
+//! Cross-rule tests call `analyze_safety` directly to verify that multiple
+//! rules fire simultaneously on a single contract.
 
 use crate::analyzer::error::SafetyError;
-use crate::{check, parse, tokenize};
+use crate::{analyze_safety, parse, tokenize};
 
 use super::check as integer_check;
 
@@ -20,7 +21,7 @@ use super::check as integer_check;
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── Positive tests (safe contracts → empty Vec) ──────────────────────────────
@@ -91,8 +92,49 @@ self.balance = self.balance + amount
     );
     assert!(
         matches!(&violations[0], SafetyError::UncheckedArithmetic { op, .. } if op == "+"),
-        "violation must be UncheckedArithmetic with op '+'; got {:?}",
+        "expected UncheckedArithmetic(+); got {:?}",
         violations[0]
+    );
+}
+
+// ─── Cross-rule interaction tests (P3·Step 4g) ────────────────────────────────
+
+#[test]
+fn cross_rule_safety_012_and_002_combined() {
+    // Contract with unchecked arithmetic on balance (SAFETY-012) AND a
+    // maxFeePercent that exceeds the protocol ceiling of 2500 bps (SAFETY-002)
+    // → both violations must appear in the combined Vec<SafetyError>.
+    //
+    // maxFeePercent: 3000 (30%) exceeds the protocol hard cap of 2500 bps (25%).
+    let tokens = tokenize(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 maxFeePercent: 3000 }
+state { balance: u128 = 0 }
+init() {}
+pub fn transfer(to: Address, amount: u128) {
+unchecked {
+self.balance = self.balance - amount
+}
+}
+}"#,
+    )
+    .expect("tokenize");
+    let ast = parse(tokens).expect("parse");
+    let typed = crate::type_checker::check_skip_wf(ast).expect("type check");
+    let contracts = typed.contracts();
+    let result = analyze_safety(&contracts[0]);
+    let violations = result.unwrap_err();
+    assert!(
+        violations
+            .iter()
+            .any(|e| matches!(e, SafetyError::UncheckedArithmetic { .. })),
+        "SAFETY-012 UncheckedArithmetic must be present; got {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|e| matches!(e, SafetyError::FeeTooHigh { .. })),
+        "SAFETY-002 FeeTooHigh must be present; got {violations:?}"
     );
 }
 

@@ -5,14 +5,14 @@
 
 use crate::parser::{Expr, Stmt};
 use crate::visit::{walk_expr, walk_stmt, Visitor};
-use crate::{check, parse, tokenize};
+use crate::{parse, tokenize};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn typed_ast(src: &str) -> crate::type_checker::TypedAst {
     let tokens = tokenize(src).expect("tokenize");
     let ast = parse(tokens).expect("parse");
-    check(ast).expect("check")
+    crate::type_checker::check_skip_wf(ast).expect("check")
 }
 
 // ─── Recording visitor ────────────────────────────────────────────────────────
