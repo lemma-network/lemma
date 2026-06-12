@@ -17,7 +17,10 @@
 //! - **P3·Step 2 (Parser)** ✅ — `parse()` produces the full AST.
 //! - **P3·Step 3 (Type checker)** ✅ — `check()` complete (3a–3h).
 //! - **P3·Step 4 (Safety analyzer)** ✅ — SAFETY-001…025 complete. Wired into check() pipeline.
-//! - **P3·Step 5–8**: state access analyzer, codegen, VM, std library. See docs/04-BUILD_GUIDE.md.
+//! - **P3·Step 5 (State-access analyzer)** ✅ — `analyze_state_access()` extracts per-function
+//!   read/write [`AccessKey`] sets (Field/SenderSlot/ParamSlot/DynamicSlot), Express eligibility,
+//!   and a placeholder gas estimate for Flux/Express. Producer-only (hint, not a pipeline gate).
+//! - **P3·Step 6–8**: codegen, VM, std library. See docs/04-BUILD_GUIDE.md.
 //!
 //! ## Usage
 //!
@@ -41,7 +44,7 @@ pub mod type_checker;
 pub(crate) mod visit;
 
 // Re-export the primary entry points at the crate root for ergonomics.
-pub use analyzer::analyze_safety;
+pub use analyzer::{analyze_safety, analyze_state_access, AccessKey, StateAccessInfo};
 pub use lexer::tokenize;
 pub use parser::parse;
 pub use type_checker::check;

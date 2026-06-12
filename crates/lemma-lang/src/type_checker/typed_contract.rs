@@ -228,6 +228,24 @@ impl<'a> TypedContract<'a> {
         out
     }
 
+    /// All `modifier` definitions declared by this contract, in declaration order.
+    ///
+    /// A function decorated `@name` inherits the state access of the `modifier name`
+    /// returned here — consumed by the Step 5 state-access analyzer (P3-own-3 b,
+    /// 09-SAFETY_ANALYZER_SPEC §2.1) for modifier state-access folding.  Mirrors
+    /// [`functions`] / [`state_fields`]; the analyzer cannot reach the `pub(super)`
+    /// `members()` walk directly (it lives in a sibling top-level module).
+    #[must_use]
+    pub fn modifiers(&self) -> Vec<&'a crate::parser::ModifierDef> {
+        self.members()
+            .iter()
+            .filter_map(|m| match m {
+                crate::parser::ContractMember::Modifier(md) => Some(md),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Look up the resolved type of an expression by span (delegates to TypedAst).
     #[must_use]
     pub fn type_of(&self, span: &Span) -> Option<&ResolvedType> {

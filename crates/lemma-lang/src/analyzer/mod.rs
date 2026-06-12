@@ -49,7 +49,9 @@ pub(crate) mod dataflow;
 pub mod error;
 pub(crate) mod rules;
 pub(crate) mod safety;
+pub mod state_access;
 pub(crate) mod util;
 
 pub use error::SafetyError;
 pub use safety::analyze_safety;
+pub use state_access::{analyze_state_access, AccessKey, StateAccessInfo};
