@@ -6,10 +6,23 @@
 //! `try { … } catch { … }` is rejected with `SellPathExternalVeto`.
 //! A try-wrapped call cannot propagate a revert from the callee.
 //!
-//! ## Inconclusive coverage
+//! ## Inconclusive coverage (spec §3-quinquies)
 //!
-//! SAFETY-025 is decidable-exact for the try-wrapping check: an external call
-//! is either inside a `Stmt::Try` body or it is not.  No `Inconclusive` path.
+//! External calls inside complex control flow (if/match/for/while/loop) that
+//! cannot be statically proven try-wrapped → `Inconclusive` (reject-on-doubt).
+//! External calls at the top level of a function body that are not try-wrapped
+//! → `SellPathExternalVeto`.
+//!
+//! ## C1a coverage (catch-body false-negative fix)
+//!
+//! External calls inside a `catch` handler are NOT considered try-protected —
+//! the catch handler runs after the revert, not before.  Such calls must be
+//! flagged as violations, not silently accepted.
+//!
+//! ## C1b coverage (Inconclusive path)
+//!
+//! External calls inside control flow (if/match/for/while/loop) that are not
+//! try-wrapped → `Inconclusive` (spec §3-quinquies reject-on-doubt).
 
 use crate::analyzer::error::SafetyError;
 use crate::{parse, tokenize};
@@ -126,6 +139,166 @@ self.balances[to] = amount
             .iter()
             .any(|v| matches!(v, SafetyError::SellPathExternalVeto { func } if func == "transfer")),
         "violation must be SellPathExternalVeto for transfer; got {violations:?}"
+    );
+}
+
+#[test]
+fn transfer_from_with_unwrapped_external_call_rejected() {
+    // transferFrom with unwrapped external call → SellPathExternalVeto.
+    // Covers the transferFrom entry point (M4 test 3).
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 externalChecker: "lem1qchecker" }
+state { balances: Map<Address, u128> checker: Address }
+init(c: Address) { self.checker = c }
+pub fn transfer(to: Address, amount: u128) {
+self.balances[to] = amount
+}
+pub fn transferFrom(from: Address, to: Address, amount: u128) {
+let _ = self.checker.canTransfer(from, to)
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = sell_path_veto_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::SellPathExternalVeto { func } if func == "transferFrom")),
+        "unwrapped external call in transferFrom must produce SellPathExternalVeto; got {violations:?}"
+    );
+}
+
+#[test]
+fn on_transfer_hook_with_unwrapped_external_call_rejected() {
+    // #[onTransfer] hook with unwrapped external call → SellPathExternalVeto.
+    // Covers the #[onTransfer] entry point (M4 test 2).
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 externalChecker: "lem1qchecker" }
+state { balances: Map<Address, u128> checker: Address }
+init(c: Address) { self.checker = c }
+pub fn transfer(to: Address, amount: u128) {
+self.balances[to] = amount
+}
+#[onTransfer]
+pub fn onTransfer(to: Address, amount: u128) {
+let _ = self.checker.canTransfer(to, amount)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = sell_path_veto_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::SellPathExternalVeto { func } if func == "onTransfer")),
+        "#[onTransfer] hook with unwrapped external call must produce SellPathExternalVeto; got {violations:?}"
+    );
+}
+
+#[test]
+fn transitive_callee_with_unwrapped_external_call_rejected() {
+    // transfer() calls self.processTransfer() which makes an unwrapped external call.
+    // The transitive callee must be flagged (M4 test 1 — covers transitive_callees path).
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 externalChecker: "lem1qchecker" }
+state { balances: Map<Address, u128> checker: Address }
+init(c: Address) { self.checker = c }
+pub fn transfer(to: Address, amount: u128) {
+let _ = self.processTransfer(to, amount)
+}
+fn processTransfer(to: Address, amount: u128) {
+let _ = self.checker.canTransfer(to, amount)
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = sell_path_veto_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::SellPathExternalVeto { func } if func == "processTransfer")),
+        "transitive callee with unwrapped external call must produce SellPathExternalVeto; got {violations:?}"
+    );
+}
+
+// ─── C1a: catch-body false-negative fix ──────────────────────────────────────
+
+#[test]
+fn external_call_in_catch_body_is_flagged() {
+    // External call inside a catch handler is NOT try-protected.
+    // C1a fix: TryBodySpanCollector skips catch_body — this call must be flagged.
+    // The catch body is not "protected" from the caller's perspective.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 externalChecker: "lem1qchecker" }
+state { balances: Map<Address, u128> checker: Address }
+init(c: Address) { self.checker = c }
+pub fn transfer(to: Address, amount: u128) {
+try {
+self.balances[to] = amount
+} catch (err) {
+let _ = self.checker.canTransfer(to, amount)
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = sell_path_veto_check(&contracts[0]);
+    // The call in catch_body is NOT try-protected — it must produce a violation.
+    assert!(
+        !violations.is_empty(),
+        "external call in catch_body must be flagged by SAFETY-025 (C1a fix); got {violations:?}"
+    );
+    // It should be either SellPathExternalVeto or Inconclusive — not clean.
+    assert!(
+        violations.iter().any(|v| matches!(
+            v,
+            SafetyError::SellPathExternalVeto { .. } | SafetyError::Inconclusive { rule: "SAFETY-025", .. }
+        )),
+        "violation must be SellPathExternalVeto or Inconclusive for catch-body call; got {violations:?}"
+    );
+}
+
+// ─── C1b: Inconclusive path for control-flow external calls ──────────────────
+
+#[test]
+fn external_call_in_if_without_try_is_inconclusive() {
+    // External call inside an if block without try wrapping → Inconclusive.
+    // C1b fix: calls in control flow that cannot be statically proven try-wrapped
+    // → Inconclusive (spec §3-quinquies reject-on-doubt).
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 externalChecker: "lem1qchecker" }
+state { balances: Map<Address, u128> checker: Address enabled: bool }
+init(c: Address) { self.checker = c self.enabled = true }
+pub fn transfer(to: Address, amount: u128) {
+if (self.enabled) {
+let _ = self.checker.canTransfer(to, amount)
+}
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = sell_path_veto_check(&contracts[0]);
+    assert!(
+        !violations.is_empty(),
+        "external call in if-block without try must produce a violation; got {violations:?}"
+    );
+    assert!(
+        violations.iter().any(|v| matches!(
+            v,
+            SafetyError::Inconclusive {
+                rule: "SAFETY-025",
+                ..
+            }
+        )),
+        "violation must be Inconclusive for control-flow external call; got {violations:?}"
     );
 }
 

@@ -31,13 +31,20 @@
 //! from the transfer path.  For each such function, scans the body for external
 //! calls that are NOT inside a `Stmt::Try` body.
 //!
+//! External calls inside complex control flow (if/match/for/while/loop) that are
+//! not try-wrapped → `Inconclusive` (spec §3-quinquies: "reject-on-doubt").
+//! External calls at the top level of a function body that are not try-wrapped
+//! → `SellPathExternalVeto`.
+//!
 //! See `09-SAFETY_ANALYZER_SPEC §3-quinquies SAFETY-025`.
 
 use std::collections::BTreeSet;
 
 use crate::analyzer::cfg::{build_call_graph, ext_calls};
 use crate::analyzer::error::SafetyError;
-use crate::parser::Stmt;
+use crate::analyzer::util::is_transfer_path_entry;
+use crate::lexer::token::Span;
+use crate::parser::{MatchBody, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_stmt, Visitor};
 
@@ -45,8 +52,10 @@ use crate::visit::{walk_stmt, Visitor};
 
 /// Check a contract for SAFETY-025 sell-path external-veto violations.
 ///
-/// Returns one [`SafetyError::SellPathExternalVeto`] per transfer-path function
-/// that makes an external call not wrapped in `try { … } catch { … }`.
+/// Returns [`SafetyError::SellPathExternalVeto`] for each transfer-path function
+/// that makes an unwrapped top-level external call, and
+/// [`SafetyError::Inconclusive`] for external calls inside control flow that
+/// cannot be statically proven try-wrapped.
 /// Returns an empty `Vec` when safe.
 #[must_use]
 pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
@@ -59,7 +68,7 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     let transfer_entries: BTreeSet<String> = contract
         .functions()
         .into_iter()
-        .filter(|f| is_transfer_path_fn(f.name, f.annotations))
+        .filter(|f| is_transfer_path_entry(f))
         .map(|f| f.name.to_owned())
         .collect();
 
@@ -76,24 +85,15 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
             continue;
         }
 
-        // Check whether every external call in this function is try-wrapped.
+        // Classify each unwrapped external call as a violation or Inconclusive.
         let func_name = func.name.to_owned();
-        if has_unwrapped_external_call(func) {
-            violations.push(SafetyError::SellPathExternalVeto { func: func_name });
-        }
+        violations.extend(classify_unwrapped_calls(func, &func_name));
     }
 
     violations
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Returns `true` if `name` / `annotations` identify a transfer-path entry.
-fn is_transfer_path_fn(name: &str, annotations: &[crate::parser::Annotation]) -> bool {
-    name == "transfer"
-        || name == "transferFrom"
-        || annotations.iter().any(|a| a.name == "onTransfer")
-}
 
 /// Compute the transitive closure of `seed` over forward call edges.
 ///
@@ -120,93 +120,209 @@ fn transitive_callees(
     reachable
 }
 
-/// Returns `true` if `func` contains at least one external call that is NOT
-/// wrapped inside a `Stmt::Try` body.
+/// Classify unwrapped external calls in `func` into violations and Inconclusive.
 ///
-/// Strategy: collect all external-call spans from `ext_calls`, then collect
-/// all external-call spans that ARE inside a `Stmt::Try` body.  If any
-/// external-call span is not in the try-wrapped set, the function is unsafe.
-fn has_unwrapped_external_call(func: ContractFunction<'_>) -> bool {
+/// Strategy (M2 fix — uses `ext_calls()` as the canonical source of truth):
+/// 1. Get all external-call spans via `ext_calls(&func)` (canonical detection).
+/// 2. Walk the function body with [`ExtCallContextScanner`] to classify each
+///    call span as: `Protected` (inside try body), `ControlFlow` (inside
+///    if/match/for/while/loop but not try), or `TopLevel` (neither).
+/// 3. For each external-call span:
+///    - `Protected` → safe (skip).
+///    - `ControlFlow` → `Inconclusive` (spec §3-quinquies reject-on-doubt).
+///    - `TopLevel` → `SellPathExternalVeto`.
+///
+/// Emits at most one `Inconclusive` per function (one is sufficient to reject).
+fn classify_unwrapped_calls(func: ContractFunction<'_>, func_name: &str) -> Vec<SafetyError> {
     let Some(body) = func.body else {
-        return false;
+        return Vec::new();
     };
 
-    // Collect all external-call spans in the function.
+    // Canonical source of truth for external-call spans (M2: no re-detection).
     let all_ext = ext_calls(&func);
     if all_ext.is_empty() {
-        return false;
+        return Vec::new();
     }
 
-    // Collect spans of external calls that are inside a Stmt::Try body.
-    let mut try_scanner = TryWrappedExtCallScanner {
-        wrapped_spans: BTreeSet::new(),
-    };
-    try_scanner.visit_stmts(body);
+    // Walk the body to classify each call span by its context.
+    let mut scanner = ExtCallContextScanner::default();
+    scanner.visit_stmts(body);
 
-    // If any external call span is NOT in the try-wrapped set → unwrapped call exists.
-    all_ext
-        .iter()
-        .any(|ec| !try_scanner.wrapped_spans.contains(&ec.span))
+    let mut violations = Vec::new();
+    let mut emitted_inconclusive = false;
+
+    for ec in &all_ext {
+        if scanner.protected_spans.contains(&ec.span) {
+            // Try-wrapped → safe.
+            continue;
+        }
+        if scanner.control_flow_spans.contains(&ec.span) {
+            // Inside control flow but not try-wrapped → Inconclusive.
+            // Emit at most one per function (one is sufficient to reject).
+            if !emitted_inconclusive {
+                violations.push(SafetyError::Inconclusive {
+                    rule: "SAFETY-025",
+                    reason: format!(
+                        "`{func_name}` has an external call inside control flow that \
+                         cannot be statically proven try-wrapped — \
+                         wrap in try/catch or move outside control flow"
+                    ),
+                    span: ec.span,
+                });
+                emitted_inconclusive = true;
+            }
+        } else {
+            // Top-level unwrapped external call → definite violation.
+            violations.push(SafetyError::SellPathExternalVeto {
+                func: func_name.to_owned(),
+            });
+            // One SellPathExternalVeto per function is sufficient.
+            break;
+        }
+    }
+
+    violations
 }
 
 // ─── Visitor ──────────────────────────────────────────────────────────────────
 
-/// Visitor that collects the spans of all external calls that appear inside
-/// the `body` of a `Stmt::Try` block (at any nesting depth within that body).
+/// Visitor that classifies call spans by their context within a function body.
 ///
-/// An external call is "try-wrapped" if it is reachable only through the `body`
-/// of at least one enclosing `Stmt::Try`.  Calls in the `catch_body` are NOT
-/// considered wrapped (the catch handler runs after the revert, not before).
-struct TryWrappedExtCallScanner {
-    /// Spans of external calls that are inside a try body.
-    wrapped_spans: BTreeSet<crate::lexer::token::Span>,
+/// Tracks two sets of spans:
+/// - `protected_spans`: call spans inside a `Stmt::Try` body (try-wrapped).
+/// - `control_flow_spans`: call spans inside if/match/for/while/loop but NOT
+///   inside a try body.
+///
+/// The caller intersects these sets with `ext_calls()` spans to determine
+/// which external calls are protected, which are in control flow, and which
+/// are at the top level.
+///
+/// ## C1a fix
+///
+/// `Stmt::Try` catch bodies are NOT descended — calls in the catch handler are
+/// not try-protected (the catch runs after the revert, not before).
+///
+/// ## M2 fix
+///
+/// Collects ALL call spans (not just external ones) — the caller intersects
+/// with `ext_calls()` to determine which are external.  This removes the
+/// duplication of external-call detection logic from this visitor.
+#[derive(Default)]
+struct ExtCallContextScanner {
+    /// Spans of all call expressions inside try bodies (protected).
+    protected_spans: BTreeSet<Span>,
+    /// Spans of all call expressions inside control flow but not try bodies.
+    control_flow_spans: BTreeSet<Span>,
+    /// Whether we are currently inside a control-flow block (not a try body).
+    inside_control_flow: bool,
 }
 
-impl Visitor for TryWrappedExtCallScanner {
+impl Visitor for ExtCallContextScanner {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            // Try block: collect all call spans from the try body into protected_spans.
+            // C1a fix: do NOT recurse into catch_body — calls there are not protected.
+            // Note: nested Stmt::Try inside the try body is handled by the recursive
+            // visit_stmts call (which will again skip catch_body).
+            Stmt::Try { body, .. } => {
+                // Temporarily clear inside_control_flow for the try body —
+                // calls inside a try body are protected regardless of outer context.
+                let saved_cf = self.inside_control_flow;
+                self.inside_control_flow = false;
+
+                // Collect all call spans from the try body.
+                let mut try_collector = TryBodyCallCollector {
+                    spans: BTreeSet::new(),
+                };
+                try_collector.visit_stmts(body);
+                self.protected_spans.extend(try_collector.spans);
+
+                // Recurse into the try body for nested try/control-flow blocks.
+                self.visit_stmts(body);
+
+                self.inside_control_flow = saved_cf;
+                // Do NOT recurse into catch_body (C1a fix).
+            }
+
+            // Control-flow statements: recurse with inside_control_flow = true.
+            Stmt::If { then, else_, .. } => {
+                let saved_cf = self.inside_control_flow;
+                self.inside_control_flow = true;
+                self.visit_stmts(then);
+                for b in else_.iter() {
+                    self.visit_stmts(b);
+                }
+                self.inside_control_flow = saved_cf;
+            }
+            Stmt::Match { arms, .. } => {
+                let saved_cf = self.inside_control_flow;
+                self.inside_control_flow = true;
+                for arm in arms {
+                    match &arm.body {
+                        MatchBody::Block(stmts) => self.visit_stmts(stmts),
+                        MatchBody::Expr(_) => {}
+                    }
+                }
+                self.inside_control_flow = saved_cf;
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Loop { body, .. } => {
+                let saved_cf = self.inside_control_flow;
+                self.inside_control_flow = true;
+                self.visit_stmts(body);
+                self.inside_control_flow = saved_cf;
+            }
+
+            // All other statements: recurse normally.
+            _ => walk_stmt(self, stmt),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &crate::parser::Expr) {
+        use crate::visit::walk_expr;
+        // Collect call spans into the appropriate set based on current context.
+        // The caller intersects with ext_calls() to filter to external calls only.
+        // Top-level calls are neither protected nor control-flow —
+        // they are identified by absence from both sets.
+        match expr {
+            crate::parser::Expr::Call { span, .. } | crate::parser::Expr::New { span, .. }
+                if self.inside_control_flow =>
+            {
+                self.control_flow_spans.insert(*span);
+            }
+            _ => {}
+        }
+        walk_expr(self, expr);
+    }
+}
+
+/// Visitor that collects spans of ALL call expressions inside a statement slice.
+///
+/// Used by [`ExtCallContextScanner`] to enumerate call spans inside a try body.
+///
+/// **C1a fix**: overrides `visit_stmt` to skip `catch_body` of nested `Stmt::Try` —
+/// calls in the catch handler are NOT try-protected.
+///
+/// **M2 fix**: collects ALL call spans (not just external ones) — the caller
+/// intersects with `ext_calls()` to determine which are external.
+struct TryBodyCallCollector {
+    spans: BTreeSet<Span>,
+}
+
+impl Visitor for TryBodyCallCollector {
     fn visit_stmt(&mut self, stmt: &Stmt) {
         if let Stmt::Try { body, .. } = stmt {
-            // Collect all external-call spans inside this try body.
-            let mut inner = TryBodyExtCallCollector {
-                spans: BTreeSet::new(),
-            };
-            inner.visit_stmts(body);
-            self.wrapped_spans.extend(inner.spans);
-            // Do NOT recurse into catch_body — calls there are not "wrapped"
-            // in the sense that they cannot prevent the original revert.
-            // Do recurse into the try body for nested try blocks.
-            for s in body {
-                self.visit_stmt(s);
-            }
+            // Recurse into the try body ONLY — not catch_body.
+            // C1a: calls in catch_body are not "try-protected" against revert-veto.
+            self.visit_stmts(body);
         } else {
             walk_stmt(self, stmt);
         }
     }
-}
 
-/// Visitor that collects spans of all external calls in a statement slice.
-///
-/// Used by [`TryWrappedExtCallScanner`] to enumerate external calls inside a
-/// try body.  Recurses into all nested control flow.
-struct TryBodyExtCallCollector {
-    spans: BTreeSet<crate::lexer::token::Span>,
-}
-
-impl Visitor for TryBodyExtCallCollector {
     fn visit_expr(&mut self, expr: &crate::parser::Expr) {
-        use crate::analyzer::util::is_self;
         use crate::visit::walk_expr;
-
         match expr {
-            crate::parser::Expr::Call { callee, span, .. } => {
-                // External call: method call on a non-self receiver.
-                if let crate::parser::Expr::Member(obj, _, _) = callee.as_ref() {
-                    if !is_self(obj) {
-                        self.spans.insert(*span);
-                    }
-                }
-            }
-            crate::parser::Expr::New { span, .. } => {
-                // new Contract(…) — deployment leaves current contract context.
+            crate::parser::Expr::Call { span, .. } | crate::parser::Expr::New { span, .. } => {
                 self.spans.insert(*span);
             }
             _ => {}

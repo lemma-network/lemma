@@ -5,6 +5,7 @@
 //! 4d–4f rule batches (AGENTS §2.4 — shared utilities live in one place).
 
 use crate::parser::{Expr, Stmt};
+use crate::type_checker::typed_contract::ContractFunction;
 
 /// Returns `true` if `expr` is the identifier `self`.
 ///
@@ -24,4 +25,22 @@ pub(crate) fn is_self(expr: &Expr) -> bool {
 #[must_use]
 pub(crate) fn block_contains_revert(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| matches!(s, Stmt::Revert { .. }))
+}
+
+/// Returns `true` if `func` is a transfer-path entry point.
+///
+/// Transfer-path entries are:
+/// - `transfer` — the canonical token transfer function.
+/// - `transferFrom` — the delegated transfer function.
+/// - Any function annotated `#[onTransfer]` — a transfer hook.
+///
+/// Used by SAFETY-010, SAFETY-020, SAFETY-023, SAFETY-024, SAFETY-025 and
+/// `dataflow` to identify the root of the transfer call graph.
+///
+/// Canonical form (AGENTS §2.4 — shared utilities live in `lemma-core`/`util`).
+#[must_use]
+pub(crate) fn is_transfer_path_entry(func: &ContractFunction<'_>) -> bool {
+    func.name == "transfer"
+        || func.name == "transferFrom"
+        || func.annotations.iter().any(|a| a.name == "onTransfer")
 }

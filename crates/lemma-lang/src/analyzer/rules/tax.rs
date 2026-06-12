@@ -39,7 +39,7 @@ use std::collections::BTreeSet;
 
 use crate::analyzer::cfg::{self, build_call_graph, CfgNode};
 use crate::analyzer::error::SafetyError;
-use crate::analyzer::util::is_self;
+use crate::analyzer::util::{is_self, is_transfer_path_entry};
 use crate::lexer::token::Span;
 use crate::parser::{CallArg, Expr, Literal, Stmt};
 use crate::type_checker::typed_contract::TypedContract;
@@ -116,7 +116,7 @@ fn check_020_separation(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     let transfer_entries: BTreeSet<String> = contract
         .functions()
         .into_iter()
-        .filter(|f| is_transfer_path_entry(f.name, f.annotations))
+        .filter(|f| is_transfer_path_entry(f))
         .map(|f| f.name.to_owned())
         .collect();
 
@@ -456,13 +456,6 @@ fn check_safety_022(contract: &TypedContract<'_>) -> Vec<SafetyError> {
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
-
-/// Returns `true` if `name` / `annotations` identify a transfer-path entry.
-fn is_transfer_path_entry(name: &str, annotations: &[crate::parser::Annotation]) -> bool {
-    name == "transfer"
-        || name == "transferFrom"
-        || annotations.iter().any(|a| a.name == "onTransfer")
-}
 
 /// Compute the transitive closure of `seed` over forward call edges.
 ///

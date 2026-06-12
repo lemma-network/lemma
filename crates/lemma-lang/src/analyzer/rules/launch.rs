@@ -41,7 +41,7 @@ use std::collections::BTreeSet;
 use crate::analyzer::authset::{auth_set, requires_owner_only};
 use crate::analyzer::error::SafetyError;
 use crate::analyzer::rules::constants::MAX_ANTISNIPE_TAX;
-use crate::analyzer::util::{block_contains_revert, is_self};
+use crate::analyzer::util::{block_contains_revert, is_self, is_transfer_path_entry};
 use crate::lexer::token::Span;
 use crate::parser::{Expr, Literal, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
@@ -94,7 +94,7 @@ fn check_023_maxwallet_exempt(contract: &TypedContract<'_>) -> Vec<SafetyError> 
     let enforcers: Vec<_> = contract
         .functions()
         .into_iter()
-        .filter(|f| is_transfer_path_entry(f.name, f.annotations))
+        .filter(|f| is_transfer_path_entry(f))
         .collect();
 
     if enforcers.is_empty() {
@@ -494,7 +494,7 @@ fn check_024_no_sniper_gates_disposal(contract: &TypedContract<'_>) -> Vec<Safet
     // Pattern: same as restriction_fields analysis but scoped to sniper fields.
     let mut violations = Vec::new();
     for func in contract.functions() {
-        if !is_transfer_path_entry(func.name, func.annotations) {
+        if !is_transfer_path_entry(&func) {
             continue;
         }
         let Some(body) = func.body else {
@@ -609,13 +609,6 @@ fn has_fair_launch(contract: &TypedContract<'_>) -> bool {
     contract
         .config()
         .is_some_and(|cfg| cfg.iter().any(|e| e.key == "fairLaunch"))
-}
-
-/// Returns `true` if `name`/`annotations` identify a transfer-path entry.
-fn is_transfer_path_entry(name: &str, annotations: &[crate::parser::Annotation]) -> bool {
-    name == "transfer"
-        || name == "transferFrom"
-        || annotations.iter().any(|a| a.name == "onTransfer")
 }
 
 // ─── Visitors ─────────────────────────────────────────────────────────────────

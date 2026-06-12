@@ -59,8 +59,9 @@
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-010`.
 
 use crate::analyzer::cfg::ext_calls;
+use crate::analyzer::util::is_transfer_path_entry;
 use crate::parser::ConfigValue;
-use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
+use crate::type_checker::typed_contract::TypedContract;
 
 use crate::analyzer::error::SafetyError;
 
@@ -80,7 +81,7 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     }
 
     for func in contract.functions() {
-        if !is_transfer_path_fn(&func) {
+        if !is_transfer_path_entry(&func) {
             continue;
         }
         // An external call on the transfer path with no declared externalChecker
@@ -104,14 +105,6 @@ fn declares_external_checker(contract: &TypedContract<'_>) -> bool {
         .iter()
         .find(|e| e.key == "externalChecker")
         .is_some_and(|e| matches!(&e.value, ConfigValue::Str(s) if !s.is_empty()))
-}
-
-/// Returns `true` if `func` is a transfer-path entry (`transfer`/`transferFrom`
-/// by name, or annotated `#[onTransfer]`).
-fn is_transfer_path_fn(func: &ContractFunction<'_>) -> bool {
-    func.name == "transfer"
-        || func.name == "transferFrom"
-        || func.annotations.iter().any(|a| a.name == "onTransfer")
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

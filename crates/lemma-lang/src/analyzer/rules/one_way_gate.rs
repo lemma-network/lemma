@@ -49,12 +49,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::analyzer::authset::{auth_set, requires_governance};
 use crate::analyzer::dataflow::restriction_fields;
 use crate::parser::{BinaryOp, Expr, Literal, Stmt, UnaryOp};
-use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
+use crate::type_checker::typed_contract::TypedContract;
 use crate::type_checker::types::ResolvedType;
 use crate::visit::{walk_stmt, Visitor};
 
 use crate::analyzer::error::SafetyError;
-use crate::analyzer::util::{block_contains_revert, is_self};
+use crate::analyzer::util::{block_contains_revert, is_self, is_transfer_path_entry};
 
 /// Check a contract for SAFETY-009 one-way-gate violations.
 ///
@@ -162,7 +162,7 @@ fn blocking_values(
 ) -> BTreeMap<String, BlockingValue> {
     let mut out: BTreeMap<String, BlockingValue> = BTreeMap::new();
     for func in contract.functions() {
-        if !is_transfer_path_fn(&func) {
+        if !is_transfer_path_entry(&func) {
             continue;
         }
         let Some(body) = func.body else {
@@ -175,13 +175,6 @@ fn blocking_values(
         scanner.visit_stmts(body);
     }
     out
-}
-
-/// Returns `true` if `func` is a transfer-path entry.
-fn is_transfer_path_fn(func: &ContractFunction<'_>) -> bool {
-    func.name == "transfer"
-        || func.name == "transferFrom"
-        || func.annotations.iter().any(|a| a.name == "onTransfer")
 }
 
 /// Visitor that infers blocking polarity from gating conditions.

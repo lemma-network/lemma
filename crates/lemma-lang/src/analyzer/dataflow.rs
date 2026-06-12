@@ -51,7 +51,7 @@ use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_stmt, Visitor};
 
 use super::cfg::{walk_function, CallGraph, CfgNode};
-use super::util::{block_contains_revert, is_self};
+use super::util::{block_contains_revert, is_self, is_transfer_path_entry};
 
 // ─── TaintOrigin / TaintedVar ────────────────────────────────────────────────
 
@@ -265,7 +265,7 @@ pub(crate) fn state_write_reachability(
 pub(crate) fn restriction_fields(contract: &TypedContract<'_>) -> BTreeSet<String> {
     let mut fields = BTreeSet::new();
     for func in contract.functions() {
-        if !is_transfer_path_fn(&func) {
+        if !is_transfer_path_entry(&func) {
             continue;
         }
         let Some(body) = func.body else {
@@ -277,14 +277,6 @@ pub(crate) fn restriction_fields(contract: &TypedContract<'_>) -> BTreeSet<Strin
         scanner.visit_stmts(body);
     }
     fields
-}
-
-/// Returns `true` if `func` is a transfer-path entry (`transfer`/`transferFrom`
-/// by name, or annotated `#[onTransfer]`).
-fn is_transfer_path_fn(func: &ContractFunction<'_>) -> bool {
-    func.name == "transfer"
-        || func.name == "transferFrom"
-        || func.annotations.iter().any(|a| a.name == "onTransfer")
 }
 
 /// Visitor that records `self.<field>` reads occurring inside transfer-denial
