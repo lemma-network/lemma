@@ -46,9 +46,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::analyzer::authset::{auth_set, requires_governance, requires_owner_only};
+use crate::analyzer::authset::{auth_set, requires_governance};
 use crate::analyzer::dataflow::restriction_fields;
-use crate::analyzer::rules::launch::is_renounce_aware;
 use crate::parser::{BinaryOp, Expr, Literal, Stmt, UnaryOp};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::type_checker::types::ResolvedType;
@@ -88,22 +87,16 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     // Step 3+4: for each gating flag, find blocking-value writers lacking
     // governance and emit a violation.
     //
-    // P3-own-3 (c): if the writer is @onlyOwner AND the contract is renounce-aware
-    // (has a `renounce` function that writes `self.owner`), the gate lever is LOCKED
-    // post-renounce — nobody can flip it back to blocking.  A permanently-locked
-    // gate is SAFER than governance (it cannot be re-asserted at all), so we skip
-    // the violation.  Consumer: is_renounce_aware() in rules/launch.rs (4f-launch).
-    let renounce_aware = is_renounce_aware(contract);
-
+    // Spec §2.1: "static rule remains conservative — owner-settable restriction
+    // is a violation regardless of whether the deployer later renounces."
+    // The renounce-aware skip (P3-own-3 c) was reverted: SAFETY-009 must flag
+    // @onlyOwner gate levers unconditionally.
+    // TODO(4f-launch/step6): revisit when Address.burn recognition is available
+    // and the spec §2.1 conservative stance is re-evaluated — deferred P3-own-3(c).
     for func in contract.functions() {
         let guards = auth_set(&func);
         // Skip: governance-gated writers are always allowed.
         if requires_governance(&guards) {
-            continue;
-        }
-        // Skip: @onlyOwner writer on a renounce-aware contract — lever is LOCKED
-        // post-renounce (P3-own-3 c).  Not a governance risk.
-        if requires_owner_only(&guards) && renounce_aware {
             continue;
         }
         let Some(body) = func.body else {

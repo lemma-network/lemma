@@ -40,9 +40,10 @@ use std::collections::BTreeSet;
 
 use crate::analyzer::authset::{auth_set, requires_owner_only};
 use crate::analyzer::error::SafetyError;
-use crate::analyzer::util::is_self;
+use crate::analyzer::rules::constants::MAX_ANTISNIPE_TAX;
+use crate::analyzer::util::{block_contains_revert, is_self};
 use crate::lexer::token::Span;
-use crate::parser::{Expr, Stmt};
+use crate::parser::{Expr, Literal, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_expr, walk_stmt, Visitor};
 
@@ -74,6 +75,9 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
 /// SAFETY-023 checks that the enforcement function actually CALLS/READS it.
 ///
 /// Reject-on-doubt: if no enforcement function is found → `Inconclusive`.
+///
+/// BUG-M2 fix: checks ALL transfer-path entries (not just the first).
+/// `transfer` may consult exempt but `transferFrom` may not — both must be checked.
 fn check_023_maxwallet_exempt(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     // Only fires when maxWallet is declared in config.
     let Some(config) = contract.config() else {
@@ -83,16 +87,17 @@ fn check_023_maxwallet_exempt(contract: &TypedContract<'_>) -> Vec<SafetyError> 
         return Vec::new();
     }
 
-    // Find the enforcement function: a non-view function that reads maxWallet
-    // from config or enforces the cap.  Heuristic: functions named "transfer",
+    // Find ALL enforcement functions: non-view functions named "transfer",
     // "transferFrom", or annotated `#[onTransfer]` are the canonical enforcement
     // path for maxWallet (the cap is checked on every transfer).
-    let enforcer = contract
+    // BUG-M2: use .filter() not .find() — every transfer-path entry must consult exempt.
+    let enforcers: Vec<_> = contract
         .functions()
         .into_iter()
-        .find(|f| is_transfer_path_entry(f.name, f.annotations));
+        .filter(|f| is_transfer_path_entry(f.name, f.annotations))
+        .collect();
 
-    let Some(enforcer) = enforcer else {
+    if enforcers.is_empty() {
         // No transfer-path function visible — cannot verify enforcement.
         return vec![SafetyError::Inconclusive {
             rule: "SAFETY-023",
@@ -101,23 +106,26 @@ fn check_023_maxwallet_exempt(contract: &TypedContract<'_>) -> Vec<SafetyError> 
                 .to_owned(),
             span: Span::at(0, 0, 0),
         }];
-    };
-
-    let Some(body) = enforcer.body else {
-        return Vec::new();
-    };
-
-    // Check: does the enforcer call `isWalletExempt` or read `walletExempt`?
-    let mut scanner = ExemptConsultationScanner { found: false };
-    scanner.visit_stmts(body);
-
-    if scanner.found {
-        Vec::new()
-    } else {
-        vec![SafetyError::MaxWalletNoExempt {
-            func: enforcer.name.to_owned(),
-        }]
     }
+
+    let mut violations = Vec::new();
+    for enforcer in &enforcers {
+        let Some(body) = enforcer.body else {
+            continue;
+        };
+
+        // Check: does this enforcer call `isWalletExempt` or read `walletExempt`?
+        let mut scanner = ExemptConsultationScanner { found: false };
+        scanner.visit_stmts(body);
+
+        if !scanner.found {
+            violations.push(SafetyError::MaxWalletNoExempt {
+                func: enforcer.name.to_owned(),
+            });
+        }
+    }
+
+    violations
 }
 
 // ─── SAFETY-024.1 ─────────────────────────────────────────────────────────────
@@ -128,7 +136,16 @@ fn check_023_maxwallet_exempt(contract: &TypedContract<'_>) -> Vec<SafetyError> 
 /// Finds functions that reference `antiSnipeBlocks` and checks whether the
 /// snipe-window path reverts/blocks rather than applying a fee.
 ///
+/// Also checks that any literal fee assignment in the snipe-window path does
+/// not exceed `MAX_ANTISNIPE_TAX` (C1 fix).  Non-literal fee writes → `Inconclusive`
+/// (cannot prove bounded).
+///
 /// Reject-on-doubt: if the snipe-window logic is not canonical → `Inconclusive`.
+///
+/// BUG-M1 fix: revert detection is scoped to the snipe-window conditional branch
+/// only (reuses `block_contains_revert` from util.rs — DRY).
+/// BUG-C1 fix: literal fee assignments > MAX_ANTISNIPE_TAX → `AntiSnipeIsBlock`;
+/// non-literal fee writes → `Inconclusive`.
 fn check_024_antsnipe_fee_not_block(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     if !has_fair_launch(contract) {
         return Vec::new();
@@ -167,20 +184,203 @@ fn check_024_antsnipe_fee_not_block(contract: &TypedContract<'_>) -> Vec<SafetyE
             continue;
         };
 
-        // Check: does the snipe-window path contain a revert (block)?
-        // Canonical pattern: `if inSnipeWindow { self.fee += extraFee }` (OK).
-        // Dangerous pattern: `if inSnipeWindow { revert }` (block).
-        let mut scanner = SnipeWindowRevertScanner { found: false };
-        scanner.visit_stmts(body);
+        // BUG-M1 fix: scope revert detection to the snipe-window conditional branch.
+        // Scan for `if (<snipe_window_condition>) { ... }` where the condition
+        // references `antiSnipeBlocks`, then check only the `then` branch for reverts.
+        // A revert in an unrelated `assert(amount > 0)` must NOT be flagged.
+        //
+        // If no snipe-window `if` is found but the function references antiSnipeBlocks,
+        // we cannot scope the check → Inconclusive (reject-on-doubt).
+        let snipe_if_result = find_snipe_window_if(body);
+        match snipe_if_result {
+            SnipeWindowIfResult::NotFound => {
+                // Function references antiSnipeBlocks but has no `if` conditional
+                // scoping the snipe window — cannot verify the shape.
+                violations.push(SafetyError::Inconclusive {
+                    rule: "SAFETY-024",
+                    reason: format!(
+                        "`{}` references `antiSnipeBlocks` but has no snipe-window \
+                         `if` conditional — cannot verify anti-snipe is a fee \
+                         (use canonical `if (inSnipeWindow) {{ ... }}` pattern)",
+                        func.name
+                    ),
+                    span: Span::at(0, 0, 0),
+                });
+            }
+            SnipeWindowIfResult::Found { then_branch } => {
+                // BUG-M1: check only the then-branch for reverts (not the whole body).
+                if block_contains_revert(then_branch) {
+                    violations.push(SafetyError::AntiSnipeIsBlock {
+                        func: func.name.to_owned(),
+                    });
+                    // Already a block violation — no need to check fee cap.
+                    continue;
+                }
 
-        if scanner.found {
-            violations.push(SafetyError::AntiSnipeIsBlock {
-                func: func.name.to_owned(),
-            });
+                // BUG-C1: check fee assignments in the snipe-window branch.
+                // Literal fee > MAX_ANTISNIPE_TAX → AntiSnipeIsBlock (fee too high = block).
+                // Non-literal fee write → Inconclusive (cannot prove bounded).
+                let mut fee_scanner = FeeLiteralScanner {
+                    literals: Vec::new(),
+                    has_non_literal_write: false,
+                };
+                fee_scanner.scan_stmts(then_branch);
+
+                if let Some(&max_lit) = fee_scanner.literals.iter().max() {
+                    if max_lit > u128::from(MAX_ANTISNIPE_TAX) {
+                        violations.push(SafetyError::AntiSnipeIsBlock {
+                            func: func.name.to_owned(),
+                        });
+                        continue;
+                    }
+                }
+                if fee_scanner.has_non_literal_write {
+                    violations.push(SafetyError::Inconclusive {
+                        rule: "SAFETY-024",
+                        reason: format!(
+                            "`{}` assigns a non-literal value to a state field in the \
+                             snipe-window branch — cannot prove fee is bounded by \
+                             MAX_ANTISNIPE_TAX ({} bps); use a literal fee value",
+                            func.name, MAX_ANTISNIPE_TAX
+                        ),
+                        span: Span::at(0, 0, 0),
+                    });
+                }
+            }
         }
     }
 
     violations
+}
+
+/// Result of searching a function body for a snipe-window `if` conditional.
+enum SnipeWindowIfResult<'a> {
+    /// No `if` whose condition references `antiSnipeBlocks` was found.
+    NotFound,
+    /// Found a snipe-window `if`; `then_branch` is its then-block.
+    Found { then_branch: &'a [Stmt] },
+}
+
+/// Find the first `if` statement whose condition references `antiSnipeBlocks`
+/// (directly or via a local variable that reads it).
+///
+/// Returns the `then` branch for scoped revert/fee analysis.
+/// Only looks at top-level statements in `body` (the snipe-window `if` is
+/// expected to be a direct child of the function body).
+fn find_snipe_window_if(body: &[Stmt]) -> SnipeWindowIfResult<'_> {
+    for stmt in body {
+        if let Stmt::If { cond, then, .. } = stmt {
+            // Check if the condition references antiSnipeBlocks.
+            let mut s = FieldReadScanner {
+                field: "antiSnipeBlocks",
+                found: false,
+            };
+            s.visit_expr(cond);
+            if s.found {
+                return SnipeWindowIfResult::Found { then_branch: then };
+            }
+            // Also check for a local variable that was assigned from antiSnipeBlocks
+            // (e.g. `let inSnipeWindow = self.antiSnipeBlocks > 0`).
+            // Heuristic: if the condition is an Ident, check if any prior let-binding
+            // in the body reads antiSnipeBlocks.  This is a conservative over-approx:
+            // if the ident was bound from antiSnipeBlocks, treat this `if` as the
+            // snipe-window conditional.
+            if let Expr::Ident(var_name, _) = cond {
+                if body_binds_from_snipe_field(body, var_name) {
+                    return SnipeWindowIfResult::Found { then_branch: then };
+                }
+            }
+        }
+    }
+    SnipeWindowIfResult::NotFound
+}
+
+/// Returns `true` if any `let <var_name> = <expr>` in `body` where `<expr>`
+/// reads `antiSnipeBlocks` (directly or in a sub-expression).
+fn body_binds_from_snipe_field(body: &[Stmt], var_name: &str) -> bool {
+    use crate::parser::Pattern;
+    for stmt in body {
+        // Only handle simple `let name = expr` bindings (Pattern::Ident).
+        if let Stmt::Let {
+            pattern: Pattern::Ident(bound_name, _),
+            expr,
+            ..
+        } = stmt
+        {
+            if bound_name == var_name {
+                let mut s = FieldReadScanner {
+                    field: "antiSnipeBlocks",
+                    found: false,
+                };
+                s.visit_expr(expr);
+                if s.found {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Scanner that collects literal integer values assigned to `self.<field>` in
+/// a snipe-window branch, and flags non-literal writes.
+///
+/// BUG-C1 fix: used to enforce `MAX_ANTISNIPE_TAX` cap on fee assignments.
+/// Pattern: `self.<anyField> = <literal integer>` in the snipe-window branch.
+/// - Literal > MAX_ANTISNIPE_TAX → violation (fee too high = effectively a block).
+/// - Non-literal write → Inconclusive (cannot prove bounded).
+struct FeeLiteralScanner {
+    /// All integer literal values found in `self.<field> = <literal>` assignments.
+    literals: Vec<u128>,
+    /// Whether any `self.<field> = <non-literal>` assignment was found.
+    has_non_literal_write: bool,
+}
+
+impl FeeLiteralScanner {
+    /// Scan `stmts` for `self.<field> = <value>` assignments.
+    fn scan_stmts(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            self.scan_stmt(stmt);
+        }
+    }
+
+    fn scan_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Assign { target, value, .. } => {
+                self.check_self_field_assign(target, value);
+            }
+            // Expression-form assignment: `self.field = value`
+            Stmt::Expr(Expr::Assign_(target, _, value, _), _) => {
+                self.check_self_field_assign(target, value);
+            }
+            Stmt::If { then, else_, .. } => {
+                self.scan_stmts(then);
+                if let Some(else_block) = else_ {
+                    self.scan_stmts(else_block);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Check if `target` is `self.<field>` and record the RHS value.
+    fn check_self_field_assign(&mut self, target: &Expr, value: &Expr) {
+        if let Expr::Member(obj, _, _) = target {
+            if is_self(obj) {
+                match value {
+                    Expr::Literal(Literal::Int(n), _) => {
+                        self.literals.push(*n);
+                    }
+                    Expr::Literal(Literal::IntTyped { value: n, .. }, _) => {
+                        self.literals.push(*n);
+                    }
+                    _ => {
+                        self.has_non_literal_write = true;
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ─── SAFETY-024.2 ─────────────────────────────────────────────────────────────
@@ -265,6 +465,14 @@ fn check_024_has_expiry(contract: &TypedContract<'_>) -> Vec<SafetyError> {
 ///
 /// Reuses the restriction-field pattern from SAFETY-005 (dataflow.rs) but
 /// scoped to sniper-named fields.
+///
+/// ## Soundness boundary (documented, not faked — AGENTS §2.5 pattern)
+///
+/// Detection is name-based ("sniper" substring in field name).  A developer
+/// renaming the field defeats this check.  The structural backstop is
+/// SAFETY-005 (blacklist.rs), which catches param-keyed restriction writes
+/// regardless of field name.  SAFETY-024.3 adds launch-specific coverage for
+/// the canonical sniper-tracking naming convention.
 fn check_024_no_sniper_gates_disposal(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     if !has_fair_launch(contract) {
         return Vec::new();
@@ -362,17 +570,26 @@ fn check_own3a_missing_required_trait(contract: &TypedContract<'_>) -> Vec<Safet
 
 // ─── P3-own-3 (c) helper ──────────────────────────────────────────────────────
 
-/// Returns `true` if the contract has a `renounce` function that writes the
-/// `owner` state field — the owner can permanently lock `@onlyOwner` levers.
+/// Detect whether this contract has renounce capability.
 ///
-/// When true: `@onlyOwner` levers are LOCKED (nobody can call them post-renounce),
-/// which is SAFER than governance.  SAFETY-005/009 should skip violations for
-/// such contracts.
+/// Returns `true` if the contract has a `renounce` function that writes the
+/// `owner` state field.
+///
+/// NOT used for skipping SAFETY-005/009 violations — spec §2.1 requires
+/// those rules to remain conservative regardless of renounce:
+/// *"static rule remains conservative — owner-settable restriction is a
+/// violation regardless of whether the deployer later renounces."*
+///
+/// Reserved for informational purposes or future Step-6 use when
+/// Address.burn recognition is available.
+///
+/// TODO(4f-launch/step6): wire into auth treatment when Address.burn
+/// is available — deferred P3-own-3(c), P3-own-2.
 ///
 /// Deferred: `Address.burn` recognition for the renounce write → Step 6.
 /// Currently uses name-based check ("writes to state field named `owner`").
-#[must_use]
-pub(crate) fn is_renounce_aware(contract: &TypedContract<'_>) -> bool {
+#[allow(dead_code)]
+fn is_renounce_aware(contract: &TypedContract<'_>) -> bool {
     contract.functions().into_iter().any(|f| {
         f.name == "renounce" && {
             let Some(body) = f.body else {
@@ -493,30 +710,6 @@ impl Visitor for FieldReadScanner<'_> {
             }
         }
         walk_expr(self, expr);
-    }
-}
-
-/// Visitor that detects a `revert` statement inside a snipe-window condition.
-///
-/// Scans for `if (...) { revert }` patterns where the condition references
-/// snipe-window logic.  Over-approximation: any revert in the function body
-/// is flagged (reject-on-doubt — canonical anti-snipe must be fee-only).
-struct SnipeWindowRevertScanner {
-    found: bool,
-}
-
-impl Visitor for SnipeWindowRevertScanner {
-    fn visit_stmt(&mut self, stmt: &Stmt) {
-        if self.found {
-            return;
-        }
-        // Any revert in the function body is flagged — the canonical anti-snipe
-        // pattern must not revert (it applies a fee instead).
-        if matches!(stmt, Stmt::Revert { .. }) {
-            self.found = true;
-            return;
-        }
-        walk_stmt(self, stmt);
     }
 }
 

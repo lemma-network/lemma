@@ -349,3 +349,39 @@ self.balances[to] = amount
         "non-param-keyed restriction write must NOT trigger SAFETY-005; got {violations:?}"
     );
 }
+
+// ─── BUG-C2 — spec §2.1: renounce-aware does NOT skip SAFETY-005 ─────────────
+
+#[test]
+fn renounce_aware_contract_still_flags_safety_005() {
+    // (neg) C2: contract with renounce() + @onlyOwner blacklist lever → still flagged.
+    // Spec §2.1: "static rule remains conservative — owner-settable restriction is a
+    // violation regardless of whether the deployer later renounces."
+    // The renounce-aware skip was reverted; SAFETY-005 must flag unconditionally.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { frozen: Map<Address, bool> }
+init() {}
+pub fn renounce() {
+    self.owner = self.owner
+}
+@onlyOwner pub fn setFrozen(addr: Address, val: bool) {
+self.frozen[addr] = val
+}
+pub fn transfer(to: Address, amount: u128) {
+assert (!self.frozen[to])
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = blacklist_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::UngovernedBlacklist { func } if func == "setFrozen")),
+        "Renounce-aware contract with @onlyOwner blacklist must still fail SAFETY-005 (spec §2.1); got {violations:?}"
+    );
+}

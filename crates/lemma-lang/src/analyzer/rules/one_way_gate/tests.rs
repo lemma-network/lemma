@@ -400,3 +400,39 @@ self.balances[to] = amount
         violations[0]
     );
 }
+
+// ─── BUG-C2 — spec §2.1: renounce-aware does NOT skip SAFETY-009 ─────────────
+
+#[test]
+fn fake_renounce_does_not_disable_safety_009() {
+    // (neg) C2: `renounce(){ self.owner = self.owner }` (no-op write) does NOT disable SAFETY-009.
+    // Spec §2.1: "static rule remains conservative — owner-settable restriction is a
+    // violation regardless of whether the deployer later renounces."
+    // The renounce-aware skip was reverted; SAFETY-009 must flag unconditionally.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { tradingEnabled: bool = false }
+init() {}
+pub fn renounce() {
+    self.owner = self.owner
+}
+@onlyOwner pub fn disableTrading() {
+self.tradingEnabled = false
+}
+pub fn transfer(to: Address, amount: u128) {
+assert (self.tradingEnabled)
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = one_way_gate_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::OneWayGate { func } if func == "disableTrading")),
+        "Renounce-aware contract with @onlyOwner gate lever must still fail SAFETY-009 (spec §2.1); got {violations:?}"
+    );
+}

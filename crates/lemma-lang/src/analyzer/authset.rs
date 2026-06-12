@@ -208,10 +208,12 @@ pub fn requires_governance(guards: &BTreeSet<Guard>) -> bool {
 /// `requires_owner_only` / `is_access_unrestricted`).
 ///
 /// Consumers:
-/// - `is_renounce_aware()` guard in `rules/launch.rs` (P3-own-3 c, 4f-launch)
-/// - Renounced-owner skip in `rules/blacklist.rs` (SAFETY-005, P3-own-3 c)
-/// - Renounced-owner skip in `rules/one_way_gate.rs` (SAFETY-009, P3-own-3 c)
 /// - `check_own3a_missing_required_trait` in `rules/launch.rs` (P3-own-3 a)
+///
+/// Note: the renounced-owner skip in SAFETY-005/009 was reverted per spec §2.1
+/// ("static rule remains conservative regardless of renounce").  The deferred
+/// P3-own-3(c) consumer (Address.burn recognition) is tracked as
+/// TODO(4f-launch/step6) in `rules/launch.rs`.
 #[must_use]
 pub fn requires_owner_only(guards: &BTreeSet<Guard>) -> bool {
     guards.contains(&Guard::OnlyOwner)

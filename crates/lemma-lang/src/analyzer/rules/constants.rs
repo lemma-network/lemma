@@ -25,7 +25,6 @@ pub(crate) const FEE_INCREASE_DELAY: u64 = 7200; // ≈ 24 h at 12 s/block
 ///
 /// See `09-SAFETY_ANALYZER_SPEC §3-quater SAFETY-024`.
 ///
-/// Consumer: SAFETY-024 fee-cap enforcement (deferred to P3·Step 7 when
-/// branch-aware CFG analysis is available for fee-expression bounding).
-#[allow(dead_code)] // consumer: SAFETY-024 anti-snipe fee-cap enforcement (P3·Step 7)
+/// Consumer: `check_024_antsnipe_fee_not_block` in `rules/launch.rs` (SAFETY-024.1
+/// fee-cap enforcement — literal fee assignments in snipe-window branch).
 pub(crate) const MAX_ANTISNIPE_TAX: u16 = 9000;
