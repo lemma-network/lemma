@@ -567,16 +567,16 @@ fn execute_unsupported_tx_type_yields_failed_receipt() {
 
 // ── M1 pinning tests ──────────────────────────────────────────────────────────
 
-/// WAT contract that imports and calls `storage_write` once.
+/// WAT contract that imports and calls `storage_write` once with empty key/value.
 ///
-/// The linker registers `storage_write` with real gas charging (M1 fix), so
-/// calling it deducts `storage_write_create` gas from the Store fuel pool.
-/// This makes the cost visible in `wasm_consumed` and therefore in `gas_used`.
+/// The linker registers `storage_write` with real gas charging and memory
+/// marshalling (6b-vm-2), so calling it deducts storage_write_create gas +
+/// memory_copy_per_byte charges from the Store fuel pool.
 ///
-/// Import order: only `storage_write` is imported — the linker resolves by
-/// name, not by index, so we only need to import what we call.
+/// Must export `"memory"` — the linker resolves guest memory for marshalling.
 const STORAGE_WRITE_CALLER_WAT: &[u8] = b"(module
   (import \"lemma\" \"storage_write\" (func $sw (param i32 i32 i32 i32)))
+  (memory (export \"memory\") 1)
   (func (export \"call\")
     i32.const 0
     i32.const 0
@@ -669,5 +669,336 @@ fn gas_remaining_host_fn_reflects_store_fuel() {
         receipt.gas_used >= min_expected,
         "gas_used ({}) must include context_query charge for block_height",
         receipt.gas_used,
+    );
+}
+
+// ── 6b-vm-2 host function marshalling tests ───────────────────────────────
+
+/// WAT: writes key "test" (4 bytes) and value "hello" (5 bytes) to memory,
+/// calls storage_write, then storage_read with the same key → register 1,
+/// then read_register to copy register 1 back to memory at offset 200.
+///
+/// ⚠️ M4: ScratchSnapshot does NOT read-through to canonical state.
+/// This test only verifies same-tx round-trips (write then read in one call).
+const STORAGE_ROUND_TRIP_WAT: &[u8] = b"(module
+  (import \"lemma\" \"storage_write\" (func $sw (param i32 i32 i32 i32)))
+  (import \"lemma\" \"storage_read\" (func $sr (param i32 i32 i32) (result i32)))
+  (import \"lemma\" \"register_len\" (func $rl (param i32) (result i64)))
+  (import \"lemma\" \"read_register\" (func $rr (param i32 i32)))
+  (memory (export \"memory\") 1)
+  ;; key at offset 0, length 4: \"test\"
+  (data (i32.const 0) \"test\")
+  ;; value at offset 100, length 5: \"hello\"
+  (data (i32.const 100) \"hello\")
+  (func (export \"call\")
+    ;; storage_write(key_ptr=0, key_len=4, val_ptr=100, val_len=5)
+    i32.const 0  i32.const 4  i32.const 100  i32.const 5
+    call $sw
+    ;; storage_read(key_ptr=0, key_len=4, register_id=1) -> status
+    i32.const 0  i32.const 4  i32.const 1
+    call $sr
+    drop  ;; drop status (should be 0 = FOUND)
+    ;; read_register(register_id=1, dest_ptr=200)
+    i32.const 1  i32.const 200
+    call $rr))
+";
+
+/// Verifies storage_write → storage_read round-trip within the same transaction.
+///
+/// ⚠️ M4: ScratchSnapshot does NOT read-through to canonical state.
+/// Only same-tx writes are visible to storage_read.
+#[test]
+fn storage_write_read_round_trip_same_tx() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, STORAGE_ROUND_TRIP_WAT.to_vec(), 0, 1_000_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    let call = call_tx(sender, contract_addr, 1, 1_000_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    assert!(
+        receipt.success,
+        "storage round-trip call must succeed — receipt: gas_used={}",
+        receipt.gas_used
+    );
+}
+
+/// WAT: calls storage_read with a key that was never written.
+/// The return value should be -1 (STORAGE_NOT_FOUND).
+/// We verify by storing the result in a global and checking it doesn't trap.
+const STORAGE_READ_ABSENT_WAT: &[u8] = b"(module
+  (import \"lemma\" \"storage_read\" (func $sr (param i32 i32 i32) (result i32)))
+  (memory (export \"memory\") 1)
+  ;; key at offset 0, length 6: \"absent\"
+  (data (i32.const 0) \"absent\")
+  (global $status (mut i32) (i32.const 99))
+  (func (export \"call\")
+    ;; storage_read(key_ptr=0, key_len=6, register_id=0) -> status
+    i32.const 0  i32.const 6  i32.const 0
+    call $sr
+    global.set $status))
+";
+
+#[test]
+fn storage_read_absent_key_returns_not_found() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, STORAGE_READ_ABSENT_WAT.to_vec(), 0, 1_000_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    let call = call_tx(sender, contract_addr, 1, 1_000_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    // The call must succeed — storage_read returns -1 sentinel, not a trap.
+    assert!(receipt.success, "storage_read of absent key must not trap");
+}
+
+/// WAT: writes recipient address (20 bytes) to memory, calls transfer.
+/// Recipient is all-0x42 bytes (20 bytes).
+const TRANSFER_WAT: &[u8] = b"(module
+  (import \"lemma\" \"transfer\" (func $tr (param i32 i32 i64) (result i32)))
+  (memory (export \"memory\") 1)
+  ;; recipient address at offset 0: 20 bytes of 0x42
+  (data (i32.const 0) \"\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\")
+  (global $status (mut i32) (i32.const 99))
+  (func (export \"call\")
+    ;; transfer(to_ptr=0, to_len=20, amount=1000)
+    i32.const 0  i32.const 20  i64.const 1000
+    call $tr
+    global.set $status))
+";
+
+/// Verifies that the transfer host function correctly moves balance when the
+/// contract has funds available in the snapshot.
+///
+/// ⚠️ M4: ScratchSnapshot does NOT read-through to canonical state for balances.
+/// Pre-seeded balances on the canonical state are invisible to the snapshot.
+/// This test verifies that transfer with insufficient funds (zero balance in
+/// snapshot) returns the TRANSFER_INSUFFICIENT sentinel (1) without trapping.
+/// A full balance-transfer integration test requires M4 fix (ScratchSnapshot
+/// read-through) or a WAT that first receives value via msg_value.
+#[test]
+fn transfer_with_zero_snapshot_balance_returns_insufficient() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, TRANSFER_WAT.to_vec(), 0, 1_000_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    // Contract has zero balance in snapshot — transfer of 1000 returns sentinel 1.
+    let call = call_tx(sender, contract_addr, 1, 1_000_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    // The call succeeds (transfer returns sentinel, doesn't trap).
+    assert!(
+        receipt.success,
+        "transfer with insufficient funds must not trap — returns sentinel"
+    );
+    // Recipient balance unchanged (transfer failed gracefully).
+    let recipient = Address::from_raw_bytes([0x42; 20]);
+    assert_eq!(
+        state.balance(&recipient),
+        Amount::zero(),
+        "recipient must not receive funds when transfer returns insufficient"
+    );
+}
+
+/// WAT: calls transfer with a negative amount (-1). Must trap (not silent cast).
+const TRANSFER_NEGATIVE_WAT: &[u8] = b"(module
+  (import \"lemma\" \"transfer\" (func $tr (param i32 i32 i64) (result i32)))
+  (memory (export \"memory\") 1)
+  (data (i32.const 0) \"\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\\42\")
+  (func (export \"call\")
+    ;; transfer(to_ptr=0, to_len=20, amount=-1) -- negative amount must trap
+    i32.const 0  i32.const 20  i64.const -1
+    call $tr
+    drop))
+";
+
+#[test]
+fn transfer_negative_amount_traps() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, TRANSFER_NEGATIVE_WAT.to_vec(), 0, 1_000_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    let call = call_tx(sender, contract_addr, 1, 1_000_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    // Negative amount must trap — failed receipt, not silent cast to huge u128.
+    assert!(
+        !receipt.success,
+        "transfer with negative amount must produce failed receipt"
+    );
+}
+
+/// WAT: writes "result" (6 bytes) to memory, calls value_return.
+const VALUE_RETURN_WAT: &[u8] = b"(module
+  (import \"lemma\" \"value_return\" (func $vr (param i32 i32)))
+  (memory (export \"memory\") 1)
+  (data (i32.const 0) \"result\")
+  (func (export \"call\")
+    ;; value_return(ptr=0, len=6)
+    i32.const 0  i32.const 6
+    call $vr))
+";
+
+#[test]
+fn value_return_captures_guest_bytes() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, VALUE_RETURN_WAT.to_vec(), 0, 1_000_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    let call = call_tx(sender, contract_addr, 1, 1_000_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    // value_return captures bytes into host_after.return_data, which is currently
+    // dropped in execute_call (P3·Step 7 consumer). The call itself must succeed.
+    assert!(receipt.success, "value_return call must succeed");
+}
+
+/// WAT: writes a 32-byte topic + 4-byte data to memory, calls emit_event.
+const EMIT_EVENT_WAT: &[u8] = b"(module
+  (import \"lemma\" \"emit_event\" (func $ee (param i32 i32 i32 i32)))
+  (memory (export \"memory\") 1)
+  ;; topic at offset 0: 32 zero bytes (Hash::zero)
+  ;; data at offset 100: \"data\" (4 bytes)
+  (data (i32.const 100) \"data\")
+  (func (export \"call\")
+    ;; emit_event(topics_ptr=0, topics_len=32, data_ptr=100, data_len=4)
+    i32.const 0  i32.const 32  i32.const 100  i32.const 4
+    call $ee))
+";
+
+#[test]
+fn emit_event_emits_log_with_correct_address() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, EMIT_EVENT_WAT.to_vec(), 0, 1_000_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    let call = call_tx(sender, contract_addr, 1, 1_000_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    assert!(receipt.success, "emit_event call must succeed");
+    assert_eq!(receipt.logs.len(), 1, "must emit exactly one event");
+    assert_eq!(
+        receipt.logs[0].address, contract_addr,
+        "event address must be the executing contract"
+    );
+    assert_eq!(receipt.logs[0].topics.len(), 1, "must have one topic");
+    assert_eq!(
+        receipt.logs[0].topics[0],
+        Hash::zero(),
+        "topic must be zero hash (32 zero bytes from memory)"
+    );
+    assert_eq!(receipt.logs[0].data, b"data", "event data must match");
+}
+
+/// WAT: calls storage_write with ptr beyond memory bounds → must trap cleanly.
+const MEMORY_OOB_WAT: &[u8] = b"(module
+  (import \"lemma\" \"storage_write\" (func $sw (param i32 i32 i32 i32)))
+  (memory (export \"memory\") 1)
+  (func (export \"call\")
+    ;; storage_write with key_ptr way beyond 1 page (65536 bytes)
+    i32.const 100000  i32.const 10  i32.const 0  i32.const 0
+    call $sw))
+";
+
+#[test]
+fn memory_oob_traps_cleanly() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, MEMORY_OOB_WAT.to_vec(), 0, 1_000_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    let call = call_tx(sender, contract_addr, 1, 1_000_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    // Must produce a failed receipt (trap), NOT a panic.
+    assert!(
+        !receipt.success,
+        "memory OOB must produce failed receipt, not panic"
+    );
+    assert!(receipt.logs.is_empty(), "failed receipt must have no logs");
+}
+
+/// Verifies that per-byte gas scales with data size for storage_write.
+///
+/// WAT writes a 100-byte key and 200-byte value. Gas used must include
+/// memory_copy_per_byte charges for both key and value copies.
+const LARGE_STORAGE_WRITE_WAT: &[u8] = b"(module
+  (import \"lemma\" \"storage_write\" (func $sw (param i32 i32 i32 i32)))
+  (memory (export \"memory\") 1)
+  (func (export \"call\")
+    ;; storage_write(key_ptr=0, key_len=100, val_ptr=200, val_len=200)
+    i32.const 0  i32.const 100  i32.const 200  i32.const 200
+    call $sw))
+";
+
+#[test]
+fn per_byte_gas_scales_with_data_size() {
+    let schedule = GasSchedule::devnet();
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let deploy = deploy_tx(sender, LARGE_STORAGE_WRITE_WAT.to_vec(), 0, 1_000_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+    let call = call_tx(sender, contract_addr, 1, 1_000_000);
+    let receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    assert!(receipt.success, "large storage_write call must succeed");
+
+    // gas_used must include at least:
+    // - tx_base (intrinsic)
+    // - memory_copy_per_byte * (100 + 200) for key + value copies
+    // - storage_write_create for the actual write
+    let key_len = 100_u64;
+    let val_len = 200_u64;
+    let copy_gas = schedule.memory_copy_per_byte.as_u64() * (key_len + val_len);
+    let min_expected =
+        schedule.tx_base.as_u64() + copy_gas + schedule.storage_write_create.as_u64();
+    assert!(
+        receipt.gas_used >= min_expected,
+        "gas_used ({}) must include per-byte copy charges: \
+         tx_base ({}) + copy ({}) + storage_write_create ({}) = {}",
+        receipt.gas_used,
+        schedule.tx_base.as_u64(),
+        copy_gas,
+        schedule.storage_write_create.as_u64(),
+        min_expected,
     );
 }

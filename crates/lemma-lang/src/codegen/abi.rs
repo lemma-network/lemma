@@ -126,7 +126,7 @@ pub(crate) mod host_fn {
     /// `msg_value() -> i64` — native LEM value attached to this call (in Drop, truncated to i64).
     pub(crate) const MSG_VALUE: &str = "msg_value";
 
-    /// `msg_sender(register_id: i32)` — writes 32-byte caller address into register.
+    /// `msg_sender(register_id: i32)` — writes 20-byte caller `Address` into register.
     ///
     /// Lowering deferred to P3·Step 7 (cross-contract calls). Stub in linker for now.
     pub(crate) const MSG_SENDER: &str = "msg_sender";

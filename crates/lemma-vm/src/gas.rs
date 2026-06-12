@@ -169,6 +169,12 @@ pub struct GasSchedule {
     /// gas_remaining, msg_value). Covers the host↔guest boundary overhead.
     /// No free host functions (spec §3.1 rule 2 — else DoS vector).
     pub context_query: Gas,
+
+    // ── Memory marshalling ────────────────────────────────────────────────────
+    /// Per-byte gas for host↔guest memory copies (read_bytes / write_bytes in linker).
+    /// Covers: calldata, register reads, storage key/value marshalling, event data, value_return.
+    /// DoS protection: bounds the cost of moving N bytes across the WASM boundary.
+    pub memory_copy_per_byte: Gas,
 }
 
 impl GasSchedule {
@@ -218,6 +224,10 @@ impl GasSchedule {
             // Context queries
             // EVM COINBASE/NUMBER context opcode ≈ 2–5 gas; 3 is conservative.
             context_query: Gas(3),
+
+            // Memory marshalling
+            // Per-byte cost for host↔guest memory copies; similar to EVM CALLDATACOPY ≈ 3/word.
+            memory_copy_per_byte: Gas(3),
         }
     }
 }
@@ -289,6 +299,17 @@ impl FuelMeter {
             remaining: budget,
             refund_accumulator: Gas::ZERO,
         }
+    }
+
+    /// Set the remaining gas to `gas`. Used by the linker's sync-wrap pattern to
+    /// sync wasmtime Store fuel → FuelMeter → trait method → FuelMeter → Store fuel.
+    /// This does NOT increase the budget — it replaces the current remaining value.
+    ///
+    /// # Safety invariant
+    ///
+    /// The caller MUST ensure `gas <= initial budget` (enforced by Store fuel cap).
+    pub fn set_remaining(&mut self, gas: Gas) {
+        self.remaining = gas;
     }
 
     /// Capped refund applicable at commit time.

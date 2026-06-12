@@ -1,48 +1,61 @@
-//! # Linker — wasmtime host-function registration (B4)
+//! # Linker — wasmtime host-function registration (6b-vm-2)
 //!
-//! Builds a [`wasmtime::Linker`] with all LemmaVM host functions registered
+//! Builds a [`wasmtime::Linker`] with all 14 LemmaVM host functions registered
 //! under the `"lemma"` import module.
 //!
 //! ## Import convention
 //!
 //! All host imports use the form `(import "lemma" "fn_name" ...)`.
 //! The WASM type mapping for memory-taking host functions uses a raw
-//! pointer/length ABI (`i32` ptr + `i32` len). This is a **Phase-3-replaceable
-//! placeholder** — the Lem compiler owns the real ABI and memory marshalling.
+//! pointer/length ABI (`i32` ptr + `i32` len). The canonical import order
+//! matches `lemma-lang/src/codegen/abi.rs::IMPORT_ORDER` (DB-A53 §4.5).
 //!
-//! ## B4 scope
+//! ## 14 host functions (canonical order)
 //!
-//! For B4 tests we wire the zero-argument / simple-integer host functions
-//! that need no memory marshalling:
-//! - `block_height() -> i64`
-//! - `block_timestamp() -> i64`
-//! - `gas_remaining() -> i64`
-//! - `msg_value() -> i64`
+//! | Index | Name            | Signature                                          |
+//! |-------|-----------------|----------------------------------------------------|
+//! |  0    | block_height    | `() -> i64`                                        |
+//! |  1    | block_timestamp | `() -> i64`                                        |
+//! |  2    | gas_remaining   | `() -> i64`                                        |
+//! |  3    | msg_value       | `() -> i64`                                        |
+//! |  4    | msg_sender      | `(register_id: i32)`                               |
+//! |  5    | input           | `(register_id: i32)`                                |
+//! |  6    | register_len    | `(register_id: i32) -> i64`                        |
+//! |  7    | read_register   | `(register_id: i32, ptr: i32)`                     |
+//! |  8    | storage_read    | `(key_ptr: i32, key_len: i32, reg: i32) -> i32`    |
+//! |  9    | storage_write   | `(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32)` |
+//! | 10    | storage_delete  | `(key_ptr: i32, key_len: i32)`                     |
+//! | 11    | emit_event      | `(topics_ptr: i32, topics_len: i32, data_ptr: i32, data_len: i32)` |
+//! | 12    | transfer        | `(to_ptr: i32, to_len: i32, amount: i64) -> i32`   |
+//! | 13    | value_return    | `(ptr: i32, len: i32)`                             |
 //!
-//! Memory-taking host functions (`storage_read`, `storage_write`, etc.) are
-//! registered as **safe stubs** that return a sentinel value so that any WASM
-//! module importing them can instantiate successfully. Real marshalling is
-//! Phase 3.
-//!
-//! ## M1 fix: shared-budget gas charging
+//! ## Gas model
 //!
 //! Host-function gas charges are deducted from the wasmtime Store fuel via
 //! `charge_fuel` (caller.set_fuel). This ensures host-fn costs flow into
-//! `wasm_consumed` (= initial_fuel − store.get_fuel()) in executor.rs,
-//! preventing the double-budget DoS where a contract could spend full limit
-//! on WASM instructions AND full limit on host-fn charges at no cost.
+//! `wasm_consumed` (= initial_fuel − store.get_fuel()) in executor.rs.
+//!
+//! Memory-taking functions additionally charge `memory_copy_per_byte × len`
+//! for each host↔guest memory copy (DoS protection).
+//!
+//! Storage/transfer/emit_event functions use the sync-wrap pattern to reuse
+//! the tested `HostFunctions` trait methods: sync Store fuel → FuelMeter,
+//! call trait method, sync FuelMeter → Store fuel.
 
-use wasmtime::Caller;
+use lemma_core::{address::Address, amount::Amount, hash::Hash};
+use wasmtime::{Caller, Memory};
 
-use crate::{host::HostState, runtime::LemmaEngine, state::ContractStateView, VmError};
+use crate::{
+    gas::{Gas, GasMeter},
+    host::{HostFunctions, HostState},
+    runtime::LemmaEngine,
+    state::ContractStateView,
+    VmError,
+};
 
 // ── Gas-charge helper ─────────────────────────────────────────────────────────
 
 /// Charge `cost` gas units against the wasmtime Store fuel (AGENTS §7.5: charge before execute).
-///
-/// This is the M1 fix: charging Store fuel (not the HostState inner meter) ensures host-fn
-/// costs are deducted from the SAME pool as WASM instruction costs, making `wasm_consumed`
-/// after `run_wasm` reflect total gas (instructions + host fns).
 ///
 /// Returns `Err` (→ WASM trap → failed receipt) if fuel is insufficient.
 fn charge_fuel<T>(caller: &mut Caller<'_, T>, cost: u64) -> Result<(), wasmtime::Error> {
@@ -53,13 +66,72 @@ fn charge_fuel<T>(caller: &mut Caller<'_, T>, cost: u64) -> Result<(), wasmtime:
     caller.set_fuel(new_remaining)
 }
 
+// ── Memory marshalling helpers (private, DRY core — AGENTS §2) ───────────────
+
+/// Resolve the guest's exported `"memory"`. Trap if absent (ABI invariant).
+fn get_memory<T: 'static>(caller: &mut Caller<'_, T>) -> Result<Memory, wasmtime::Error> {
+    caller
+        .get_export("memory")
+        .and_then(|ext| ext.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("contract must export \"memory\""))
+}
+
+/// Read `len` bytes from guest memory at `ptr`. Charges `memory_copy_per_byte × len`
+/// against Store fuel BEFORE reading (AGENTS §7.5: charge before side effect).
+/// Traps on OOB or OOG. Uses `Memory::read` (bounds-checked, never panics).
+fn read_guest_bytes<S: ContractStateView + 'static>(
+    caller: &mut Caller<'_, HostState<S>>,
+    mem: &Memory,
+    ptr: i32,
+    len: i32,
+) -> Result<Vec<u8>, wasmtime::Error> {
+    let ptr = ptr as u32 as usize;
+    let len = len as u32 as usize;
+    // Charge per-byte copy gas BEFORE reading.
+    let copy_cost = caller
+        .data()
+        .schedule
+        .memory_copy_per_byte
+        .as_u64()
+        .checked_mul(len as u64)
+        .ok_or_else(|| wasmtime::Error::msg("memory copy gas overflow"))?;
+    charge_fuel(caller, copy_cost)?;
+    // Bounds-checked read — never panics (Memory::read returns MemoryAccessError on OOB).
+    let mut buf = vec![0u8; len];
+    mem.read(caller, ptr, &mut buf)
+        .map_err(|_| wasmtime::Error::msg("memory read out of bounds"))?;
+    Ok(buf)
+}
+
+/// Write `bytes` to guest memory at `ptr`. Charges `memory_copy_per_byte × bytes.len()`
+/// against Store fuel BEFORE writing (AGENTS §7.5). Traps on OOB or OOG.
+fn write_guest_bytes<S: ContractStateView + 'static>(
+    caller: &mut Caller<'_, HostState<S>>,
+    mem: &Memory,
+    ptr: i32,
+    bytes: &[u8],
+) -> Result<(), wasmtime::Error> {
+    let ptr = ptr as u32 as usize;
+    let copy_cost = caller
+        .data()
+        .schedule
+        .memory_copy_per_byte
+        .as_u64()
+        .checked_mul(bytes.len() as u64)
+        .ok_or_else(|| wasmtime::Error::msg("memory copy gas overflow"))?;
+    charge_fuel(caller, copy_cost)?;
+    mem.write(caller, ptr, bytes)
+        .map_err(|_| wasmtime::Error::msg("memory write out of bounds"))?;
+    Ok(())
+}
+
 // ── Linker builder ────────────────────────────────────────────────────────────
 
-/// Build a [`wasmtime::Linker`] with all B4 host functions registered.
+/// Build a [`wasmtime::Linker`] with all 14 host functions registered.
 ///
 /// All host imports are registered under the `"lemma"` module name.
-/// Simple context-query functions are fully wired; memory-taking functions
-/// are registered as Phase-3-replaceable stubs.
+/// Registration order matches the canonical import order from
+/// `lemma-lang/src/codegen/abi.rs::IMPORT_ORDER` (DB-A53 §4.5).
 ///
 /// # Type parameter
 ///
@@ -75,17 +147,13 @@ pub fn build_linker<S: ContractStateView + 'static>(
 ) -> Result<wasmtime::Linker<HostState<S>>, VmError> {
     let mut linker: wasmtime::Linker<HostState<S>> = wasmtime::Linker::new(engine.inner());
 
-    // ── Context query host functions (fully wired, M1 gas charging) ───────────
+    // ── Index 0: block_height() -> i64 ───────────────────────────────────────
 
-    // `block_height() -> i64`
-    // Returns the current block height from consensus context.
-    // M1 fix: charge context_query gas via Store fuel before returning.
     linker
         .func_wrap(
             "lemma",
             "block_height",
             |mut caller: Caller<'_, HostState<S>>| -> Result<i64, wasmtime::Error> {
-                // Charge before reading (AGENTS §7.5 — charge-before-execute).
                 let cost = caller.data().schedule.context_query.as_u64();
                 charge_fuel(&mut caller, cost)?;
                 Ok(caller.data().block.height as i64)
@@ -95,15 +163,13 @@ pub fn build_linker<S: ContractStateView + 'static>(
             reason: e.to_string(),
         })?;
 
-    // `block_timestamp() -> i64`
-    // Returns the block timestamp in seconds (from consensus — never wall-clock).
-    // M1 fix: charge context_query gas via Store fuel before returning.
+    // ── Index 1: block_timestamp() -> i64 ────────────────────────────────────
+
     linker
         .func_wrap(
             "lemma",
             "block_timestamp",
             |mut caller: Caller<'_, HostState<S>>| -> Result<i64, wasmtime::Error> {
-                // Charge before reading (AGENTS §7.5 — charge-before-execute).
                 let cost = caller.data().schedule.context_query.as_u64();
                 charge_fuel(&mut caller, cost)?;
                 Ok(caller.data().block.timestamp as i64)
@@ -113,18 +179,14 @@ pub fn build_linker<S: ContractStateView + 'static>(
             reason: e.to_string(),
         })?;
 
-    // `gas_remaining() -> i64`
-    // Returns the remaining Store fuel (source of truth after M1 fix).
-    // NOTE: does NOT charge itself — charging gas_remaining would be circular
-    // (every call would consume gas to report gas, creating infinite OOG loops).
-    // Source of truth is Store fuel, not HostState.meter (M1 fix).
+    // ── Index 2: gas_remaining() -> i64 ──────────────────────────────────────
+    // NOTE: does NOT charge itself — charging gas_remaining would be circular.
+
     linker
         .func_wrap(
             "lemma",
             "gas_remaining",
             |caller: Caller<'_, HostState<S>>| -> Result<i64, wasmtime::Error> {
-                // No gas charge for gas_remaining (would be circular).
-                // Source of truth is Store fuel, not HostState.meter (M1 fix).
                 caller.get_fuel().map(|f| f as i64)
             },
         )
@@ -132,18 +194,15 @@ pub fn build_linker<S: ContractStateView + 'static>(
             reason: e.to_string(),
         })?;
 
-    // `msg_value() -> i64`
-    // Returns the native LEM value attached to this call (in Drop, truncated to i64).
-    // M1 fix: charge context_query gas via Store fuel before returning.
+    // ── Index 3: msg_value() -> i64 ──────────────────────────────────────────
+
     linker
         .func_wrap(
             "lemma",
             "msg_value",
             |mut caller: Caller<'_, HostState<S>>| -> Result<i64, wasmtime::Error> {
-                // Charge before reading (AGENTS §7.5 — charge-before-execute).
                 let cost = caller.data().schedule.context_query.as_u64();
                 charge_fuel(&mut caller, cost)?;
-                // Drop is u128; truncate to i64 for WASM. Full u128 support is Phase 3.
                 Ok(caller.data().block.msg_value.as_drop() as i64)
             },
         )
@@ -151,106 +210,313 @@ pub fn build_linker<S: ContractStateView + 'static>(
             reason: e.to_string(),
         })?;
 
-    // ── Memory-taking host functions (Phase-3-replaceable stubs) ─────────────
-    // These stubs allow any WASM module that imports them to instantiate
-    // successfully. Real memory marshalling (ptr/len ABI) is Phase 3.
+    // ── Index 4: msg_sender(register_id: i32) ───────────────────────────────
+    // Writes the 20-byte caller address into the specified register.
 
-    // `storage_read(key_ptr: i32, key_len: i32) -> i32`
-    // Stub: returns 0 (sentinel — no data). Phase 3 wires real memory access.
-    // Gas charging is Phase 3 (memory marshalling required to know key length).
     linker
         .func_wrap(
             "lemma",
-            "storage_read",
-            |_caller: Caller<'_, HostState<S>>,
-             _key_ptr: i32,
-             _key_len: i32|
-             -> Result<i32, wasmtime::Error> {
-                // Phase-3-replaceable ABI stub — returns sentinel 0.
-                Ok(0_i32)
+            "msg_sender",
+            |mut caller: Caller<'_, HostState<S>>,
+             register_id: i32|
+             -> Result<(), wasmtime::Error> {
+                let cost = caller.data().schedule.context_query.as_u64();
+                charge_fuel(&mut caller, cost)?;
+                let addr_bytes = caller.data().block.msg_sender.as_bytes().to_vec();
+                caller
+                    .data_mut()
+                    .registers
+                    .insert(register_id as u32, addr_bytes);
+                Ok(())
             },
         )
         .map_err(|e| VmError::InstantiationFailed {
             reason: e.to_string(),
         })?;
 
-    // `storage_write(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32)`
-    // M1 fix: charges real gas via Store fuel so host-fn cost flows into gas_used.
-    // Memory marshalling (real key/value read + state write) is 6b-vm-2.
-    // NOTE: ignoring _key_ptr/_key_len/_val_ptr/_val_len until 6b-vm-2 wires real memory.
+    // ── Index 5: input(register_id: i32) ─────────────────────────────────────
+    // Writes tx.data (calldata) into the specified register.
+
+    linker
+        .func_wrap(
+            "lemma",
+            "input",
+            |mut caller: Caller<'_, HostState<S>>,
+             register_id: i32|
+             -> Result<(), wasmtime::Error> {
+                let calldata = caller.data().calldata.clone();
+                // Per-byte gas for calldata copy into register.
+                let copy_cost = caller
+                    .data()
+                    .schedule
+                    .memory_copy_per_byte
+                    .as_u64()
+                    .checked_mul(calldata.len() as u64)
+                    .ok_or_else(|| wasmtime::Error::msg("input gas overflow"))?;
+                charge_fuel(&mut caller, copy_cost)?;
+                caller
+                    .data_mut()
+                    .registers
+                    .insert(register_id as u32, calldata);
+                Ok(())
+            },
+        )
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // ── Index 6: register_len(register_id: i32) -> i64 ──────────────────────
+    // Infallible — no memory access, no gas charge. Returns -1 for unset registers.
+
+    linker
+        .func_wrap(
+            "lemma",
+            "register_len",
+            |caller: Caller<'_, HostState<S>>, register_id: i32| -> i64 {
+                caller
+                    .data()
+                    .registers
+                    .get(&(register_id as u32))
+                    .map(|v| v.len() as i64)
+                    .unwrap_or(-1_i64) // REGISTER_EMPTY sentinel (DB-A53 §4.5)
+            },
+        )
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // ── Index 7: read_register(register_id: i32, ptr: i32) ──────────────────
+    // Copies register bytes into guest memory at ptr.
+
+    linker
+        .func_wrap(
+            "lemma",
+            "read_register",
+            |mut caller: Caller<'_, HostState<S>>,
+             register_id: i32,
+             ptr: i32|
+             -> Result<(), wasmtime::Error> {
+                let mem = get_memory(&mut caller)?;
+                let data = caller
+                    .data()
+                    .registers
+                    .get(&(register_id as u32))
+                    .cloned()
+                    .ok_or_else(|| wasmtime::Error::msg("read_register: register not set"))?;
+                write_guest_bytes(&mut caller, &mem, ptr, &data)?;
+                Ok(())
+            },
+        )
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // ── Index 8: storage_read(key_ptr, key_len, register_id) -> i32 ─────────
+    // Reads key from guest memory, calls trait storage_read, writes result to register.
+    // Returns 0 (STORAGE_FOUND) or -1 (STORAGE_NOT_FOUND).
+    //
+    // ⚠️ M4 — ScratchSnapshot does NOT read-through to canonical state.
+    // Only same-tx writes are visible. See executor.rs ScratchSnapshot::read.
+
+    linker
+        .func_wrap(
+            "lemma",
+            "storage_read",
+            |mut caller: Caller<'_, HostState<S>>,
+             key_ptr: i32,
+             key_len: i32,
+             register_id: i32|
+             -> Result<i32, wasmtime::Error> {
+                let mem = get_memory(&mut caller)?;
+                let key = read_guest_bytes(&mut caller, &mem, key_ptr, key_len)?;
+                // Sync down: Store fuel → FuelMeter
+                let fuel = caller.get_fuel()?;
+                caller.data_mut().meter.set_remaining(Gas::new(fuel));
+                // Call trait method (charges meter — reuses all tested gas logic).
+                let result = caller.data_mut().storage_read(&key);
+                // Sync up: FuelMeter → Store fuel
+                let remaining = caller.data().meter.remaining();
+                caller.set_fuel(remaining.as_u64())?;
+                let opt_value = result.map_err(|e| wasmtime::Error::msg(e.to_string()))?;
+                match opt_value {
+                    Some(value) => {
+                        caller
+                            .data_mut()
+                            .registers
+                            .insert(register_id as u32, value);
+                        Ok(0) // STORAGE_FOUND
+                    }
+                    None => Ok(-1_i32), // STORAGE_NOT_FOUND
+                }
+            },
+        )
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // ── Index 9: storage_write(key_ptr, key_len, val_ptr, val_len) ───────────
+    // Reads key+value from guest memory, calls trait storage_write.
+
     linker
         .func_wrap(
             "lemma",
             "storage_write",
             |mut caller: Caller<'_, HostState<S>>,
-             _key_ptr: i32,
-             _key_len: i32,
-             _val_ptr: i32,
-             _val_len: i32|
+             key_ptr: i32,
+             key_len: i32,
+             val_ptr: i32,
+             val_len: i32|
              -> Result<(), wasmtime::Error> {
-                // Charge gas before any side effect (AGENTS §7.5 — charge-before-execute).
-                // Use storage_write_create cost (conservative — real path checks exists() in 6b-vm-2).
-                let cost = caller.data().schedule.storage_write_create.as_u64();
-                charge_fuel(&mut caller, cost)?;
-                // Memory marshalling (real key/value read + state write) is 6b-vm-2.
-                Ok(())
+                let mem = get_memory(&mut caller)?;
+                let key = read_guest_bytes(&mut caller, &mem, key_ptr, key_len)?;
+                let value = read_guest_bytes(&mut caller, &mem, val_ptr, val_len)?;
+                // Sync down: Store fuel → FuelMeter
+                let fuel = caller.get_fuel()?;
+                caller.data_mut().meter.set_remaining(Gas::new(fuel));
+                // Call trait method (charges meter — warm/cold/create/update logic).
+                let result = caller.data_mut().storage_write(&key, &value);
+                // Sync up: FuelMeter → Store fuel
+                let remaining = caller.data().meter.remaining();
+                caller.set_fuel(remaining.as_u64())?;
+                result.map_err(|e| wasmtime::Error::msg(e.to_string()))
             },
         )
         .map_err(|e| VmError::InstantiationFailed {
             reason: e.to_string(),
         })?;
 
-    // `storage_delete(key_ptr: i32, key_len: i32)`
-    // Stub: no-op. Phase 3 wires real memory access.
+    // ── Index 10: storage_delete(key_ptr, key_len) ───────────────────────────
+
     linker
         .func_wrap(
             "lemma",
             "storage_delete",
-            |_caller: Caller<'_, HostState<S>>,
-             _key_ptr: i32,
-             _key_len: i32|
+            |mut caller: Caller<'_, HostState<S>>,
+             key_ptr: i32,
+             key_len: i32|
              -> Result<(), wasmtime::Error> {
-                // Phase-3-replaceable ABI stub — no-op.
-                Ok(())
+                let mem = get_memory(&mut caller)?;
+                let key = read_guest_bytes(&mut caller, &mem, key_ptr, key_len)?;
+                // Sync down + call trait + sync up
+                let fuel = caller.get_fuel()?;
+                caller.data_mut().meter.set_remaining(Gas::new(fuel));
+                let result = caller.data_mut().storage_delete(&key);
+                let remaining = caller.data().meter.remaining();
+                caller.set_fuel(remaining.as_u64())?;
+                result.map_err(|e| wasmtime::Error::msg(e.to_string()))
             },
         )
         .map_err(|e| VmError::InstantiationFailed {
             reason: e.to_string(),
         })?;
 
-    // `emit_event(topics_ptr: i32, topics_len: i32, data_ptr: i32, data_len: i32)`
-    // Stub: no-op. Phase 3 wires real event emission with memory marshalling.
+    // ── Index 11: emit_event(topics_ptr, topics_len, data_ptr, data_len) ─────
+    // Topics are a flat byte slice of 32-byte hashes; topics_len MUST be a multiple of 32.
+
     linker
         .func_wrap(
             "lemma",
             "emit_event",
-            |_caller: Caller<'_, HostState<S>>,
-             _topics_ptr: i32,
-             _topics_len: i32,
-             _data_ptr: i32,
-             _data_len: i32|
+            |mut caller: Caller<'_, HostState<S>>,
+             topics_ptr: i32,
+             topics_len: i32,
+             data_ptr: i32,
+             data_len: i32|
              -> Result<(), wasmtime::Error> {
-                // Phase-3-replaceable ABI stub — no-op.
-                Ok(())
+                let mem = get_memory(&mut caller)?;
+                let topics_bytes = read_guest_bytes(&mut caller, &mem, topics_ptr, topics_len)?;
+                let data = read_guest_bytes(&mut caller, &mem, data_ptr, data_len)?;
+                // Decode topics: each topic is a 32-byte Hash. topics_len MUST be a multiple of 32.
+                if topics_bytes.len() % 32 != 0 {
+                    return Err(wasmtime::Error::msg(
+                        "emit_event: topics_len must be a multiple of 32",
+                    ));
+                }
+                let topics: Vec<Hash> = topics_bytes
+                    .chunks_exact(32)
+                    .map(|chunk| {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(chunk);
+                        Hash::from_bytes(arr)
+                    })
+                    .collect();
+                // Sync down + call trait + sync up
+                let fuel = caller.get_fuel()?;
+                caller.data_mut().meter.set_remaining(Gas::new(fuel));
+                let result = caller.data_mut().emit_event(&topics, &data);
+                let remaining = caller.data().meter.remaining();
+                caller.set_fuel(remaining.as_u64())?;
+                result.map_err(|e| wasmtime::Error::msg(e.to_string()))
             },
         )
         .map_err(|e| VmError::InstantiationFailed {
             reason: e.to_string(),
         })?;
 
-    // `transfer(to_ptr: i32, to_len: i32, amount: i64) -> i32`
-    // Stub: returns 0 (success sentinel). Phase 3 wires real transfer.
+    // ── Index 12: transfer(to_ptr, to_len, amount) -> i32 ───────────────────
+    // Returns 0 (TRANSFER_OK) or 1 (TRANSFER_INSUFFICIENT).
+    // Address must be exactly 20 bytes (Lemma address size).
+    // Negative i64 amount → trap (not silent cast to huge u128).
+
     linker
         .func_wrap(
             "lemma",
             "transfer",
-            |_caller: Caller<'_, HostState<S>>,
-             _to_ptr: i32,
-             _to_len: i32,
-             _amount: i64|
+            |mut caller: Caller<'_, HostState<S>>,
+             to_ptr: i32,
+             to_len: i32,
+             amount: i64|
              -> Result<i32, wasmtime::Error> {
-                // Phase-3-replaceable ABI stub — returns 0 (success sentinel).
-                Ok(0_i32)
+                let mem = get_memory(&mut caller)?;
+                let to_bytes = read_guest_bytes(&mut caller, &mem, to_ptr, to_len)?;
+                // Address MUST be exactly 20 bytes (Lemma address size).
+                if to_bytes.len() != 20 {
+                    return Err(wasmtime::Error::msg(
+                        "transfer: address must be exactly 20 bytes",
+                    ));
+                }
+                // Negative amount → trap (not silent cast to huge u128).
+                if amount < 0 {
+                    return Err(wasmtime::Error::msg("transfer: negative amount"));
+                }
+                let amount_u128 = amount as u64 as u128;
+                let transfer_amount = Amount::from_drop(amount_u128);
+                let mut addr_arr = [0u8; 20];
+                addr_arr.copy_from_slice(&to_bytes);
+                let to_addr = Address::from_raw_bytes(addr_arr);
+                // Sync down + call trait + sync up
+                let fuel = caller.get_fuel()?;
+                caller.data_mut().meter.set_remaining(Gas::new(fuel));
+                let result = caller.data_mut().transfer(to_addr, transfer_amount);
+                let remaining = caller.data().meter.remaining();
+                caller.set_fuel(remaining.as_u64())?;
+                match result {
+                    Ok(()) => Ok(0),                                 // TRANSFER_OK
+                    Err(VmError::InsufficientFunds { .. }) => Ok(1), // TRANSFER_INSUFFICIENT
+                    Err(e) => Err(wasmtime::Error::msg(e.to_string())),
+                }
+            },
+        )
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // ── Index 13: value_return(ptr, len) ─────────────────────────────────────
+    // Captures guest return data into host state. Consumed by cross-contract
+    // calls in P3·Step 7; for now extracted and dropped in execute_call.
+
+    linker
+        .func_wrap(
+            "lemma",
+            "value_return",
+            |mut caller: Caller<'_, HostState<S>>,
+             ptr: i32,
+             len: i32|
+             -> Result<(), wasmtime::Error> {
+                let mem = get_memory(&mut caller)?;
+                let data = read_guest_bytes(&mut caller, &mem, ptr, len)?;
+                caller.data_mut().return_data = data;
+                Ok(())
             },
         )
         .map_err(|e| VmError::InstantiationFailed {

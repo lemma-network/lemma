@@ -337,8 +337,27 @@ impl Executor {
         let HostState {
             state: snap,
             events,
+            return_data,
+            meter: host_meter,
             ..
         } = host_after;
+
+        // return_data: captured by value_return() host fn. Not yet surfaced in
+        // TransactionReceipt (consumed by cross-contract calls in P3·Step 7).
+        // For now, drop it with explicit acknowledgment.
+        let _ = return_data;
+
+        // Refund accumulator: storage_delete credits refunds onto host_meter via
+        // the sync-wrap pattern (6b-vm-2). The capped_refund() value is available
+        // here but NOT yet applied to gas_used — settle() computes gas_used as
+        // `initial - remaining` WITHOUT subtracting the refund.
+        //
+        // Intentional-deferred: wiring capped_refund into the settlement path
+        // requires a settle() redesign (refund must be subtracted from gas_used
+        // AFTER capping at remaining/2, per EIP-3529 / spec §3.1 rule 6).
+        // Until then, deleting-tx gas_used is slightly higher than the spec model.
+        // Tracked in living-notes Technical Debt: "storage_delete refund not applied".
+        let _ = host_meter;
 
         // Merge host state writes back into scratch.
         scratch.merge_snapshot(snap);

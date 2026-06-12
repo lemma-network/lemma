@@ -128,6 +128,7 @@ fn devnet_schedule_has_no_zero_costs() {
         deploy_per_byte,
         memory_grow_per_page,
         context_query,
+        memory_copy_per_byte,
     } = GasSchedule::devnet();
 
     for (name, cost) in [
@@ -153,6 +154,7 @@ fn devnet_schedule_has_no_zero_costs() {
         ("deploy_per_byte", deploy_per_byte),
         ("memory_grow_per_page", memory_grow_per_page),
         ("context_query", context_query),
+        ("memory_copy_per_byte", memory_copy_per_byte),
     ] {
         assert!(
             cost > Gas::ZERO,

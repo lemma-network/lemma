@@ -174,6 +174,17 @@ impl Address {
         Address(NATIVE_LEM_BYTES)
     }
 
+    // ── Raw construction ─────────────────────────────────────────────────────
+
+    /// Create an `Address` directly from a raw 20-byte array.
+    ///
+    /// Infallible — the caller guarantees the array is exactly 20 bytes.
+    /// Used by the VM linker to reconstruct addresses from guest memory
+    /// (the WASM ABI passes raw 20-byte address payloads).
+    pub const fn from_raw_bytes(bytes: [u8; 20]) -> Self {
+        Address(bytes)
+    }
+
     // ── Derivation ────────────────────────────────────────────────────────────
 
     /// Derive a Regular EOA address from an Ed25519 public key.
