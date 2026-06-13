@@ -456,19 +456,50 @@ fn infer_nullish_inner_type_mismatch_errors() {
 // ─── Unit literals ────────────────────────────────────────────────────────────
 
 #[test]
-fn infer_ether_unit_literal_is_u256() {
-    // `1.ether` types as U256. (Numeric lowering to Drop happens at codegen, Step 6.)
+fn infer_ether_unit_literal_is_int_literal() {
+    // `1.ether` types as IntLiteral (DB-A55): coercible integer whose multiplier
+    // fold (×1e18 → Drop) is applied at codegen (P3·Step 6h). Previously typed
+    // as U256; revised so that i64-fitting values can be lowered without requiring
+    // u256 multi-word codegen support.
     let typed = check_src("fn f() { let x = 1.ether }").unwrap_or_else(|e| panic!("{e:?}"));
-    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
-    assert!(has_u256, "1.ether should be U256");
+    let has_int_lit = typed
+        .expr_types
+        .values()
+        .any(|t| *t == ResolvedType::IntLiteral);
+    assert!(
+        has_int_lit,
+        "1.ether should be IntLiteral (coercible, not pinned U256)"
+    );
 }
 
 #[test]
-fn infer_days_unit_literal_is_u256() {
-    // `.days` types as U256. (Numeric lowering to seconds happens at codegen, Step 6.)
+fn infer_days_unit_literal_is_int_literal() {
+    // `6.days` types as IntLiteral (DB-A55): coercible integer whose multiplier
+    // fold (×86400 → seconds) is applied at codegen (P3·Step 6h). Previously typed
+    // as U256; revised so that i64-fitting values can be lowered without requiring
+    // u256 multi-word codegen support.
     let typed = check_src("fn f() { let x = 6.days }").unwrap_or_else(|e| panic!("{e:?}"));
-    let has_u256 = typed.expr_types.values().any(|t| *t == ResolvedType::U256);
-    assert!(has_u256, "6.days should be U256");
+    let has_int_lit = typed
+        .expr_types
+        .values()
+        .any(|t| *t == ResolvedType::IntLiteral);
+    assert!(
+        has_int_lit,
+        "6.days should be IntLiteral (coercible, not pinned U256)"
+    );
+}
+
+#[test]
+fn infer_unit_literal_coerces_to_u64_context() {
+    // `let x: u64 = 6.hours` — IntLiteral coerces to u64 in an annotated context,
+    // exactly like plain integer literals (`let x: u64 = 42`). Verifies that the
+    // type checker's integer coercion path handles unit literals uniformly.
+    let typed = check_src("fn f() { let x: u64 = 6.hours }").unwrap_or_else(|e| panic!("{e:?}"));
+    let has_u64 = typed.expr_types.values().any(|t| *t == ResolvedType::U64);
+    assert!(
+        has_u64,
+        "6.hours should coerce to u64 in a u64-annotated context"
+    );
 }
 
 // ─── MUST-FIX 1 regression: known-bad operand errors even with Unknown partner ─

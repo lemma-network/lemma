@@ -2488,11 +2488,22 @@ fn infer_literal(lit: &Literal) -> ResolvedType {
 
 /// Type for a unit literal (`1.ether`, `24.hours`, …).
 ///
-/// All unit literals evaluate to a `u256` Drop value (the underlying chain
-/// denomination).  The inner numeric expression's type is noted but the
-/// outer unit literal is always `u256`.
+/// Returns [`ResolvedType::IntLiteral`] — the same coercible integer type used
+/// by plain integer literals — so unit literals coerce to whatever integer type
+/// the enclosing context requires (e.g. `u64`, `u32`), rather than being
+/// unconditionally pinned to `u256` (DB-A55).
+///
+/// The actual fold (value × unit multiplier) is deferred to codegen
+/// (P3·Step 6h).  Contexts that cannot represent the folded value (e.g. a
+/// `u256` slot before multi-word codegen is built) receive an honest deferral
+/// error at compile time.
+///
+/// Previously returned `U256` (DB-A45 era). Revised in DB-A55 because
+/// `wasm_valtype(U256)` is deferred and blocked all codegen paths for unit
+/// literals despite the spec requiring integer lowering at codegen.
 fn infer_unit_literal(_inner: &Expr, kind: &UnitKind) -> ResolvedType {
-    // All unit kinds scale to u256 (the chain's native Drop denomination).
+    // IntLiteral: coercible, context-sensitive. The type checker rewrites
+    // this to the concrete context type on coercion (e.g. u64 in a u64 slot).
     // We match exhaustively so the compiler flags new UnitKind variants.
     match kind {
         UnitKind::Ether
@@ -2500,7 +2511,7 @@ fn infer_unit_literal(_inner: &Expr, kind: &UnitKind) -> ResolvedType {
         | UnitKind::Minutes
         | UnitKind::Hours
         | UnitKind::Days
-        | UnitKind::Seconds => ResolvedType::U256,
+        | UnitKind::Seconds => ResolvedType::IntLiteral,
     }
 }
 

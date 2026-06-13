@@ -49,7 +49,7 @@
 
 use std::collections::BTreeMap;
 
-use lemma_core::Address;
+use lemma_core::{Address, DROPS_PER_DRIP, DROPS_PER_LEM};
 use wasm_encoder::{
     CodeSection, ConstExpr, DataCountSection, DataSection, EntityType, ExportKind, ExportSection,
     Function, FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction,
@@ -62,7 +62,7 @@ use crate::error::LangError;
 use crate::lexer::token::Span;
 use crate::parser::expr_span;
 use crate::parser::{
-    AssignOp, BinaryOp, Expr, Literal, ModifierDef, Pattern, Stmt, UnaryOp, Visibility,
+    AssignOp, BinaryOp, Expr, Literal, ModifierDef, Pattern, Stmt, UnaryOp, UnitKind, Visibility,
 };
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::type_checker::types::{ResolvedType, SymbolSig};
@@ -104,6 +104,51 @@ pub(crate) const ADDR_NATIVE_OFFSET: u32 = 40;
 
 /// Number of active data segments emitted for Address constants.
 const ADDR_DATA_SEGMENT_COUNT: u32 = 3;
+
+// ─── Unit-literal multipliers (P3·Step 6h) ───────────────────────────────────
+//
+// Time units lower to **seconds**; value units lower to **Drop** (Lemma's base
+// denomination). All multipliers are named constants — no magic numbers (AGENTS
+// §3.3). Value-unit constants re-use `lemma_core::amount` exports (AGENTS §2.4
+// DRY — single definition, imported here). Time constants are codegen-local
+// (no other crate consumes them today).
+//
+// Conversion table (03-LANGUAGE_SPEC §2):
+//   .seconds × 1             → seconds
+//   .minutes × 60            → seconds
+//   .hours   × 3_600         → seconds
+//   .days    × 86_400        → seconds
+//   .ether   × DROPS_PER_LEM  (1e18) → Drop
+//   .gwei    × DROPS_PER_DRIP (1e9)  → Drop  (1 Drip = DROPS_PER_DRIP Drops)
+
+/// `.seconds` × 1 — explicit constant for a readable, exhaustive `unit_multiplier` match.
+const SECONDS_PER_SECOND: u128 = 1;
+/// `.minutes` → 60 seconds.
+const SECONDS_PER_MINUTE: u128 = 60;
+/// `.hours` → 3 600 seconds.
+const SECONDS_PER_HOUR: u128 = 3_600;
+/// `.days` → 86 400 seconds.
+const SECONDS_PER_DAY: u128 = 86_400;
+
+/// Return the fold multiplier for a [`UnitKind`] (named constants — no magic numbers).
+///
+/// Time units scale to **seconds**; value units scale to **Drop**.
+/// `.ether`/`.gwei` multipliers are re-exported from `lemma_core::amount`
+/// (AGENTS §2.4 — single source of truth). Time multipliers are defined above.
+///
+/// # Panics
+///
+/// Never panics — exhaustive match, no wildcard arm.
+fn unit_multiplier(kind: &UnitKind) -> u128 {
+    match kind {
+        UnitKind::Seconds => SECONDS_PER_SECOND,
+        UnitKind::Minutes => SECONDS_PER_MINUTE,
+        UnitKind::Hours => SECONDS_PER_HOUR,
+        UnitKind::Days => SECONDS_PER_DAY,
+        UnitKind::Ether => DROPS_PER_LEM,
+        UnitKind::Gwei => DROPS_PER_DRIP,
+    }
+}
 
 // ─── Host function type signatures ───────────────────────────────────────────
 
@@ -1523,6 +1568,60 @@ impl<'a> LowerCtx<'a> {
 
             Literal::Bool(b) => {
                 self.func.instruction(&Instruction::I32Const(i32::from(*b)));
+                Ok(())
+            }
+
+            // ── Unit literals (P3·Step 6h) ────────────────────────────
+            //
+            // `<n>.<unit>` folds to `n × multiplier` at compile time (checked
+            // arithmetic — AGENTS §7.4).  Emitted as I64Const for i64-context
+            // types (u64/i64), I32Const otherwise.  Overflows that exceed i64
+            // range produce an honest deferral error (u256 multi-word codegen
+            // is not yet built).  See DB-A55 and 03-LANGUAGE_SPEC §2.
+            Literal::Unit(inner, kind) => {
+                // The parser only produces Literal::Unit from `<int>.<unit>`,
+                // so inner is always Expr::Literal(Literal::Int(n), _).
+                let n = match inner.as_ref() {
+                    Expr::Literal(Literal::Int(n), _) => *n,
+                    _ => {
+                        return Err(LangError::Codegen {
+                            message: "unit literal inner expression is not a plain integer".into(),
+                        });
+                    }
+                };
+                // Fold: n × multiplier, checked at u128 width (AGENTS §7.4).
+                let multiplier = unit_multiplier(kind);
+                let folded = n
+                    .checked_mul(multiplier)
+                    .ok_or_else(|| LangError::Codegen {
+                        message: format!(
+                            "unit literal {n}.{kind:?} overflows u128; \
+                         u256 codegen not yet implemented"
+                        ),
+                    })?;
+                // Emit as i64 or i32 based on context type, mirroring Literal::Int.
+                let ty = self.resolve_type(span)?;
+                if is_i64(&ty) {
+                    if folded > i64::MAX as u128 {
+                        return Err(LangError::Codegen {
+                            message: format!(
+                                "unit literal value {folded} exceeds i64 range; \
+                                 u256 codegen not yet implemented"
+                            ),
+                        });
+                    }
+                    self.func.instruction(&Instruction::I64Const(folded as i64));
+                } else {
+                    if folded > u32::MAX as u128 {
+                        return Err(LangError::Codegen {
+                            message: format!(
+                                "unit literal value {folded} exceeds i32 range; \
+                                 use a u64 or larger integer type in the context"
+                            ),
+                        });
+                    }
+                    self.func.instruction(&Instruction::I32Const(folded as i32));
+                }
                 Ok(())
             }
 

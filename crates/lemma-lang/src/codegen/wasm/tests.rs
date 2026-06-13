@@ -3153,3 +3153,164 @@ fn address_unknown_constant_returns_codegen_error() {
     let result = emit_test_expr_module(&contracts[0], &member_expr, &[]);
     assert!(result.is_err(), "Address.nonexistent must return an error");
 }
+
+// ── Unit-literal execution tests (P3·Step 6h) ────────────────────────────────
+//
+// Exercises the full pipeline (parse → type-check → codegen → wasmtime execute)
+// for every UnitKind. Each unit literal is wrapped in a `-> u64` function so
+// the fold result is emitted as I64Const (see `emit_literal` Literal::Unit arm).
+// One i32-context test verifies the I32Const path for time units.
+//
+// Multipliers under test (03-LANGUAGE_SPEC §2):
+//   .seconds × 1         = n
+//   .minutes × 60        = 60n
+//   .hours   × 3_600     = 3600n
+//   .days    × 86_400    = 86400n
+//   .ether   × 1e18      = DROPS_PER_LEM × n
+//   .gwei    × 1e9       = DROPS_PER_DRIP × n
+
+/// Compile a Lem expression (inside a contract function returning `u64`) to WASM,
+/// instantiate it with wasmtime, call the exported "test" function, and return
+/// the i64 result.
+///
+/// Mirrors `execute_expr_i32` but uses `get_typed_func::<(), i64>` for i64 returns.
+/// This exercises the FULL pipeline: parse → type-check → codegen → wasmtime execute.
+fn execute_expr_i64(expr: &str, ret_ty: &str) -> Result<i64, String> {
+    use super::emit_test_expr_module;
+    use crate::codegen::abi::{IMPORT_MODULE, IMPORT_ORDER};
+    use crate::codegen::wasm::HOST_SIGS;
+
+    let src = format!("contract Test {{ pub fn f() -> {ret_ty} {{ return {expr}; }} }}");
+    let typed = typed_ast_for(&src);
+    let contracts = typed.contracts();
+    let fns = contracts[0].functions();
+    let body = fns[0].body.expect("function should have a body");
+
+    let return_expr = match &body[0] {
+        Stmt::Return(Some(ref e), _) => e,
+        other => return Err(format!("expected Return(Some(expr)), got: {other:?}")),
+    };
+
+    let wasm_bytes = emit_test_expr_module(&contracts[0], return_expr, &[])
+        .map_err(|e| format!("codegen failed: {e}"))?;
+
+    let engine = wasmtime::Engine::default();
+    let mut store = wasmtime::Store::new(&engine, ());
+    let module = wasmtime::Module::new(&engine, &wasm_bytes)
+        .map_err(|e| format!("wasmtime compile failed: {e}"))?;
+
+    let mut linker = wasmtime::Linker::new(&engine);
+    for (i, name) in IMPORT_ORDER.iter().enumerate() {
+        let (params, results) = HOST_SIGS[i];
+        let func_ty = wasmtime::FuncType::new(
+            &engine,
+            params.iter().map(|vt| match vt {
+                wasm_encoder::ValType::I32 => wasmtime::ValType::I32,
+                wasm_encoder::ValType::I64 => wasmtime::ValType::I64,
+                _ => wasmtime::ValType::I32,
+            }),
+            results.iter().map(|vt| match vt {
+                wasm_encoder::ValType::I32 => wasmtime::ValType::I32,
+                wasm_encoder::ValType::I64 => wasmtime::ValType::I64,
+                _ => wasmtime::ValType::I32,
+            }),
+        );
+        let result_types: Vec<wasm_encoder::ValType> = results.to_vec();
+        linker
+            .func_new(
+                IMPORT_MODULE,
+                name,
+                func_ty,
+                move |_caller, _params, results| {
+                    for (r, vt) in results.iter_mut().zip(result_types.iter()) {
+                        *r = match vt {
+                            wasm_encoder::ValType::I64 => wasmtime::Val::I64(0),
+                            _ => wasmtime::Val::I32(0),
+                        };
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("linker.func_new({name}) failed: {e}"))?;
+    }
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("instantiation failed: {e}"))?;
+
+    let test_fn = instance
+        .get_typed_func::<(), i64>(&mut store, "test")
+        .map_err(|e| format!("get_typed_func failed: {e}"))?;
+
+    test_fn
+        .call(&mut store, ())
+        .map_err(|e| format!("execution trapped: {e}"))
+}
+
+// ── Time units — i64 context (u64 return) ────────────────────────────────────
+
+#[test]
+fn execute_unit_literal_seconds_returns_value() {
+    // 30.seconds × 1 = 30
+    assert_eq!(execute_expr_i64("30.seconds", "u64").unwrap(), 30);
+}
+
+#[test]
+fn execute_unit_literal_minutes_returns_value() {
+    // 5.minutes × 60 = 300
+    assert_eq!(execute_expr_i64("5.minutes", "u64").unwrap(), 300);
+}
+
+#[test]
+fn execute_unit_literal_hours_returns_value() {
+    // 1.hours × 3600 = 3600
+    assert_eq!(execute_expr_i64("1.hours", "u64").unwrap(), 3_600);
+}
+
+#[test]
+fn execute_unit_literal_days_returns_value() {
+    // 2.days × 86400 = 172800
+    assert_eq!(execute_expr_i64("2.days", "u64").unwrap(), 172_800);
+}
+
+// ── Value units — i64 context (u64 return) ───────────────────────────────────
+
+#[test]
+fn execute_unit_literal_gwei_returns_value() {
+    // 1.gwei × DROPS_PER_DRIP (1e9) = 1_000_000_000
+    assert_eq!(execute_expr_i64("1.gwei", "u64").unwrap(), 1_000_000_000);
+}
+
+#[test]
+fn execute_unit_literal_ether_returns_value() {
+    // 1.ether × DROPS_PER_LEM (1e18) = 1_000_000_000_000_000_000
+    // Fits in i64::MAX (≈9.22e18). Checks the fold is correct and the value
+    // is deterministic across nodes (AGENTS §7.1).
+    assert_eq!(
+        execute_expr_i64("1.ether", "u64").unwrap(),
+        1_000_000_000_000_000_000_i64,
+    );
+}
+
+// ── Time units — i32 context (u32 return) ────────────────────────────────────
+
+#[test]
+fn execute_unit_literal_hours_in_u32_context_returns_value() {
+    // 1.hours = 3600 fits in i32 — verifies the I32Const path for time units.
+    assert_eq!(execute_expr_i32("1.hours", "u32").unwrap(), 3_600);
+}
+
+// ── Overflow — honest deferral errors ────────────────────────────────────────
+
+#[test]
+fn execute_unit_literal_ether_i64_overflow_returns_codegen_error() {
+    // 10.ether = 10e18 > i64::MAX (≈9.22e18) — codegen must reject with an
+    // honest deferral error, not panic or silently truncate.
+    let result = execute_expr_i64("10.ether", "u64");
+    assert!(result.is_err(), "10.ether must fail: exceeds i64 range");
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("exceeds i64 range"),
+        "error should mention i64 overflow, got: {msg}"
+    );
+}
