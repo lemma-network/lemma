@@ -132,6 +132,7 @@ impl Parser {
             // Unit suffix tokens appear after integer literals; standalone = error.
             Token::UnitEther
             | Token::UnitGwei
+            | Token::UnitSeconds
             | Token::UnitMinutes
             | Token::UnitHours
             | Token::UnitDays
@@ -152,6 +153,7 @@ impl Parser {
         let kind = match self.peek() {
             Token::UnitEther => UnitKind::Ether,
             Token::UnitGwei => UnitKind::Gwei,
+            Token::UnitSeconds => UnitKind::Seconds,
             Token::UnitMinutes => UnitKind::Minutes,
             Token::UnitHours => UnitKind::Hours,
             Token::UnitDays => UnitKind::Days,

@@ -560,6 +560,53 @@ fn parse_expr_unit_suffix_ether() {
     );
 }
 
+#[test]
+fn parse_expr_unit_suffix_gwei() {
+    let expr = parse_expr_from_str("100.gwei").expect("parse failed");
+    assert!(
+        matches!(expr, Expr::Literal(Literal::Unit(_, _), _)),
+        "expected Unit literal, got {expr:?}"
+    );
+}
+
+#[test]
+fn parse_expr_unit_suffix_seconds() {
+    // Token::UnitSeconds was missing from try_parse_unit_suffix until fixed in P3·Step 6h.
+    // This test is the regression guard for that bug.
+    let expr = parse_expr_from_str("30.seconds").expect("parse failed");
+    assert!(
+        matches!(expr, Expr::Literal(Literal::Unit(_, _), _)),
+        "expected Unit literal, got {expr:?}"
+    );
+}
+
+#[test]
+fn parse_expr_unit_suffix_minutes() {
+    let expr = parse_expr_from_str("5.minutes").expect("parse failed");
+    assert!(
+        matches!(expr, Expr::Literal(Literal::Unit(_, _), _)),
+        "expected Unit literal, got {expr:?}"
+    );
+}
+
+#[test]
+fn parse_expr_unit_suffix_hours() {
+    let expr = parse_expr_from_str("1.hours").expect("parse failed");
+    assert!(
+        matches!(expr, Expr::Literal(Literal::Unit(_, _), _)),
+        "expected Unit literal, got {expr:?}"
+    );
+}
+
+#[test]
+fn parse_expr_unit_suffix_days() {
+    let expr = parse_expr_from_str("7.days").expect("parse failed");
+    assert!(
+        matches!(expr, Expr::Literal(Literal::Unit(_, _), _)),
+        "expected Unit literal, got {expr:?}"
+    );
+}
+
 // ── Newline-insignificance in expression context (MF-1) ───────────────────────
 
 #[test]
