@@ -30,7 +30,7 @@ use super::run_incarnation;
 use super::state::{SchedulerState, Task};
 
 /// Shared, immutable context handed to every worker closure.
-pub(super) struct WorkerCtx<'a, S: ContractStateView + Send + Sync + 'static> {
+pub(super) struct WorkerCtx<'a, S: ContractStateView + Clone + Send + Sync + 'static> {
     executor: &'a Executor,
     mv: &'a Arc<MvState>,
     base: &'a Arc<S>,
@@ -39,7 +39,7 @@ pub(super) struct WorkerCtx<'a, S: ContractStateView + Send + Sync + 'static> {
     sched: &'a Mutex<SchedulerState>,
 }
 
-impl<'a, S: ContractStateView + Send + Sync + 'static> WorkerCtx<'a, S> {
+impl<'a, S: ContractStateView + Clone + Send + Sync + 'static> WorkerCtx<'a, S> {
     /// Bundle the shared references a worker needs.
     pub(super) fn new(
         executor: &'a Executor,

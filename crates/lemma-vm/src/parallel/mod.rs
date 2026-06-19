@@ -87,7 +87,7 @@ impl Default for FluxConfig {
 /// * `block` — deterministic block context from consensus.
 /// * `base` — committed base state ([`Arc`]-shared slot-0 fall-through).
 /// * `config` — worker-pool configuration.
-pub fn execute_block_parallel<S: ContractStateView + Send + Sync + 'static>(
+pub fn execute_block_parallel<S: ContractStateView + Clone + Send + Sync + 'static>(
     executor: &Executor,
     txs: &[Transaction],
     block: &BlockContext,
@@ -102,7 +102,7 @@ pub fn execute_block_parallel<S: ContractStateView + Send + Sync + 'static>(
 /// # Arguments
 ///
 /// See [`execute_block_parallel`] (no worker config — execution is serial).
-pub fn execute_block_sequential<S: ContractStateView + Send + Sync + 'static>(
+pub fn execute_block_sequential<S: ContractStateView + Clone + Send + Sync + 'static>(
     executor: &Executor,
     txs: &[Transaction],
     block: &BlockContext,

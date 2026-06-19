@@ -82,6 +82,19 @@ pub struct WorldState {
     state_root: Option<Hash>,
 }
 
+impl Clone for WorldState {
+    /// Clone this view by sharing the same `Arc<LemmaDb>` and copying the
+    /// `state_root`. The clone reads from the same committed state as the
+    /// original — used by `ScratchSnapshot` (M4 fix) to provide canonical
+    /// read-through for WASM `storage_read`.
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            state_root: self.state_root,
+        }
+    }
+}
+
 impl WorldState {
     // ── Construction ──────────────────────────────────────────────────────────
 

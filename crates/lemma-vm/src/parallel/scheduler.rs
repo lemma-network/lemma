@@ -78,7 +78,7 @@ pub trait BlockScheduler {
     ///
     /// Implementations MUST produce identical output for the same ordered block
     /// (the serialization guarantee, §1.6).
-    fn execute_block<S: ContractStateView + Send + Sync + 'static>(
+    fn execute_block<S: ContractStateView + Clone + Send + Sync + 'static>(
         &self,
         executor: &Executor,
         txs: &[Transaction],
@@ -95,7 +95,7 @@ pub trait BlockScheduler {
 /// commits the buffered writes to `mv` stamped with `(txn_idx, incarnation)`.
 /// Returns the written keys, captured reads, and the receipt. This is the
 /// SINGLE execution path shared by both schedulers (AGENTS.md §2).
-pub(super) fn run_incarnation<S: ContractStateView + 'static>(
+pub(super) fn run_incarnation<S: ContractStateView + Clone + 'static>(
     executor: &Executor,
     mv: &Arc<MvState>,
     base: &Arc<S>,
@@ -130,7 +130,7 @@ impl SequentialScheduler {
 }
 
 impl BlockScheduler for SequentialScheduler {
-    fn execute_block<S: ContractStateView + Send + Sync + 'static>(
+    fn execute_block<S: ContractStateView + Clone + Send + Sync + 'static>(
         &self,
         executor: &Executor,
         txs: &[Transaction],
@@ -191,7 +191,7 @@ pub(super) fn num_cpus_or_default() -> usize {
 }
 
 impl BlockScheduler for ParallelScheduler {
-    fn execute_block<S: ContractStateView + Send + Sync + 'static>(
+    fn execute_block<S: ContractStateView + Clone + Send + Sync + 'static>(
         &self,
         executor: &Executor,
         txs: &[Transaction],
@@ -214,7 +214,7 @@ impl BlockScheduler for ParallelScheduler {
 
 impl ParallelScheduler {
     /// Run the worker pool; returns `None` if the pool cannot be built.
-    fn run_parallel<S: ContractStateView + Send + Sync + 'static>(
+    fn run_parallel<S: ContractStateView + Clone + Send + Sync + 'static>(
         &self,
         executor: &Executor,
         txs: &[Transaction],

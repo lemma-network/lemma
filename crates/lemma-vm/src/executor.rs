@@ -51,7 +51,7 @@ use crate::{
     state::ContractStateView,
 };
 
-// ── Entry point constant ──────────────────────────────────────────────────────
+// ── Entry point constants ─────────────────────────────────────────────────────
 
 /// WASM entry point for contract calls.
 ///
@@ -59,6 +59,15 @@ use crate::{
 /// convention (calldata ptr/len, return ptr/len via linear memory).
 /// B4 uses the simplest possible ABI: `fn() -> ()`.
 const ENTRY_POINT: &str = "call";
+
+/// WASM entry point for the constructor (init) function.
+///
+/// Invoked once at deploy time, after bytecode is compiled and stored.
+/// Same ABI as `"call"`: `fn() -> ()`. Optional — if the module does not
+/// export `"init"`, deploy succeeds without constructor execution.
+///
+/// See 08-EXECUTION_SPEC §4.5 and docs/04-BUILD_GUIDE.md §P3·Step 7.
+const INIT_ENTRY_POINT: &str = "init";
 
 // ── Executor ──────────────────────────────────────────────────────────────────
 
@@ -137,7 +146,7 @@ impl Executor {
     /// * `tx` — the transaction to execute.
     /// * `block` — deterministic block context from consensus.
     /// * `state` — mutable state backend (writes are applied on success).
-    pub fn execute_transaction<S: ContractStateView + 'static>(
+    pub fn execute_transaction<S: ContractStateView + Clone + 'static>(
         &self,
         tx: &Transaction,
         block: BlockContext,
@@ -163,7 +172,7 @@ impl Executor {
         // Dispatch to the appropriate execution path.
         let result = match tx.tx_type {
             TxType::Transfer => self.execute_transfer(tx, &mut scratch, &mut meter),
-            TxType::ContractDeploy => self.execute_deploy(tx, &mut scratch, &mut meter),
+            TxType::ContractDeploy => self.execute_deploy(tx, block, &mut scratch, &mut meter),
             TxType::ContractCall => self.execute_call(tx, block, &mut scratch, &mut meter),
             // Unsupported tx types in B4 — produce a failed receipt.
             _ => Err(VmError::InvalidParameter {
@@ -263,9 +272,9 @@ impl Executor {
     ///    identical bytecode pay only the base pointer-write cost.
     /// 3. **Thin pointer** (DB-A22): `Account.code_hash = blake3(bytecode)` — the
     ///    account record holds only the 32-byte hash, not the full bytecode.
-    ///
-    /// No constructor execution in B4 — Phase 3 (Lem compiler) owns constructor
-    /// semantics. B4 deploy = size-gate + compile-validate + content-store + register.
+    /// 4. **Init constructor** (P3·Step 7): if the module exports `"init"`, invoke
+    ///    it once after the thin pointer is set. Init gas is charged from the same
+    ///    meter. If init traps, the entire deploy fails — no contract is registered.
     ///
     /// # Errors
     ///
@@ -273,9 +282,11 @@ impl Executor {
     ///   (returned BEFORE gas is charged — DoS protection).
     /// - [`VmError::CompilationFailed`] — bytecode is not valid WASM/WAT.
     /// - [`VmError::InvalidParameter`] — address already has code deployed.
-    fn execute_deploy<S: ContractStateView>(
+    /// - Any [`VmError`] from init execution — deploy fails, no contract registered.
+    fn execute_deploy<S: ContractStateView + Clone + 'static>(
         &self,
         tx: &Transaction,
+        block: BlockContext,
         scratch: &mut ScratchState<'_, S>,
         meter: &mut FuelMeter,
     ) -> Result<Vec<Log>, VmError> {
@@ -308,7 +319,8 @@ impl Executor {
 
         // 5. COMPILE bytecode — fail fast before storing anything.
         //    (compile_module accepts both binary WASM and WAT text)
-        self.engine.compile_module(&tx.data)?;
+        //    The compiled module is reused for init invocation below (step 8).
+        let module = self.engine.compile_module(&tx.data)?;
 
         // 6. CONTENT-ADDRESSED DEDUP (DB-A23, 08-EXECUTION_SPEC §3.4(b/c)).
         //    Check whether this code_hash is already in the content store.
@@ -347,6 +359,54 @@ impl Executor {
         //    must point to the code_hash so execute_call can resolve bytecode.
         scratch.set_code_hash_ptr(&contract_addr, code_hash);
 
+        // 8. INIT CONSTRUCTOR INVOCATION (P3·Step 7, 08-EXECUTION_SPEC §4.5).
+        //
+        //    If the compiled module exports "init", invoke it once now.
+        //    Init runs with:
+        //      - msg.sender = tx.sender (the deployer)
+        //      - contract   = contract_addr (the newly derived address)
+        //      - calldata   = empty (constructor args are not yet defined in B4)
+        //
+        //    State writes from init are accumulated in the same scratch overlay
+        //    and committed together with the deploy on success. If init traps or
+        //    runs out of gas, the entire deploy fails — no contract is registered
+        //    and scratch is discarded by settle() (AGENTS §7.2 — no panics).
+        //
+        //    Modules without an "init" export deploy successfully without a
+        //    constructor (defaults-only deploy).
+        //
+        //    Gas: init execution is charged from the same meter as the deploy.
+        //    The snapshot/merge pattern (same as execute_call) satisfies the
+        //    'static bound on the linker's func_wrap closures without requiring
+        //    ScratchState to be 'static (Phase 3 will replace with multi-frame stack).
+        let init_block_ctx = BlockContext {
+            contract: contract_addr,
+            msg_sender: tx.sender,
+            ..block
+        };
+
+        let snapshot = scratch.snapshot();
+        let init_host = HostState::new(
+            FuelMeter::new(meter.remaining()),
+            self.schedule,
+            CallContext::new(),
+            init_block_ctx,
+            snapshot,
+            vec![], // init calldata: empty (B4 — constructor args deferred to Phase 3)
+        );
+
+        let (init_consumed, init_host_after) =
+            self.run_wasm_with_entry(&module, init_host, INIT_ENTRY_POINT)?;
+
+        // Merge init's state writes back into the deploy's scratch overlay.
+        // On success, these writes are committed together with the deploy.
+        scratch.merge_snapshot(init_host_after.state);
+
+        // Charge init gas from the outer meter.
+        // run_wasm_with_entry already returned Ok, so init_consumed ≤ meter.remaining().
+        // The ? on run_wasm_with_entry above ensures we only reach here on success.
+        let _ = meter.charge(init_consumed);
+
         Ok(vec![])
     }
 
@@ -373,7 +433,7 @@ impl Executor {
     /// - [`VmError::OutOfGas`] — fuel exhausted during execution.
     /// - [`VmError::StackOverflow`] — native WASM stack exceeded.
     /// - [`VmError::TrapUnknown`] — any other WASM trap.
-    fn execute_call<S: ContractStateView + 'static>(
+    fn execute_call<S: ContractStateView + Clone + 'static>(
         &self,
         tx: &Transaction,
         block: BlockContext,
@@ -535,6 +595,71 @@ impl Executor {
             .map_err(|e| VmError::InstantiationFailed {
                 reason: e.to_string(),
             })?;
+
+        // Call the entry point — map traps to VmError.
+        func.call(&mut store, ()).map_err(map_trap_to_vm_error)?;
+
+        // Compute WASM instruction fuel consumed.
+        let fuel_remaining = store.get_fuel().unwrap_or(0);
+        let wasm_consumed = Gas(initial_fuel.as_u64().saturating_sub(fuel_remaining));
+
+        Ok((wasm_consumed, store.into_data()))
+    }
+
+    /// Run the optional `"init"` constructor of a compiled WASM module.
+    ///
+    /// Identical to [`run_wasm`] except:
+    /// - Calls [`INIT_ENTRY_POINT`] (`"init"`) instead of `"call"`.
+    /// - If the module does NOT export `"init"`, returns `Ok((Gas::ZERO, host))`
+    ///   — absence is a no-op (defaults-only deploy), not an error.
+    ///
+    /// ## Fuel sync
+    ///
+    /// Same fuel-sync pattern as [`run_wasm`]: initial fuel from host meter,
+    /// consumed = initial − remaining after execution.
+    ///
+    /// # Errors
+    ///
+    /// - [`VmError::InstantiationFailed`] — module cannot be instantiated.
+    /// - [`VmError::OutOfGas`] — init exhausted the gas budget.
+    /// - [`VmError::StackOverflow`] — native WASM stack exceeded during init.
+    /// - [`VmError::TrapUnknown`] — any other WASM trap during init.
+    fn run_wasm_with_entry<S: ContractStateView + 'static>(
+        &self,
+        module: &wasmtime::Module,
+        host: HostState<S>,
+        entry_point: &str,
+    ) -> Result<(Gas, HostState<S>), VmError> {
+        let initial_fuel = host.meter.remaining();
+
+        let mut store = wasmtime::Store::new(self.engine.inner(), host);
+
+        // Set wasmtime fuel from the meter's remaining budget.
+        store
+            .set_fuel(initial_fuel.as_u64())
+            .map_err(|e| VmError::InvalidParameter {
+                reason: format!("set_fuel failed: {e}"),
+            })?;
+
+        // Build linker and instantiate.
+        let linker = linker::build_linker::<S>(&self.engine)?;
+        let instance =
+            linker
+                .instantiate(&mut store, module)
+                .map_err(|e| VmError::InstantiationFailed {
+                    reason: e.to_string(),
+                })?;
+
+        // Look up the entry-point function.
+        // get_typed_func returns Err if the export is absent or has the wrong type.
+        // Absence of "init" is a no-op (defaults-only deploy) — return host unchanged.
+        let func = match instance.get_typed_func::<(), ()>(&mut store, entry_point) {
+            Ok(f) => f,
+            Err(_) => {
+                // Entry point not exported — no-op, zero gas consumed.
+                return Ok((Gas::ZERO, store.into_data()));
+            }
+        };
 
         // Call the entry point — map traps to VmError.
         func.call(&mut store, ()).map_err(map_trap_to_vm_error)?;
@@ -748,13 +873,24 @@ impl<'a, S: ContractStateView> ScratchState<'a, S> {
     /// without requiring `ScratchState` to be `'static`. After execution,
     /// writes are merged back via `merge_snapshot`.
     ///
+    /// ## M4 fix — canonical read-through
+    ///
+    /// The snapshot now carries a clone of `inner` as a [`CanonicalStateRead`]
+    /// so that WASM `storage_read` can observe values from prior committed
+    /// transactions. `S: Clone` is required to produce the owned `'static`
+    /// canonical reader without lifetime parameters.
+    ///
     /// The snapshot captures:
-    /// - All scratch writes accumulated so far.
-    /// - A read-through view of the inner state for keys not in scratch.
+    /// - All scratch writes accumulated so far (highest priority).
+    /// - A tombstone set for keys deleted this transaction.
+    /// - A clone of `inner` for canonical fall-through (M4 fix).
     ///
     /// For B4 (single-frame, no cross-contract calls), this is semantically
     /// correct. Phase 3 will replace this with a proper multi-frame state stack.
-    pub(crate) fn snapshot(&self) -> ScratchSnapshot {
+    pub(crate) fn snapshot(&self) -> ScratchSnapshot
+    where
+        S: Clone + 'static,
+    {
         ScratchSnapshot {
             storage: self
                 .storage_writes
@@ -771,6 +907,10 @@ impl<'a, S: ContractStateView> ScratchState<'a, S> {
             code: self.code_writes.clone(),
             code_hashes: self.code_hash_writes.clone(),
             code_store: self.code_store_writes.clone(),
+            // M4 fix: clone inner to provide canonical read-through for WASM storage_read.
+            // The clone is cheap for InMemoryStateView (BTreeMap clone) and for
+            // MvStateView (Arc clone for mv + base; RefCell clone for captured/writes).
+            canonical: Box::new(self.inner.clone()),
         }
     }
 
@@ -800,6 +940,7 @@ impl<'a, S: ContractStateView> ScratchState<'a, S> {
         for (hash, bytes) in snap.code_store {
             self.code_store_writes.insert(hash, bytes);
         }
+        // `canonical` is a read-only view — no writes to merge back.
     }
 
     /// Commit all scratch writes to `inner` and advance the sender's nonce.
@@ -937,6 +1078,47 @@ impl<S: ContractStateView> ContractStateView for ScratchState<'_, S> {
     }
 }
 
+// ── CanonicalStateRead ────────────────────────────────────────────────────────
+
+/// Minimal read-only view of canonical (committed) state.
+///
+/// Used by [`ScratchSnapshot`] to fall through to committed state for keys
+/// not written in the current transaction (M4 fix). The trait is intentionally
+/// narrow — only the operations needed by the WASM host are included.
+///
+/// # `'static` requirement
+///
+/// Implementations must be `'static` so that `ScratchSnapshot` (which holds a
+/// `Box<dyn CanonicalStateRead + 'static>`) satisfies the wasmtime linker's
+/// `'static` bound on `HostState<ScratchSnapshot>`.
+pub(crate) trait CanonicalStateRead: 'static {
+    /// Read a storage slot from canonical state.
+    fn canonical_read(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>>;
+
+    /// Check whether a storage slot exists in canonical state.
+    fn canonical_exists(&self, contract: &Address, key: &[u8]) -> bool;
+
+    /// Read the native LEM balance of an account from canonical state.
+    fn canonical_balance(&self, addr: &Address) -> Amount;
+}
+
+/// Blanket implementation: any `ContractStateView + Clone + 'static` can serve
+/// as a canonical reader. The clone is taken at snapshot time so the reader is
+/// owned and `'static`.
+impl<S: ContractStateView + Clone + 'static> CanonicalStateRead for S {
+    fn canonical_read(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>> {
+        self.read(contract, key)
+    }
+
+    fn canonical_exists(&self, contract: &Address, key: &[u8]) -> bool {
+        self.exists(contract, key)
+    }
+
+    fn canonical_balance(&self, addr: &Address) -> Amount {
+        self.balance(addr)
+    }
+}
+
 // ── ScratchSnapshot ───────────────────────────────────────────────────────────
 
 /// Owned snapshot of scratch state for passing into [`HostState`].
@@ -945,12 +1127,27 @@ impl<S: ContractStateView> ContractStateView for ScratchState<'_, S> {
 /// without requiring `ScratchState` to be `'static`. After execution, writes
 /// are merged back into the original scratch via `merge_snapshot`.
 ///
+/// ## M4 fix — read-through to canonical state
+///
+/// `ScratchSnapshot` now carries a `Box<dyn CanonicalStateRead + 'static>`
+/// that is a clone of the inner state taken at snapshot time. The read path
+/// falls through in priority order:
+///
+/// 1. Current-tx writes (`storage` map) — highest priority.
+/// 2. Current-tx deletes (`storage_deletes` set) — tombstone: return `None`.
+/// 3. Canonical state (`canonical`) — committed state from prior txs.
+///
+/// This matches `ScratchState::read` semantics and closes M4.
+///
 /// For B4 (single-frame, no cross-contract calls), this is semantically
 /// correct. Phase 3 will replace this with a proper multi-frame state stack.
-#[derive(Debug, Clone)]
 pub(crate) struct ScratchSnapshot {
     storage: BTreeMap<(Address, Vec<u8>), Vec<u8>>,
-    storage_deletes: Vec<(Address, Vec<u8>)>,
+    /// Tombstone set: keys deleted in the current transaction.
+    ///
+    /// A key in `storage_deletes` shadows any canonical value — `read` returns
+    /// `None` even if the canonical state has a value for that key.
+    storage_deletes: BTreeSet<(Address, Vec<u8>)>,
     balances: BTreeMap<Address, Amount>,
     nonces: BTreeMap<Address, u64>,
     code: BTreeMap<Address, Vec<u8>>,
@@ -958,48 +1155,71 @@ pub(crate) struct ScratchSnapshot {
     code_hashes: BTreeMap<Address, Hash>,
     /// Content-addressed bytecode store: `code_hash → bytecode` (DB-A23).
     code_store: BTreeMap<Hash, Vec<u8>>,
+    /// Read-through to canonical (committed) state for keys not in this snapshot.
+    ///
+    /// Cloned from `ScratchState::inner` at snapshot time. Satisfies `'static`
+    /// because `S: Clone + 'static` is required by `ScratchState::snapshot`.
+    ///
+    /// M4 fix: closes the gap where WASM `storage_read` returned `None` for
+    /// keys written by prior committed transactions.
+    canonical: Box<dyn CanonicalStateRead + 'static>,
 }
 
 impl ContractStateView for ScratchSnapshot {
-    /// Read a storage slot from this snapshot.
+    /// Read a storage slot from this snapshot with canonical fall-through.
     ///
-    /// # ⚠️ M4 — Intentional-deferred: NO read-through to inner state
+    /// ## M4 fix — read priority (matches `ScratchState::read`)
     ///
-    /// `ScratchSnapshot` is an *owned copy* of the current-tx scratch writes.
-    /// It does NOT fall through to the underlying canonical state for keys that
-    /// haven't been written in this transaction. WASM `storage_read` can only
-    /// observe values written earlier in the **same transaction**.
-    ///
-    /// This diverges from `ScratchState::read`, which *does* fall through.
-    ///
-    /// **Intentional-deferred** — Phase 3 multi-frame state stack (beyond 6b-vm-1 scope).
-    /// Phase 3 (real Lem ABI + multi-frame state stack) must replace this with a proper
-    /// read-through implementation. Until then, any WASM contract that reads a storage
-    /// slot set by a *previous* committed transaction will observe `None`.
-    ///
-    /// Tracked in `living-notes.md` Technical Debt: "ScratchSnapshot no read-through".
+    /// 1. Key in `storage` (written this tx) → return that value.
+    /// 2. Key in `storage_deletes` (deleted this tx) → return `None` (tombstone).
+    /// 3. Fall through to `canonical` (committed state from prior txs).
     fn read(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>> {
-        self.storage.get(&(*contract, key.to_vec())).cloned()
+        let k = (*contract, key.to_vec());
+        // Priority 1: current-tx write.
+        if let Some(v) = self.storage.get(&k) {
+            return Some(v.clone());
+        }
+        // Priority 2: current-tx delete (tombstone).
+        if self.storage_deletes.contains(&k) {
+            return None;
+        }
+        // Priority 3: fall through to canonical state (M4 fix).
+        self.canonical.canonical_read(contract, key)
     }
 
     fn write(&mut self, contract: &Address, key: &[u8], value: Vec<u8>) {
-        self.storage.insert((*contract, key.to_vec()), value);
+        let k = (*contract, key.to_vec());
+        // A write un-deletes the key: remove from tombstone set.
+        self.storage_deletes.remove(&k);
+        self.storage.insert(k, value);
     }
 
     fn delete(&mut self, contract: &Address, key: &[u8]) {
-        self.storage.remove(&(*contract, key.to_vec()));
-        self.storage_deletes.push((*contract, key.to_vec()));
+        let k = (*contract, key.to_vec());
+        self.storage.remove(&k);
+        self.storage_deletes.insert(k);
     }
 
     fn exists(&self, contract: &Address, key: &[u8]) -> bool {
-        self.storage.contains_key(&(*contract, key.to_vec()))
+        let k = (*contract, key.to_vec());
+        // Current-tx write → exists.
+        if self.storage.contains_key(&k) {
+            return true;
+        }
+        // Current-tx delete (tombstone) → does not exist.
+        if self.storage_deletes.contains(&k) {
+            return false;
+        }
+        // Fall through to canonical state (M4 fix).
+        self.canonical.canonical_exists(contract, key)
     }
 
     fn balance(&self, addr: &Address) -> Amount {
+        // Current-tx balance write takes priority; fall through to canonical (M4 fix).
         self.balances
             .get(addr)
             .copied()
-            .unwrap_or_else(Amount::zero)
+            .unwrap_or_else(|| self.canonical.canonical_balance(addr))
     }
 
     fn set_balance(&mut self, addr: &Address, amount: Amount) {
@@ -1032,8 +1252,7 @@ impl ContractStateView for ScratchSnapshot {
     fn has_code_hash(&self, hash: &Hash) -> bool {
         // Check the content store snapshot (deployed this tx).
         self.code_store.contains_key(hash)
-        // NOTE: ScratchSnapshot has no read-through to committed state (M4 deferred).
-        // has_code_hash on ScratchSnapshot only sees writes from the current tx.
+        // NOTE: has_code_hash on ScratchSnapshot only sees writes from the current tx.
         // This is acceptable: ScratchSnapshot is only used by execute_call (WASM host),
         // not by execute_deploy (which uses ScratchState directly).
     }

@@ -73,6 +73,17 @@ impl WorldStateView {
     }
 }
 
+impl Clone for WorldStateView {
+    /// Clone this view by cloning the inner [`WorldState`] (shares the same
+    /// `Arc<LemmaDb>` and `state_root`). Used by `ScratchSnapshot` (M4 fix)
+    /// to provide canonical read-through for WASM `storage_read`.
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl ContractStateView for WorldStateView {
     // ── Read operations ───────────────────────────────────────────────────────
 

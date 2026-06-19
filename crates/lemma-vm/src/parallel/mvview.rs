@@ -65,6 +65,31 @@ pub struct MvStateView<S: ContractStateView> {
     min_blocking_txn: Cell<Option<u32>>,
 }
 
+impl<S: ContractStateView + Clone> Clone for MvStateView<S> {
+    /// Clone this view.
+    ///
+    /// The clone shares the same `Arc<MvState>` and `Arc<S>` (cheap pointer
+    /// copies). The `captured` reads and buffered `writes` are cloned
+    /// independently so the clone starts with the same read/write history.
+    ///
+    /// Used by `ScratchState::snapshot` (M4 fix) to produce a `'static`
+    /// canonical reader for `ScratchSnapshot`. The clone's read tracking is
+    /// separate from the original — reads via `ScratchSnapshot` are not
+    /// recorded in the original view's MVCC capture set. This is acceptable
+    /// for B4 single-frame execution; Phase 3 multi-frame state stack will
+    /// address this properly.
+    fn clone(&self) -> Self {
+        Self {
+            mv: Arc::clone(&self.mv),
+            base: Arc::clone(&self.base),
+            txn_idx: self.txn_idx,
+            captured: self.captured.clone(),
+            writes: self.writes.clone(),
+            min_blocking_txn: self.min_blocking_txn.clone(),
+        }
+    }
+}
+
 impl<S: ContractStateView> MvStateView<S> {
     /// Create a view for `txn_idx` over `mv` with `base` as the fall-through.
     pub fn new(mv: Arc<MvState>, base: Arc<S>, txn_idx: u32) -> Self {

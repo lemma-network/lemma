@@ -315,8 +315,9 @@ pub fn build_linker<S: ContractStateView + 'static>(
     // Reads key from guest memory, calls trait storage_read, writes result to register.
     // Returns 0 (STORAGE_FOUND) or -1 (STORAGE_NOT_FOUND).
     //
-    // ⚠️ M4 — ScratchSnapshot does NOT read-through to canonical state.
-    // Only same-tx writes are visible. See executor.rs ScratchSnapshot::read.
+    // M4 RESOLVED (P3·Step 7 subtask_08): ScratchSnapshot now reads through to
+    // canonical state for keys not written in the current tx. See executor.rs
+    // ScratchSnapshot::read and CanonicalStateRead trait.
 
     linker
         .func_wrap(
