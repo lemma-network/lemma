@@ -48,5 +48,5 @@ pub use parallel::{
     HintMap, MvState, ParallelScheduler, SequentialScheduler, StateKey, StateValue,
 };
 pub use runtime::{deterministic_config, LemmaEngine, MAX_CALL_DEPTH, MAX_WASM_STACK};
-pub use safety_manifest::{SafetyConstraint, SafetyManifest};
+pub use safety_manifest::{parse_safety_manifest, SafetyConstraint, SafetyManifest};
 pub use state::{ContractStateView, InMemoryStateView};

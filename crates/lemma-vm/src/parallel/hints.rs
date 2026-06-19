@@ -158,7 +158,7 @@ pub fn parse_hints_from_wasm(wasm_bytes: &[u8]) -> Option<ContractHints> {
 /// `Module::custom_sections` was removed in wasmtime 0.20+ and is not
 /// available in wasmtime 45.x. `wasmparser` is already linked transitively
 /// (AGENTS §9.3 — minimize dep count).
-fn find_lemma_meta_section(wasm_bytes: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn find_lemma_meta_section(wasm_bytes: &[u8]) -> Option<Vec<u8>> {
     use wasmparser::{Parser, Payload};
 
     for payload in Parser::new(0).parse_all(wasm_bytes) {
@@ -236,11 +236,24 @@ fn serialize_access_keys(keys: &[RawAccessKey]) -> BTreeSet<String> {
 /// Raw deserialized `"lemma.meta"` top-level payload.
 ///
 /// Mirrors `lemma-lang`'s `ContractMetadata` struct. The `contract` and
-/// `compiler` fields are informational; only `functions` is consumed.
+/// `compiler` fields are informational; only `functions` and
+/// `safety_constraints` are consumed.
+///
+/// `safety_constraints` is optional for backward compatibility: contracts
+/// compiled before P3·Step 18 have no safety manifest in `"lemma.meta"`.
+/// Serde defaults the missing field to `None`.
 #[derive(Deserialize)]
-struct RawContractMetadata {
+pub(crate) struct RawContractMetadata {
     /// Per-function state-access hints.
+    ///
+    /// Consumed by [`parse_hints_from_json`] within this module.
     functions: Vec<RawFnMeta>,
+    /// Safety constraints for runtime honeypot invariant enforcement (P3·Step 18).
+    ///
+    /// `None` when the field is absent (pre-Step-18 contracts or non-token contracts).
+    /// Parsed by [`crate::safety_manifest::parse_safety_manifest`].
+    #[serde(default)]
+    pub(crate) safety_constraints: Option<Vec<crate::safety_manifest::SafetyConstraint>>,
 }
 
 /// Raw deserialized per-function metadata entry.

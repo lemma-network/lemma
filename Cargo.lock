@@ -2447,6 +2447,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+ "wasm-encoder 0.251.0",
  "wasmparser 0.251.0",
  "wasmtime",
 ]

@@ -19,4 +19,5 @@ lemma-core   = { path = "../lemma-core" }
 lemma-crypto = { path = "../lemma-crypto" }
 
 [dev-dependencies]
-proptest = { workspace = true }
+proptest     = { workspace = true }
+wasm-encoder = { workspace = true }  # for building test WASM with custom sections

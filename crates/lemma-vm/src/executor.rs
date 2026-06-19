@@ -48,6 +48,7 @@ use crate::{
     gas::{gas_used, FuelMeter, Gas, GasMeter, GasSchedule},
     host::{BlockContext, CallContext, HostState},
     runtime::LemmaEngine,
+    safety_manifest::{check_safety_invariants, parse_safety_manifest, SafetyManifest},
     state::ContractStateView,
 };
 
@@ -108,6 +109,15 @@ pub struct Executor {
     /// `Mutex` for thread-safe interior mutability (parallel scheduler shares
     /// `&Executor` across workers). `BTreeSet` for determinism (AGENTS §7.1).
     warm_code: Mutex<BTreeSet<Hash>>,
+    /// Cached safety manifests per contract address (P3·Step 18, DB-A51).
+    ///
+    /// Populated on first call/deploy to a contract. Subsequent calls to the
+    /// same contract in the same block reuse the cached manifest.
+    ///
+    /// `BTreeMap` for deterministic iteration (AGENTS §7.1).
+    /// `Mutex` for thread-safe interior mutability (parallel scheduler shares
+    /// `&Executor` across worker threads).
+    safety_manifests: Mutex<BTreeMap<Address, SafetyManifest>>,
 }
 
 impl Executor {
@@ -125,6 +135,7 @@ impl Executor {
             engine,
             schedule,
             warm_code: Mutex::new(BTreeSet::new()),
+            safety_manifests: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -170,17 +181,27 @@ impl Executor {
         let mut scratch = ScratchState::new(state);
 
         // Dispatch to the appropriate execution path.
-        let result = match tx.tx_type {
-            TxType::Transfer => self.execute_transfer(tx, &mut scratch, &mut meter),
+        //
+        // Each path returns `(Result<Vec<Log>, VmError>, Option<SafetyManifest>)`.
+        // Transfers have no contract → `None`. Deploy/call parse the manifest
+        // from the contract's `"lemma.meta"` WASM custom section (P3·Step 18).
+        let (result, manifest) = match tx.tx_type {
+            TxType::Transfer => (
+                self.execute_transfer(tx, &mut scratch, &mut meter),
+                None, // no contract → no manifest
+            ),
             TxType::ContractDeploy => self.execute_deploy(tx, block, &mut scratch, &mut meter),
             TxType::ContractCall => self.execute_call(tx, block, &mut scratch, &mut meter),
             // Unsupported tx types in B4 — produce a failed receipt.
-            _ => Err(VmError::InvalidParameter {
-                reason: format!("tx type {} not supported in B4", tx.tx_type),
-            }),
+            _ => (
+                Err(VmError::InvalidParameter {
+                    reason: format!("tx type {} not supported in B4", tx.tx_type),
+                }),
+                None,
+            ),
         };
 
-        self.settle(tx, result, scratch, meter)
+        self.settle(tx, result, manifest, scratch, meter)
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -289,15 +310,18 @@ impl Executor {
         block: BlockContext,
         scratch: &mut ScratchState<'_, S>,
         meter: &mut FuelMeter,
-    ) -> Result<Vec<Log>, VmError> {
+    ) -> (Result<Vec<Log>, VmError>, Option<SafetyManifest>) {
         // 1. SIZE GATE — reject-before-charge (DB-A21, 08-EXECUTION_SPEC §3.4(a)).
         //    No gas is charged for an oversized module: the validator did no meaningful
         //    work beyond the size check, and charging gas would reward DoS attempts.
         if tx.data.len() > MAX_CONTRACT_WASM_SIZE {
-            return Err(VmError::ContractTooLarge {
-                size: tx.data.len(),
-                limit: MAX_CONTRACT_WASM_SIZE,
-            });
+            return (
+                Err(VmError::ContractTooLarge {
+                    size: tx.data.len(),
+                    limit: MAX_CONTRACT_WASM_SIZE,
+                }),
+                None,
+            );
         }
 
         // 2. COMPUTE code_hash = blake3(bytecode).
@@ -312,15 +336,21 @@ impl Executor {
         //    scratch.code() checks: thin-pointer map (this tx) → legacy code_writes
         //    (this tx) → inner.code() (prior committed txs). Covers all cases.
         if scratch.code(&contract_addr).is_some() {
-            return Err(VmError::InvalidParameter {
-                reason: format!("contract already deployed at {contract_addr}"),
-            });
+            return (
+                Err(VmError::InvalidParameter {
+                    reason: format!("contract already deployed at {contract_addr}"),
+                }),
+                None,
+            );
         }
 
         // 5. COMPILE bytecode — fail fast before storing anything.
         //    (compile_module accepts both binary WASM and WAT text)
         //    The compiled module is reused for init invocation below (step 8).
-        let module = self.engine.compile_module(&tx.data)?;
+        let module = match self.engine.compile_module(&tx.data) {
+            Ok(m) => m,
+            Err(e) => return (Err(e), None),
+        };
 
         // 6. CONTENT-ADDRESSED DEDUP (DB-A23, 08-EXECUTION_SPEC §3.4(b/c)).
         //    Check whether this code_hash is already in the content store.
@@ -338,14 +368,18 @@ impl Executor {
 
         if is_first_deployer {
             // First deployer pays storage cost: base + per_byte × len (AGENTS §2.1 DRY).
-            meter.charge_per_byte(
+            if let Err(e) = meter.charge_per_byte(
                 self.schedule.deploy_base,
                 self.schedule.deploy_storage_per_byte,
                 tx.data.len(),
-            )?;
+            ) {
+                return (Err(e), None);
+            }
         } else {
             // Later deployer: only the account pointer write — base cost only.
-            meter.charge(self.schedule.deploy_base)?;
+            if let Err(e) = meter.charge(self.schedule.deploy_base) {
+                return (Err(e), None);
+            }
         }
 
         // Always store bytecode in the content-addressed scratch store so that
@@ -396,7 +430,10 @@ impl Executor {
         );
 
         let (init_consumed, init_host_after) =
-            self.run_wasm_with_entry(&module, init_host, INIT_ENTRY_POINT)?;
+            match self.run_wasm_with_entry(&module, init_host, INIT_ENTRY_POINT) {
+                Ok(r) => r,
+                Err(e) => return (Err(e), None),
+            };
 
         // Merge init's state writes back into the deploy's scratch overlay.
         // On success, these writes are committed together with the deploy.
@@ -404,7 +441,7 @@ impl Executor {
 
         // Charge init gas from the outer meter.
         // run_wasm_with_entry already returned Ok, so init_consumed ≤ meter.remaining().
-        // The ? on run_wasm_with_entry above ensures we only reach here on success.
+        // The match above ensures we only reach here on success.
         let _ = meter.charge(init_consumed);
 
         // 9. REGISTRY AUTO-POPULATION (DB-A48/DB-A54, P3·Step 7 subtask_09).
@@ -423,7 +460,21 @@ impl Executor {
         //    MUST NOT be failed by registry issues (DB-A54 decision 2, AGENTS §7.2).
         try_write_registry_entry(&module, &contract_addr, scratch);
 
-        Ok(vec![])
+        // 10. PARSE SAFETY MANIFEST from the deploy bytecode (P3·Step 18, DB-A51).
+        //
+        //     tx.data is the WASM bytecode — parse the manifest from it now so
+        //     settle() (and later, the invariant enforcer) has access to it.
+        //     Also cache it for subsequent calls to this contract in the same block.
+        let manifest = parse_safety_manifest(&tx.data);
+        {
+            let mut cache = self
+                .safety_manifests
+                .lock()
+                .expect("safety_manifests mutex poisoned");
+            cache.insert(contract_addr, manifest.clone());
+        }
+
+        (Ok(vec![]), Some(manifest))
     }
 
     /// Execute a `ContractCall` transaction.
@@ -455,10 +506,18 @@ impl Executor {
         block: BlockContext,
         scratch: &mut ScratchState<'_, S>,
         meter: &mut FuelMeter,
-    ) -> Result<Vec<Log>, VmError> {
-        let contract_addr = tx.to.ok_or_else(|| VmError::InvalidParameter {
-            reason: "ContractCall tx missing recipient".into(),
-        })?;
+    ) -> (Result<Vec<Log>, VmError>, Option<SafetyManifest>) {
+        let contract_addr = match tx.to {
+            Some(addr) => addr,
+            None => {
+                return (
+                    Err(VmError::InvalidParameter {
+                        reason: "ContractCall tx missing recipient".into(),
+                    }),
+                    None,
+                )
+            }
+        };
 
         // Load bytecode via the thin-pointer path:
         //   1. Resolve code_hash from the account's thin pointer.
@@ -466,12 +525,17 @@ impl Executor {
         // Falls back to the legacy `code()` path for InMemoryStateView compatibility
         // (test double stores full bytecode directly; production MvStateView uses
         // the thin-pointer path via set_code_hash_ptr → commit_with_nonce).
-        let bytecode =
-            scratch
-                .resolve_code(&contract_addr)
-                .ok_or_else(|| VmError::InvalidParameter {
-                    reason: format!("no contract deployed at {contract_addr}"),
-                })?;
+        let bytecode = match scratch.resolve_code(&contract_addr) {
+            Some(b) => b,
+            None => {
+                return (
+                    Err(VmError::InvalidParameter {
+                        reason: format!("no contract deployed at {contract_addr}"),
+                    }),
+                    None,
+                )
+            }
+        };
 
         // Cold/warm code access tracking (08-EXECUTION_SPEC §3.4(c), DB-A22).
         //
@@ -486,7 +550,23 @@ impl Executor {
         // Mutex::lock() is infallible in practice (only panics if a thread
         // holding the lock panicked — impossible here since we hold no lock
         // across any panic boundary). The `expect` message is for diagnostics.
+        // Load or retrieve cached safety manifest for this contract (P3·Step 18).
+        //
+        // The manifest is parsed from the contract's `"lemma.meta"` WASM custom
+        // section on first access and cached for subsequent calls in the same block.
+        // BTreeMap for determinism (AGENTS §7.1), Mutex for thread safety.
         let code_hash = lemma_crypto::hash_bytes(&bytecode);
+        let manifest = {
+            let mut cache = self
+                .safety_manifests
+                .lock()
+                .expect("safety_manifests mutex poisoned");
+            cache
+                .entry(contract_addr)
+                .or_insert_with(|| parse_safety_manifest(&bytecode))
+                .clone()
+        };
+
         {
             // Scope the lock guard so it is released before WASM execution.
             let mut warm = self
@@ -496,14 +576,19 @@ impl Executor {
             if warm.insert(code_hash) {
                 // First call to this code_hash in this block: code-cold.
                 // Charge the flat surcharge BEFORE execution (spec §3.1 rule 1).
-                meter.charge(self.schedule.code_cold_surcharge)?;
+                if let Err(e) = meter.charge(self.schedule.code_cold_surcharge) {
+                    return (Err(e), Some(manifest));
+                }
             }
             // If insert() returned false, the hash was already present: code-warm.
             // No surcharge — execution fuel only.
         }
 
         // Compile the stored bytecode.
-        let module = self.engine.compile_module(&bytecode)?;
+        let module = match self.engine.compile_module(&bytecode) {
+            Ok(m) => m,
+            Err(e) => return (Err(e), Some(manifest)),
+        };
 
         // Snapshot scratch state into an owned view for the host.
         // This satisfies the 'static bound on the linker's func_wrap closures.
@@ -525,7 +610,10 @@ impl Executor {
             tx.data.clone(), // calldata for input() host fn (DB-A53 §4.5)
         );
 
-        let (wasm_consumed, host_after) = self.run_wasm(&module, host)?;
+        let (wasm_consumed, host_after) = match self.run_wasm(&module, host) {
+            Ok(r) => r,
+            Err(e) => return (Err(e), Some(manifest)),
+        };
 
         // Destructure host_after to avoid partial-move issues.
         let HostState {
@@ -563,7 +651,7 @@ impl Executor {
         let _ = meter.charge(wasm_consumed);
 
         // Collect events from the host (cleared on failure in settle).
-        Ok(events)
+        (Ok(events), Some(manifest))
     }
 
     /// Run a compiled WASM module to completion.
@@ -695,10 +783,19 @@ impl Executor {
     /// 2. On failure: discard scratch (writes reverted), clear logs.
     /// 3. Either way: advance nonce, charge gas (clamped to gas_limit).
     /// 4. Build and return the receipt — never panic.
+    ///
+    /// ## Safety manifest (P3·Step 18, DB-A51)
+    ///
+    /// `manifest` is `Some` for contract calls and deploys (parsed from the
+    /// contract's `"lemma.meta"` WASM custom section). `None` for plain
+    /// transfers (no contract, no manifest). The manifest is not yet enforced
+    /// in this subtask — enforcement is wired in a later subtask (Step 18-05).
+    /// The parameter is accepted now so the plumbing is in place.
     fn settle<S: ContractStateView>(
         &self,
         tx: &Transaction,
         result: Result<Vec<Log>, VmError>,
+        manifest: Option<SafetyManifest>,
         scratch: ScratchState<'_, S>,
         meter: FuelMeter,
     ) -> TransactionReceipt {
@@ -717,7 +814,52 @@ impl Executor {
 
         match result {
             Ok(logs) => {
-                // Success: commit scratch writes to canonical state and advance nonce.
+                // P3·Step 18-05 (DB-A51): post-execution safety-invariant check.
+                //
+                // If the manifest has constraints, verify the state diff before
+                // committing. A violation converts success → failure (scratch
+                // discarded, failed receipt produced). This is the runtime pair
+                // of compile-time SAFETY-001/002/005/009.
+                if let Some(ref m) = manifest {
+                    if !m.constraints.is_empty() {
+                        // Determine which contract's storage namespace to check.
+                        // For calls: tx.to (the called contract).
+                        // For deploys: tx.to is None — use the deployer address
+                        // as fallback (deploy-time init writes key on the derived
+                        // contract address, but settle() doesn't know it; the
+                        // deployer address is a safe fallback since deploy manifests
+                        // are checked against the contract's own namespace).
+                        let contract_addr = tx.to.unwrap_or(tx.sender);
+                        if let Err(violation) = check_safety_invariants(
+                            m,
+                            &contract_addr,
+                            scratch.storage_writes_ref(),
+                            scratch.inner_ref(),
+                        ) {
+                            // Invariant violated: convert success → failure.
+                            // Discard scratch (no partial writes reach canonical state).
+                            let inner = scratch.discard();
+                            let current_nonce = inner.nonce(&tx.sender);
+                            // saturating_add: nonce at u64::MAX stays there rather than wrapping.
+                            inner.set_nonce(&tx.sender, current_nonce.saturating_add(1));
+
+                            warn!(
+                                tx_hash = %tx.hash,
+                                error = %violation,
+                                "honeypot invariant violated — reverting transaction"
+                            );
+
+                            return TransactionReceipt::new(
+                                tx.hash,
+                                false,
+                                gas_used_clamped,
+                                vec![],
+                            );
+                        }
+                    }
+                }
+
+                // No violation — commit scratch writes to canonical state and advance nonce.
                 scratch.commit_with_nonce(&tx.sender);
                 TransactionReceipt::new(tx.hash, true, gas_used_clamped, logs)
             }
@@ -896,6 +1038,25 @@ impl<'a, S: ContractStateView> ScratchState<'a, S> {
             code_hash_writes: BTreeMap::new(),
             code_store_writes: BTreeMap::new(),
         }
+    }
+
+    // ── Safety-invariant accessors (P3·Step 18-05) ─────────────────────────────
+
+    /// Read access to the storage writes for safety-invariant checking.
+    ///
+    /// Returns a reference to the `BTreeMap` of `(contract_addr, key) → Option<value>`.
+    /// `Some(v)` = written, `None` = deleted. Used by [`check_safety_invariants`]
+    /// to inspect the state diff without cloning.
+    pub(crate) fn storage_writes_ref(&self) -> &BTreeMap<(Address, Vec<u8>), Option<Vec<u8>>> {
+        &self.storage_writes
+    }
+
+    /// Read access to the canonical (inner) state for safety-invariant checking.
+    ///
+    /// Returns a reference to the underlying state view (pre-transaction state).
+    /// Used by [`check_safety_invariants`] to read old values for ratchet checks.
+    pub(crate) fn inner_ref(&self) -> &S {
+        self.inner
     }
 
     // ── Deploy-path helpers (thin pointer + content store) ────────────────────
