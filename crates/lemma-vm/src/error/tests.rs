@@ -91,6 +91,22 @@ fn engine_setup_failed_displays_reason() {
 }
 
 #[test]
+fn honeypot_invariant_violation_displays_reason() {
+    let e = VmError::HoneypotInvariantViolation {
+        reason: "owner changed to attacker".to_string(),
+    };
+    let msg = e.to_string();
+    assert!(
+        msg.contains("honeypot invariant violation"),
+        "message must contain 'honeypot invariant violation'; got: {msg}"
+    );
+    assert!(
+        msg.contains("owner changed to attacker"),
+        "message must contain the reason; got: {msg}"
+    );
+}
+
+#[test]
 fn contract_too_large_displays_size_and_limit() {
     // Verify the Display output contains both the actual size and the limit so
     // that operators can diagnose oversized deploys from receipts alone

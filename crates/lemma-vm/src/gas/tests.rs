@@ -131,6 +131,7 @@ fn devnet_schedule_has_no_zero_costs() {
         memory_grow_per_page,
         context_query,
         memory_copy_per_byte,
+        invariant_check,
     } = GasSchedule::devnet();
 
     for (name, cost) in [
@@ -159,6 +160,7 @@ fn devnet_schedule_has_no_zero_costs() {
         ("memory_grow_per_page", memory_grow_per_page),
         ("context_query", context_query),
         ("memory_copy_per_byte", memory_copy_per_byte),
+        ("invariant_check", invariant_check),
     ] {
         assert!(
             cost > Gas::ZERO,

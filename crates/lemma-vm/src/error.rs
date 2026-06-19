@@ -86,6 +86,16 @@ pub enum VmError {
         limit: usize,
     },
 
+    /// A post-execution state diff violated a safety constraint embedded in the
+    /// contract's `"lemma.meta"` safety manifest (DB-A51 runtime honeypot invariant).
+    ///
+    /// The transaction is reverted — scratch writes are discarded. This is the
+    /// runtime pair of compile-time SAFETY-001/002/005/009: the compiler rejects
+    /// code that *has* a honeypot lever; the runtime invariant rejects *pressing*
+    /// the lever into a honeypot state.
+    #[error("honeypot invariant violation: {reason}")]
+    HoneypotInvariantViolation { reason: String },
+
     /// A WASM trap occurred that does not map to a specific known variant.
     ///
     /// `Trap` is `#[non_exhaustive]` in wasmtime — new trap variants may appear

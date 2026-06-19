@@ -193,6 +193,14 @@ pub struct GasSchedule {
     /// Covers: calldata, register reads, storage key/value marshalling, event data, value_return.
     /// DoS protection: bounds the cost of moving N bytes across the WASM boundary.
     pub memory_copy_per_byte: Gas,
+
+    // ── Safety invariant checks ───────────────────────────────────────────────
+    /// Flat cost for the post-execution safety-invariant check (DB-A51).
+    ///
+    /// Charged once per `ContractCall` that targets a contract with a non-empty
+    /// safety manifest. Covers the state-diff scan against the manifest.
+    /// Devnet placeholder — benchmark-tune before mainnet.
+    pub invariant_check: Gas,
 }
 
 impl GasSchedule {
@@ -252,6 +260,11 @@ impl GasSchedule {
             // Memory marshalling
             // Per-byte cost for host↔guest memory copies; similar to EVM CALLDATACOPY ≈ 3/word.
             memory_copy_per_byte: Gas(3),
+
+            // Safety invariant checks
+            // Flat cost for post-execution honeypot invariant scan (DB-A51).
+            // Cheap — small state-diff scan, not execution. Benchmark-tune before mainnet.
+            invariant_check: Gas(5_000),
         }
     }
 }

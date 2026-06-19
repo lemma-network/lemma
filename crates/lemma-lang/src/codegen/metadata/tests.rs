@@ -1,9 +1,9 @@
-//! Tests for `codegen::metadata::build_metadata` (P3·Step 6i).
+//! Tests for `codegen::metadata` (P3·Step 6i, Step 18).
 //!
 //! Follows AGENTS §11.2: tests in a separate submodule file.
 //! Test naming: `{action}_{outcome}` (AGENTS §11.3).
 
-use crate::codegen::metadata::build_metadata;
+use super::{build_metadata, extract_safety_constraints, SafetyConstraintMeta};
 use crate::type_checker::TypedAst;
 use crate::{parse, tokenize};
 
@@ -84,4 +84,272 @@ fn build_metadata_is_deterministic() {
     let first = build_metadata(&contracts[0]);
     let second = build_metadata(&contracts[0]);
     assert_eq!(first, second, "build_metadata must be deterministic");
+}
+
+// ─── extract_safety_constraints — unit tests (P3·Step 18) ────────────────────
+
+#[test]
+fn extract_returns_empty_for_plain_contract() {
+    // Plain contract (no token standard) → no safety constraints.
+    let typed = typed_ast_for("contract C {}");
+    let contracts = typed.contracts();
+    let constraints = extract_safety_constraints(&contracts[0]);
+    assert!(
+        constraints.is_empty(),
+        "plain contract must produce zero safety constraints; got {constraints:?}"
+    );
+}
+
+#[test]
+fn extract_ratchet_off_for_mintable_true() {
+    // Token with `mintable: true` → RatchetOff constraint on "mintable" key.
+    let typed = typed_ast_for(
+        r#"token T extends Token {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+mintable: true
+}
+state { totalSupply: u128 = 0 }
+init() {}
+}"#,
+    );
+    let contracts = typed.contracts();
+    let constraints = extract_safety_constraints(&contracts[0]);
+    assert!(
+        constraints.contains(&SafetyConstraintMeta::RatchetOff {
+            key: b"mintable".to_vec(),
+        }),
+        "mintable: true must produce RatchetOff constraint; got {constraints:?}"
+    );
+}
+
+#[test]
+fn extract_no_ratchet_off_for_mintable_false() {
+    // Token with `mintable: false` → no RatchetOff (feature already disabled).
+    let typed = typed_ast_for(
+        r#"token T extends Token {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+mintable: false
+}
+state { totalSupply: u128 = 0 }
+init() {}
+}"#,
+    );
+    let contracts = typed.contracts();
+    let constraints = extract_safety_constraints(&contracts[0]);
+    let has_mintable_ratchet = constraints
+        .iter()
+        .any(|c| matches!(c, SafetyConstraintMeta::RatchetOff { key } if key == b"mintable"));
+    assert!(
+        !has_mintable_ratchet,
+        "mintable: false must NOT produce RatchetOff constraint; got {constraints:?}"
+    );
+}
+
+#[test]
+fn extract_fee_cap_for_tax_token() {
+    // TaxToken with `maxFeePercent: 1000` → FeeCap constraint.
+    let typed = typed_ast_for(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 1000
+fees: { burn: 500 holders: 0 others: 0 }
+}
+state { totalSupply: u128 = 0 }
+init() {}
+}"#,
+    );
+    let contracts = typed.contracts();
+    let constraints = extract_safety_constraints(&contracts[0]);
+    let fee_cap = constraints
+        .iter()
+        .find(|c| matches!(c, SafetyConstraintMeta::FeeCap { .. }));
+    assert!(
+        fee_cap.is_some(),
+        "TaxToken with maxFeePercent must produce FeeCap constraint; got {constraints:?}"
+    );
+    if let Some(SafetyConstraintMeta::FeeCap {
+        fee_keys,
+        max_sum_bps,
+    }) = fee_cap
+    {
+        assert_eq!(
+            *max_sum_bps, 1000,
+            "max_sum_bps must match maxFeePercent config value"
+        );
+        assert_eq!(
+            fee_keys.len(),
+            3,
+            "FeeCap must include 3 fee component keys"
+        );
+        assert!(fee_keys.contains(&b"fees.burn".to_vec()));
+        assert!(fee_keys.contains(&b"fees.holders".to_vec()));
+        assert!(fee_keys.contains(&b"fees.others".to_vec()));
+    }
+}
+
+#[test]
+fn extract_ratchet_up_for_max_wallet() {
+    // Token with `maxWallet: 5000000` → RatchetUp constraint.
+    let typed = typed_ast_for(
+        r#"token T extends Token {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxWallet: 5000000
+}
+state { totalSupply: u128 = 0 }
+init() {}
+}"#,
+    );
+    let contracts = typed.contracts();
+    let constraints = extract_safety_constraints(&contracts[0]);
+    assert!(
+        constraints.contains(&SafetyConstraintMeta::RatchetUp {
+            key: b"maxWallet".to_vec(),
+        }),
+        "maxWallet config must produce RatchetUp constraint; got {constraints:?}"
+    );
+}
+
+#[test]
+fn extract_multiple_constraints() {
+    // Token with multiple features → multiple constraints emitted.
+    let typed = typed_ast_for(
+        r#"token T extends Token {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+mintable: true
+pausable: true
+freezable: true
+maxWallet: 500
+}
+state { totalSupply: u128 = 0 }
+init() {}
+}"#,
+    );
+    let contracts = typed.contracts();
+    let constraints = extract_safety_constraints(&contracts[0]);
+
+    // Should have: RatchetOff(mintable), RatchetOff(pausable), RatchetOff(freezable), RatchetUp(maxWallet)
+    assert!(
+        constraints.contains(&SafetyConstraintMeta::RatchetOff {
+            key: b"mintable".to_vec(),
+        }),
+        "must include RatchetOff for mintable; got {constraints:?}"
+    );
+    assert!(
+        constraints.contains(&SafetyConstraintMeta::RatchetOff {
+            key: b"pausable".to_vec(),
+        }),
+        "must include RatchetOff for pausable; got {constraints:?}"
+    );
+    assert!(
+        constraints.contains(&SafetyConstraintMeta::RatchetOff {
+            key: b"freezable".to_vec(),
+        }),
+        "must include RatchetOff for freezable; got {constraints:?}"
+    );
+    assert!(
+        constraints.contains(&SafetyConstraintMeta::RatchetUp {
+            key: b"maxWallet".to_vec(),
+        }),
+        "must include RatchetUp for maxWallet; got {constraints:?}"
+    );
+    assert_eq!(
+        constraints.len(),
+        4,
+        "expected exactly 4 constraints (3 RatchetOff + 1 RatchetUp); got {constraints:?}"
+    );
+}
+
+// ─── build_metadata — safety_constraints integration tests (P3·Step 18) ──────
+
+#[test]
+fn build_metadata_omits_safety_constraints_for_plain_contract() {
+    // Plain contract → no "safety_constraints" key in JSON (skip_serializing_if).
+    let typed = typed_ast_for("contract C {}");
+    let contracts = typed.contracts();
+    let bytes = build_metadata(&contracts[0]);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    assert!(
+        json.get("safety_constraints").is_none(),
+        "plain contract must not have safety_constraints key; got {json}"
+    );
+}
+
+#[test]
+fn build_metadata_includes_safety_constraints_for_token() {
+    // Token with mintable: true → safety_constraints array present in JSON.
+    let typed = typed_ast_for(
+        r#"token T extends Token {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+mintable: true
+}
+state { totalSupply: u128 = 0 }
+init() {}
+}"#,
+    );
+    let contracts = typed.contracts();
+    let bytes = build_metadata(&contracts[0]);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    let sc = json["safety_constraints"]
+        .as_array()
+        .expect("safety_constraints must be an array");
+    assert!(
+        !sc.is_empty(),
+        "token with mintable: true must have constraints"
+    );
+    assert_eq!(
+        sc[0]["type"], "ratchet_off",
+        "first constraint must be ratchet_off"
+    );
+}
+
+#[test]
+fn build_metadata_fee_cap_no_emit_for_plain_token_with_max_fee() {
+    // Plain Token (not TaxToken) with maxFeePercent → no FeeCap constraint.
+    // FeeCap is only for TaxToken which has the fees state block.
+    let typed = typed_ast_for(
+        r#"token T extends Token {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+}
+state { totalSupply: u128 = 0 }
+init() {}
+}"#,
+    );
+    let contracts = typed.contracts();
+    let constraints = extract_safety_constraints(&contracts[0]);
+    let has_fee_cap = constraints
+        .iter()
+        .any(|c| matches!(c, SafetyConstraintMeta::FeeCap { .. }));
+    assert!(
+        !has_fee_cap,
+        "plain Token (not TaxToken) must NOT produce FeeCap constraint; got {constraints:?}"
+    );
 }

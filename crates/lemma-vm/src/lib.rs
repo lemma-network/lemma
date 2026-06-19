@@ -12,6 +12,7 @@
 //! | `host`     | Host functions + [`HostState`] (B3) |
 //! | `executor` | Single-tx execution + panic-free settlement (B4) |
 //! | `parallel` | Flux: Block-STM parallel executor (B5) + compiler hints (B5-3b) |
+//! | `safety_manifest` | [`SafetyManifest`] + [`SafetyConstraint`] — runtime honeypot invariants (P3·Step 18) |
 //!
 //! ## Determinism contract
 //!
@@ -34,6 +35,7 @@ pub mod gas;
 pub mod host;
 pub mod parallel;
 pub mod runtime;
+pub mod safety_manifest;
 pub mod state;
 
 pub use error::VmError;
@@ -46,4 +48,5 @@ pub use parallel::{
     HintMap, MvState, ParallelScheduler, SequentialScheduler, StateKey, StateValue,
 };
 pub use runtime::{deterministic_config, LemmaEngine, MAX_CALL_DEPTH, MAX_WASM_STACK};
+pub use safety_manifest::{SafetyConstraint, SafetyManifest};
 pub use state::{ContractStateView, InMemoryStateView};
