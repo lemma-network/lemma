@@ -667,6 +667,102 @@ fn enum_with_no_generic_params_has_empty_list() {
     }
 }
 
+// ── P3-checker-14: msg/block built-in globals ─────────────────────────────────
+
+#[test]
+fn msg_sender_resolves_without_undefined_name_error() {
+    // `msg.sender` must resolve without UndefinedName — msg is a built-in global.
+    // The resolver registers `msg` in the global value scope before user items.
+    // Note: state defaults don't support path-call expressions (Address::zero()),
+    // so we use a simple contract body with only a function.
+    let result = check_src(
+        r#"contract C {
+pub fn caller() { let s = msg.sender }
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "msg.sender must resolve without error; got {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn block_height_resolves_without_undefined_name_error() {
+    // `block.height` must resolve without UndefinedName — block is a built-in global.
+    let result = check_src(
+        r#"contract C {
+state { lastBlock: u64 = 0 }
+pub fn snapshot() { self.lastBlock = block.height }
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "block.height must resolve without error; got {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn msg_sender_symbol_has_builtin_global_kind() {
+    // The `msg` symbol in the arena must have SymbolKind::BuiltinGlobal.
+    let typed =
+        check_src("contract C { pub fn f() { let x = msg.sender } }").expect("should succeed");
+    use crate::type_checker::types::SymbolKind;
+    let msg_sym = typed.symbols.iter().find(|s| s.name == "msg");
+    assert!(msg_sym.is_some(), "expected 'msg' symbol in arena");
+    assert!(
+        matches!(msg_sym.unwrap().kind, SymbolKind::BuiltinGlobal),
+        "msg symbol must have BuiltinGlobal kind"
+    );
+}
+
+#[test]
+fn block_symbol_has_builtin_global_kind() {
+    // The `block` symbol in the arena must have SymbolKind::BuiltinGlobal.
+    let typed =
+        check_src("contract C { pub fn f() { let x = block.height } }").expect("should succeed");
+    use crate::type_checker::types::SymbolKind;
+    let block_sym = typed.symbols.iter().find(|s| s.name == "block");
+    assert!(block_sym.is_some(), "expected 'block' symbol in arena");
+    assert!(
+        matches!(block_sym.unwrap().kind, SymbolKind::BuiltinGlobal),
+        "block symbol must have BuiltinGlobal kind"
+    );
+}
+
+#[test]
+fn msg_value_resolves_without_undefined_name_error() {
+    // `msg.value` must resolve without UndefinedName.
+    let result = check_src(
+        r#"contract C {
+state { total: u128 = 0 }
+pub fn deposit() { self.total = self.total + msg.value }
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "msg.value must resolve without error; got {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn block_timestamp_resolves_without_undefined_name_error() {
+    // `block.timestamp` must resolve without UndefinedName.
+    let result = check_src(
+        r#"contract C {
+state { lastTs: u64 = 0 }
+pub fn touch() { self.lastTs = block.timestamp }
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "block.timestamp must resolve without error; got {:?}",
+        result.err()
+    );
+}
+
 // ── QoL: Expr::New span improvement ───────────────────────────────────────────
 
 #[test]

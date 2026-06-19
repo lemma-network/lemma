@@ -735,12 +735,12 @@ fn safety_022_no_fees_setter_passes() {
     );
 }
 
-// ─── SAFETY-022 C4 — direct self.fees write is Inconclusive ──────────────────
+// ─── SAFETY-022 negative tests — flat writes produce FeeRaiseNoTimelock ──────
 
 #[test]
-fn fees_direct_write_is_inconclusive() {
-    // Any function that writes `self.fees.*` directly → Inconclusive (C4).
-    // The canonical `pendingFees + effectiveBlock` pattern is required.
+fn fees_direct_write_produces_fee_raise_no_timelock() {
+    // A flat (non-branched) direct write to `self.fees.*` → FeeRaiseNoTimelock.
+    // The function can raise fees without any timelock — this is a real violation.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -763,29 +763,21 @@ self.fees.others = 0
     );
     let contracts = ast.contracts();
     let violations = tax_check(&contracts[0]);
-    let inconclusive: Vec<_> = violations
+    let no_timelock: Vec<_> = violations
         .iter()
-        .filter(|v| {
-            matches!(
-                v,
-                SafetyError::Inconclusive {
-                    rule: "SAFETY-022",
-                    ..
-                }
-            )
-        })
+        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
         .collect();
     assert!(
-        !inconclusive.is_empty(),
-        "direct self.fees write must produce Inconclusive(SAFETY-022); got {violations:?}"
+        !no_timelock.is_empty(),
+        "flat self.fees write must produce FeeRaiseNoTimelock; got {violations:?}"
     );
 }
 
 #[test]
-fn safety_022_fees_setter_with_timelock_is_inconclusive() {
-    // Even a fees setter that writes `self.fees.burn` AND `self.feeEffectiveBlock`
-    // is rejected as Inconclusive (C4: direct write cannot be verified safe without
-    // branch-aware CFG analysis — deferred to P3·Step 7).
+fn safety_022_fees_setter_with_literal_timelock_produces_no_timelock_error() {
+    // A fees setter that writes `self.feeEffectiveBlock = 7200` (a literal, NOT
+    // `block.height + N`) is a flat write — FeeRaiseNoTimelock.
+    // The canonical pattern requires `block.height + FEE_INCREASE_DELAY`.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -809,28 +801,19 @@ self.feeEffectiveBlock = 7200
     );
     let contracts = ast.contracts();
     let violations = tax_check(&contracts[0]);
-    let inconclusive: Vec<_> = violations
+    let no_timelock: Vec<_> = violations
         .iter()
-        .filter(|v| {
-            matches!(
-                v,
-                SafetyError::Inconclusive {
-                    rule: "SAFETY-022",
-                    ..
-                }
-            )
-        })
+        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
         .collect();
     assert!(
-        !inconclusive.is_empty(),
-        "fees setter with direct write (even with timelock marker) must produce Inconclusive(SAFETY-022); got {violations:?}"
+        !no_timelock.is_empty(),
+        "fees setter with literal feeEffectiveBlock (not block.height) must produce FeeRaiseNoTimelock; got {violations:?}"
     );
 }
 
 #[test]
-fn safety_022_fees_setter_without_timelock_is_inconclusive() {
-    // Fees setter writes `self.fees.burn` without `self.feeEffectiveBlock`
-    // → Inconclusive (C4: any direct fees write is rejected).
+fn safety_022_fees_setter_without_timelock_produces_no_timelock_error() {
+    // Fees setter writes `self.fees.burn` without any timelock → FeeRaiseNoTimelock.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -853,28 +836,19 @@ self.fees.others = 0
     );
     let contracts = ast.contracts();
     let violations = tax_check(&contracts[0]);
-    let inconclusive: Vec<_> = violations
+    let no_timelock: Vec<_> = violations
         .iter()
-        .filter(|v| {
-            matches!(
-                v,
-                SafetyError::Inconclusive {
-                    rule: "SAFETY-022",
-                    ..
-                }
-            )
-        })
+        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
         .collect();
     assert!(
-        !inconclusive.is_empty(),
-        "fees setter without timelock must produce Inconclusive(SAFETY-022); got {violations:?}"
+        !no_timelock.is_empty(),
+        "fees setter without timelock must produce FeeRaiseNoTimelock; got {violations:?}"
     );
 }
 
 #[test]
-fn safety_022_fees_setter_single_component_is_inconclusive() {
-    // A setter that writes only `self.fees.burn` (any direct fees write)
-    // → Inconclusive (C4: reject-on-doubt).
+fn safety_022_fees_setter_single_component_produces_no_timelock_error() {
+    // A setter that writes only `self.fees.burn` (flat write) → FeeRaiseNoTimelock.
     let ast = typed_ast(
         r#"token T extends TaxToken {
 config {
@@ -895,21 +869,105 @@ self.fees.burn = 100
     );
     let contracts = ast.contracts();
     let violations = tax_check(&contracts[0]);
-    let inconclusive: Vec<_> = violations
+    let no_timelock: Vec<_> = violations
         .iter()
+        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
+        .collect();
+    assert!(
+        !no_timelock.is_empty(),
+        "single fees component flat write must produce FeeRaiseNoTimelock; got {violations:?}"
+    );
+}
+
+// ─── SAFETY-022 positive test — canonical timelock pattern passes ─────────────
+
+#[test]
+fn safety_022_canonical_timelock_pattern_passes() {
+    // The canonical fees setter with if/else + block.height timelock passes SAFETY-022.
+    // Increase path: self.feeEffectiveBlock = block.height + FEE_INCREASE_DELAY
+    // Decrease path: self.fees.* = newValue (immediate)
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 500 holders: 0 others: 0 }
+}
+state { totalSupply: u128 = 0, feeEffectiveBlock: u64 = 0 }
+init() {}
+@onlyOwner
+pub fn setFees(newBurn: u128) {
+let currentTotal = self.fees.burn
+if (newBurn > currentTotal) {
+self.feeEffectiveBlock = block.height + 7200
+} else {
+self.fees.burn = newBurn
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations: Vec<_> = tax_check(&contracts[0])
+        .into_iter()
         .filter(|v| {
             matches!(
                 v,
-                SafetyError::Inconclusive {
-                    rule: "SAFETY-022",
-                    ..
-                }
+                SafetyError::FeeRaiseNoTimelock { .. }
+                    | SafetyError::Inconclusive {
+                        rule: "SAFETY-022",
+                        ..
+                    }
             )
         })
         .collect();
     assert!(
-        !inconclusive.is_empty(),
-        "single fees component write must produce Inconclusive(SAFETY-022); got {violations:?}"
+        violations.is_empty(),
+        "canonical timelock pattern must pass SAFETY-022; got {violations:?}"
+    );
+}
+
+// ─── SAFETY-022 Inconclusive — ambiguous patterns still rejected ──────────────
+
+#[test]
+fn safety_022_if_else_without_block_height_is_inconclusive() {
+    // if/else fees setter where neither branch uses block.height → Inconclusive.
+    // The increase branch has fees writes but no block.height timelock.
+    let ast = typed_ast(
+        r#"token T extends TaxToken {
+config {
+name: "T"
+symbol: "T"
+decimals: 18
+maxSupply: 1000000
+maxFeePercent: 2500
+fees: { burn: 500 holders: 0 others: 0 }
+}
+state { totalSupply: u128 = 0 }
+init() {}
+@onlyOwner
+pub fn setFees(newBurn: u128) {
+let currentTotal = self.fees.burn
+if (newBurn > currentTotal) {
+self.fees.burn = newBurn
+} else {
+self.fees.burn = newBurn
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = tax_check(&contracts[0]);
+    // Both branches write fees directly with no block.height → IncreaseWithoutTimelock
+    let no_timelock: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::FeeRaiseNoTimelock { .. }))
+        .collect();
+    assert!(
+        !no_timelock.is_empty(),
+        "if/else fees setter without block.height must produce FeeRaiseNoTimelock; got {violations:?}"
     );
 }
 

@@ -7,8 +7,10 @@ description = "LemmaVM: WASM execution, gas metering, host functions, Flux paral
 [dependencies]
 thiserror    = { workspace = true }
 wasmtime     = { workspace = true }
+wasmparser   = { workspace = true }  # for "lemma.meta" custom section parsing (B5-3b)
 bincode      = { workspace = true }
 serde        = { workspace = true }
+serde_json   = { workspace = true }
 tracing      = { workspace = true }
 anyhow       = { workspace = true }
 dashmap      = { workspace = true }

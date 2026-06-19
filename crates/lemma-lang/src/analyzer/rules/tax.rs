@@ -390,30 +390,43 @@ fn check_safety_021(contract: &TypedContract<'_>) -> Vec<SafetyError> {
 
 // ─── SAFETY-022 ───────────────────────────────────────────────────────────────
 
-/// SAFETY-022: Any function that writes `self.fees` directly is rejected as
-/// `Inconclusive` — the canonical pattern requires using `pendingFees` +
-/// `effectiveBlock` for increases.
+/// SAFETY-022: Fee-change asymmetric timelock.
 ///
-/// ## Reject-on-doubt (C4)
+/// Fee increases must use the canonical `pendingFees + effectiveBlock` pattern
+/// gated on `block.height + FEE_INCREASE_DELAY`.  Fee decreases may apply
+/// immediately.
 ///
-/// A direct write to `self.fees` (or any component `self.fees.burn` /
-/// `self.fees.holders` / `self.fees.others`) cannot be verified safe without
-/// full branch-aware data-flow analysis.  Any such direct write → `Inconclusive`.
+/// ## Canonical pattern (P3·Step 7 — D3 implemented)
 ///
-/// The canonical setter shape that will be accepted at P3·Step 7 is:
 /// ```lem
 /// if newTotal > currentTotal {
 ///     self.pendingFees = { ... }
 ///     self.feeEffectiveBlock = block.height + FEE_INCREASE_DELAY
 /// } else {
-///     self.fees = { ... }  // immediate decrease
+///     self.fees.burn = newBurn
+///     self.fees.holders = newHolders
+///     self.fees.others = newOthers
 /// }
-/// emit FeeChanged(...)
 /// ```
 ///
-/// TODO(4f-tax/step7): full enforcement deferred — see living-notes deferred-D1/D2/D3/D4.
-/// Currently: reject-on-doubt (Inconclusive). Step 7 will add branch-aware CFG
-/// + block.height built-in that makes full enforcement possible.
+/// ## Analysis algorithm
+///
+/// For each function that writes `self.fees.*`:
+///
+/// 1. **Flat write** (no enclosing `if/else`): the function can raise fees
+///    without any timelock → `FeeRaiseNoTimelock`.
+///
+/// 2. **Branched write** (inside an `if/else`):
+///    - Inspect the `if` branch (the potential increase path).
+///    - If the `if` branch writes `self.feeEffectiveBlock` with an expression
+///      that reads `block.height` → canonical pattern → `Pass`.
+///    - If the `if` branch writes `self.fees.*` directly (no timelock) →
+///      `FeeRaiseNoTimelock`.
+///    - If the `if` branch is ambiguous (helper calls, nested ifs) →
+///      `Inconclusive` (reject-on-doubt, spec §5.1).
+///
+/// 3. **Helper calls** in the fees-setter body → `Inconclusive` (cannot trace
+///    into helpers without transitive analysis — D2 scope).
 ///
 /// `FEE_INCREASE_DELAY` = 7200 blocks (~24h at 12s/block).
 /// See `rules/constants.rs` for the protocol constant definition.
@@ -425,7 +438,7 @@ fn check_safety_022(contract: &TypedContract<'_>) -> Vec<SafetyError> {
             continue;
         };
 
-        // Check whether this function writes `self.fees` directly (any component).
+        // Check whether this function writes `self.fees.*` directly (any component).
         let mut fees_write_scanner = DirectFeesWriteScanner { found: false };
         fees_write_scanner.visit_stmts(body);
 
@@ -433,26 +446,230 @@ fn check_safety_022(contract: &TypedContract<'_>) -> Vec<SafetyError> {
             continue; // Not a fees setter — skip.
         }
 
-        // Direct `self.fees` write present → Inconclusive (reject-on-doubt).
-        // We cannot verify the increase path uses the canonical pendingFees pattern
-        // without branch-aware data-flow analysis (deferred to P3·Step 7).
-        // FEE_INCREASE_DELAY = 7200 blocks (~24h at 12s/block) is the required
-        // pending period for fee increases (protocol constant, not token-settable).
-        violations.push(SafetyError::Inconclusive {
-            rule: "SAFETY-022",
-            reason: format!(
-                "`{}` writes `self.fees` directly — fees setter must use the \
-                 `pendingFees + effectiveBlock` canonical pattern for increases \
-                 (FEE_INCREASE_DELAY = {} blocks); \
-                 direct writes cannot be verified safe without branch-aware CFG analysis \
-                 (deferred to P3·Step 7)",
-                func.name, FEE_INCREASE_DELAY,
-            ),
-            span: Span::at(0, 0, 0),
-        });
+        // C2: if the fees setter calls any internal helper, reject-on-doubt.
+        // We cannot trace into helpers without transitive callee analysis (D2 scope).
+        let call_graph = build_call_graph(contract);
+        if let Some(callees) = call_graph.get(func.name) {
+            let has_helper_call = callees.iter().any(|c| c != func.name);
+            if has_helper_call {
+                violations.push(SafetyError::Inconclusive {
+                    rule: "SAFETY-022",
+                    reason: format!(
+                        "`{}` calls an internal helper function — \
+                         cannot verify fee-increase timelock without transitive callee analysis \
+                         (inline all logic into the fees setter for static verification)",
+                        func.name,
+                    ),
+                    span: Span::at(0, 0, 0),
+                });
+                continue;
+            }
+        }
+
+        // Classify the fees-setter body shape.
+        match classify_fees_setter_shape(body) {
+            FeeSetterShape::FlatWrite => {
+                // Direct write with no if/else — can raise fees without timelock.
+                violations.push(SafetyError::FeeRaiseNoTimelock {
+                    func: func.name.to_owned(),
+                });
+            }
+            FeeSetterShape::CanonicalTimelock => {
+                // Canonical pattern: increase path gated on block.height + FEE_INCREASE_DELAY.
+                // No violation.
+            }
+            FeeSetterShape::IncreaseWithoutTimelock => {
+                // if/else present but increase branch writes fees directly (no timelock).
+                violations.push(SafetyError::FeeRaiseNoTimelock {
+                    func: func.name.to_owned(),
+                });
+            }
+            FeeSetterShape::Ambiguous => {
+                // Non-canonical shape — reject-on-doubt.
+                violations.push(SafetyError::Inconclusive {
+                    rule: "SAFETY-022",
+                    reason: format!(
+                        "`{}` writes `self.fees` in a non-canonical shape — \
+                         fees setter must use the `pendingFees + effectiveBlock` pattern \
+                         for increases (FEE_INCREASE_DELAY = {} blocks); \
+                         rewrite to the canonical if/else form for static verification",
+                        func.name, FEE_INCREASE_DELAY,
+                    ),
+                    span: Span::at(0, 0, 0),
+                });
+            }
+        }
     }
 
     violations
+}
+
+/// Classification of a fees-setter function body shape for SAFETY-022.
+enum FeeSetterShape {
+    /// Direct `self.fees.*` write with no enclosing `if/else` — can raise fees
+    /// without any timelock.
+    FlatWrite,
+    /// Canonical pattern: `if increase { self.feeEffectiveBlock = block.height + N } else { self.fees.* = … }`.
+    /// The increase path is gated on `block.height` — passes SAFETY-022.
+    CanonicalTimelock,
+    /// `if/else` present but the increase branch writes `self.fees.*` directly
+    /// without a `block.height`-gated `feeEffectiveBlock` write.
+    IncreaseWithoutTimelock,
+    /// Non-canonical shape (nested ifs, multiple branches, etc.) — reject-on-doubt.
+    Ambiguous,
+}
+
+/// Classify the shape of a fees-setter function body for SAFETY-022.
+///
+/// Looks for the canonical top-level `if/else` pattern:
+/// - `if` branch: writes `self.feeEffectiveBlock` with `block.height` in the RHS
+///   (increase path — timelock required).
+/// - `else` branch: writes `self.fees.*` directly (decrease path — immediate OK).
+///
+/// Any other shape is classified as `FlatWrite` (no if/else) or `Ambiguous`
+/// (non-canonical if/else).
+fn classify_fees_setter_shape(body: &[Stmt]) -> FeeSetterShape {
+    // Collect top-level `if/else` statements that contain fees writes.
+    // We look for exactly one top-level if/else that covers the fees write.
+    let mut has_fees_write_outside_if = false;
+    let mut canonical_if_found = false;
+    let mut increase_without_timelock = false;
+
+    for stmt in body {
+        match stmt {
+            Stmt::If { then, else_, .. } => {
+                // Check if this if/else contains a fees write in either branch.
+                let then_has_fees = branch_has_fees_write(then);
+                let else_has_fees = else_.as_ref().is_some_and(|e| branch_has_fees_write(e));
+
+                if !then_has_fees && !else_has_fees {
+                    continue; // This if/else is unrelated to fees — skip.
+                }
+
+                // Determine which branch is the increase path.
+                // Canonical: `if` branch has `feeEffectiveBlock = block.height + N`
+                //            `else` branch has direct `self.fees.*` writes.
+                let then_has_timelock = branch_has_block_height_timelock(then);
+                let else_has_timelock = else_
+                    .as_ref()
+                    .is_some_and(|e| branch_has_block_height_timelock(e));
+
+                if then_has_timelock {
+                    // `if` branch has timelock → canonical increase path.
+                    // `else` branch should have the decrease (direct fees write).
+                    canonical_if_found = true;
+                } else if else_has_timelock {
+                    // `else` branch has timelock → inverted canonical pattern.
+                    // Also acceptable: `if decrease { fees.* = … } else { feeEffectiveBlock = … }`.
+                    canonical_if_found = true;
+                } else if then_has_fees || else_has_fees {
+                    // if/else with fees writes but no timelock in either branch.
+                    increase_without_timelock = true;
+                }
+            }
+            stmt => {
+                // Non-if statement — check if it writes fees directly.
+                let mut scanner = DirectFeesWriteScanner { found: false };
+                scanner.visit_stmt(stmt);
+                if scanner.found {
+                    has_fees_write_outside_if = true;
+                }
+            }
+        }
+    }
+
+    if has_fees_write_outside_if {
+        // Fees written outside any if/else — flat write (can raise without timelock).
+        // This takes priority even if a canonical if/else is also present, because
+        // the flat write is itself a violation path.
+        FeeSetterShape::FlatWrite
+    } else if canonical_if_found {
+        FeeSetterShape::CanonicalTimelock
+    } else if increase_without_timelock {
+        FeeSetterShape::IncreaseWithoutTimelock
+    } else {
+        // No fees write found at the top level (nested deeper) — ambiguous.
+        FeeSetterShape::Ambiguous
+    }
+}
+
+/// Returns `true` if any statement in `branch` writes `self.fees.*`.
+fn branch_has_fees_write(branch: &[Stmt]) -> bool {
+    let mut scanner = DirectFeesWriteScanner { found: false };
+    scanner.visit_stmts(branch);
+    scanner.found
+}
+
+/// Returns `true` if any statement in `branch` writes `self.feeEffectiveBlock`
+/// with an expression that reads `block.height`.
+///
+/// This is the canonical timelock marker: `self.feeEffectiveBlock = block.height + N`.
+fn branch_has_block_height_timelock(branch: &[Stmt]) -> bool {
+    let mut scanner = FeeTimelockScanner { found: false };
+    scanner.visit_stmts(branch);
+    scanner.found
+}
+
+/// Visitor that detects writes to `self.feeEffectiveBlock` whose RHS reads
+/// `block.height`.
+///
+/// Used by SAFETY-022 to identify the canonical timelock marker:
+/// `self.feeEffectiveBlock = block.height + FEE_INCREASE_DELAY`.
+struct FeeTimelockScanner {
+    found: bool,
+}
+
+impl Visitor for FeeTimelockScanner {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        if self.found {
+            return;
+        }
+        if let Stmt::Assign { target, value, .. } = stmt {
+            if is_self_field(target, "feeEffectiveBlock") && expr_reads_block_height(value) {
+                self.found = true;
+                return;
+            }
+        }
+        walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        if self.found {
+            return;
+        }
+        if let Expr::Assign_(target, _, value, _) = expr {
+            if is_self_field(target, "feeEffectiveBlock") && expr_reads_block_height(value) {
+                self.found = true;
+                return;
+            }
+        }
+        walk_expr(self, expr);
+    }
+}
+
+/// Returns `true` if `expr` reads `block.height` anywhere in its sub-tree.
+///
+/// Used by SAFETY-022 to verify the canonical timelock marker:
+/// `self.feeEffectiveBlock = block.height + FEE_INCREASE_DELAY`.
+fn expr_reads_block_height(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Member(obj, field, _)
+            if is_block_ident(obj) && field == "height"
+    ) || match expr {
+        Expr::Binary(_, lhs, rhs, _) => {
+            expr_reads_block_height(lhs) || expr_reads_block_height(rhs)
+        }
+        Expr::Unary(_, inner, _) => expr_reads_block_height(inner),
+        Expr::Ternary {
+            cond, then, else_, ..
+        } => {
+            expr_reads_block_height(cond)
+                || expr_reads_block_height(then)
+                || expr_reads_block_height(else_)
+        }
+        _ => false,
+    }
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────

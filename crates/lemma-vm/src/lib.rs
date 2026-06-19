@@ -11,7 +11,7 @@
 //! | `gas`      | [`GasMeter`] trait + [`FuelMeter`] impl (B2) |
 //! | `host`     | Host functions + [`HostState`] (B3) |
 //! | `executor` | Single-tx execution + panic-free settlement (B4) |
-//! | `parallel` | Flux: Block-STM parallel executor (B5) |
+//! | `parallel` | Flux: Block-STM parallel executor (B5) + compiler hints (B5-3b) |
 //!
 //! ## Determinism contract
 //!
@@ -41,8 +41,9 @@ pub use executor::Executor;
 pub use gas::{gas_used, FuelMeter, Gas, GasMeter, GasSchedule};
 pub use host::{BlockContext, CallContext, HostFunctions, HostState};
 pub use parallel::{
-    execute_block_parallel, execute_block_sequential, BlockOutput, BlockScheduler, FluxConfig,
-    MvState, ParallelScheduler, SequentialScheduler, StateKey, StateValue,
+    execute_block_parallel, execute_block_sequential, parse_hints_from_wasm,
+    tx_is_express_eligible, BlockOutput, BlockScheduler, ContractHints, FluxConfig, FunctionHint,
+    HintMap, MvState, ParallelScheduler, SequentialScheduler, StateKey, StateValue,
 };
 pub use runtime::{deterministic_config, LemmaEngine, MAX_CALL_DEPTH, MAX_WASM_STACK};
 pub use state::{ContractStateView, InMemoryStateView};

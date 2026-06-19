@@ -171,7 +171,17 @@ pub fn execute_committed_block(
         let engine = LemmaEngine::new()
             .map_err(|e| NodeError::Config(format!("LemmaEngine init failed: {e}")))?;
         let executor = Executor::new(engine, GasSchedule::devnet());
-        execute_block_parallel(&executor, &txs, &block_ctx, base, FluxConfig::default())
+        // hints = None: no compiler state-access hints available at this call
+        // site yet (B5-3b wiring deferred to P3·Step 7 deploy pipeline).
+        // Conservative mode: assume all conflicts. MVCC re-validates regardless.
+        execute_block_parallel(
+            &executor,
+            &txs,
+            &block_ctx,
+            base,
+            FluxConfig::default(),
+            None,
+        )
     };
 
     // Apply BlockOutput.writes to the committed world state → new state_root.

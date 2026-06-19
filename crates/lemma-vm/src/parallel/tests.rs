@@ -8,6 +8,13 @@
 //! Blocks are built from `Transfer` transactions (no WASM): the B4 transfer
 //! path is deterministic and fast, exercising overlapping and disjoint account
 //! conflicts — the exact contention the scheduler must serialize correctly.
+//!
+//! ## B5-3b hint tests
+//!
+//! Additional tests verify that:
+//! - Blocks execute correctly with `hints = None` (conservative mode).
+//! - `tx_is_express_eligible` correctly classifies transactions from hints.
+//! - Blocks with hinted contracts (is_express_eligible = true) classify correctly.
 
 use super::*;
 use crate::gas::GasSchedule;
@@ -21,6 +28,7 @@ use lemma_core::{
     transaction::{Transaction, TxType},
 };
 use proptest::prelude::*;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -122,8 +130,8 @@ proptest! {
         let seq = SequentialScheduler.execute_block(&exec, &txs, &blk, Arc::clone(&base));
         let par = ParallelScheduler::new(4).execute_block(&exec, &txs, &blk, base);
 
-        prop_assert_eq!(seq.receipts, par.receipts);
-        prop_assert_eq!(seq.writes, par.writes);
+        prop_assert_eq!(seq.receipts, par.receipts, "receipts must match");
+        prop_assert_eq!(seq.writes, par.writes, "writes must match");
     }
 }
 
@@ -141,7 +149,7 @@ fn read_after_write_chain_serializes_correctly() {
     let blk = block();
 
     let seq = execute_block_sequential(&exec, &txs, &blk, Arc::clone(&base));
-    let par = execute_block_parallel(&exec, &txs, &blk, base, FluxConfig { num_workers: 4 });
+    let par = execute_block_parallel(&exec, &txs, &blk, base, FluxConfig { num_workers: 4 }, None);
 
     assert_eq!(seq.receipts, par.receipts);
     assert_eq!(seq.writes, par.writes);
@@ -161,7 +169,7 @@ fn insufficient_funds_failure_matches_sequential() {
     let blk = block();
 
     let seq = execute_block_sequential(&exec, &txs, &blk, Arc::clone(&base));
-    let par = execute_block_parallel(&exec, &txs, &blk, base, FluxConfig { num_workers: 4 });
+    let par = execute_block_parallel(&exec, &txs, &blk, base, FluxConfig { num_workers: 4 }, None);
 
     assert_eq!(seq.receipts, par.receipts);
     assert_eq!(seq.writes, par.writes);
@@ -180,8 +188,195 @@ fn high_contention_hotspot_recipient_is_deterministic() {
     let blk = block();
 
     let seq = execute_block_sequential(&exec, &txs, &blk, Arc::clone(&base));
-    let par = execute_block_parallel(&exec, &txs, &blk, base, FluxConfig { num_workers: 8 });
+    let par = execute_block_parallel(&exec, &txs, &blk, base, FluxConfig { num_workers: 8 }, None);
 
     assert_eq!(seq.receipts, par.receipts);
     assert_eq!(seq.writes, par.writes);
+}
+
+// ── B5-3b: hint-based Express eligibility tests ──────────────────────────────
+
+/// Build a minimal `ContractHints` with one Express-eligible function.
+fn express_eligible_hints(contract: Address, fn_name: &str) -> HintMap {
+    let hint = FunctionHint {
+        reads: ["SenderSlot:balances".to_string()].into(),
+        writes: ["SenderSlot:balances".to_string()].into(),
+        is_express_eligible: true,
+    };
+    let mut functions = BTreeMap::new();
+    functions.insert(fn_name.to_string(), hint);
+    let contract_hints = ContractHints { functions };
+    let mut map = BTreeMap::new();
+    map.insert(contract, contract_hints);
+    map
+}
+
+/// Build a minimal `ContractHints` with one non-Express-eligible function.
+fn non_express_hints(contract: Address, fn_name: &str) -> HintMap {
+    let hint = FunctionHint {
+        reads: ["Field:totalSupply".to_string()].into(),
+        writes: ["Field:totalSupply".to_string()].into(),
+        is_express_eligible: false,
+    };
+    let mut functions = BTreeMap::new();
+    functions.insert(fn_name.to_string(), hint);
+    let contract_hints = ContractHints { functions };
+    let mut map = BTreeMap::new();
+    map.insert(contract, contract_hints);
+    map
+}
+
+/// Build a ContractCall transaction targeting `contract`.
+///
+/// Uses a 4-byte selector `[0xde, 0xad, 0xbe, 0xef]` to satisfy the
+/// `ContractCall` calldata requirement (at least 4 bytes for a function selector).
+fn contract_call(seq: u32, from: u8, contract: Address) -> Transaction {
+    let mut h = [0u8; 32];
+    h[0..4].copy_from_slice(&seq.to_be_bytes());
+    h[4] = from;
+    h[5] = 0xcc; // marker for contract call
+                 // ContractCall requires non-empty calldata (at least 4-byte selector).
+    let calldata = vec![0xde, 0xad, 0xbe, 0xef];
+    Transaction::new(
+        Hash::from_bytes(h),
+        addr(from),
+        Some(contract),
+        0,
+        1,
+        Amount::zero(),
+        1_000_000,
+        Amount::from_drip(1).expect("1 drip fits"),
+        TxType::ContractCall,
+        calldata,
+        Signature::Unsigned,
+    )
+    .expect("valid contract call tx")
+}
+
+#[test]
+fn block_without_hints_executes_correctly_same_as_sequential() {
+    // Acceptance criterion 3: without hints, behavior identical to current.
+    let exec = executor();
+    let base = seeded_base();
+    let txs = vec![
+        transfer(0, 0, 1, 1000),
+        transfer(1, 2, 3, 500),
+        transfer(2, 4, 5, 200),
+    ];
+    let blk = block();
+
+    let seq = execute_block_sequential(&exec, &txs, &blk, Arc::clone(&base));
+    let par = execute_block_parallel(&exec, &txs, &blk, base, FluxConfig { num_workers: 4 }, None);
+
+    // Results must be identical regardless of hints.
+    assert_eq!(seq.receipts, par.receipts);
+    assert_eq!(seq.writes, par.writes);
+}
+
+#[test]
+fn tx_is_express_eligible_returns_false_without_hints() {
+    // Acceptance criterion 3: no hints → conservative (not Express-eligible).
+    let tx = transfer(0, 0, 1, 100);
+    assert!(!tx_is_express_eligible(&tx, None));
+}
+
+#[test]
+fn tx_is_express_eligible_returns_false_for_transfer_tx() {
+    // Transfer txns are never Express-eligible (not ContractCall).
+    let contract = addr(7);
+    let hints = express_eligible_hints(contract, "transfer");
+    let tx = transfer(0, 0, 1, 100); // TxType::Transfer, not ContractCall
+    assert!(!tx_is_express_eligible(&tx, Some(&hints)));
+}
+
+#[test]
+fn tx_is_express_eligible_returns_false_when_contract_not_in_hints() {
+    // Contract not in hint map → conservative (not Express-eligible).
+    let contract = addr(7);
+    let other_contract = addr(8);
+    let hints = express_eligible_hints(contract, "transfer");
+    let tx = contract_call(0, 0, other_contract);
+    assert!(!tx_is_express_eligible(&tx, Some(&hints)));
+}
+
+#[test]
+fn tx_is_express_eligible_returns_true_for_hinted_express_contract() {
+    // Acceptance criterion 4: with hints, Express-eligible txns classified correctly.
+    let contract = addr(7);
+    let hints = express_eligible_hints(contract, "transfer");
+    let tx = contract_call(0, 0, contract);
+    assert!(tx_is_express_eligible(&tx, Some(&hints)));
+}
+
+#[test]
+fn tx_is_express_eligible_returns_false_for_non_express_contract() {
+    // Contract in hint map but no Express-eligible function → not eligible.
+    let contract = addr(7);
+    let hints = non_express_hints(contract, "mint");
+    let tx = contract_call(0, 0, contract);
+    assert!(!tx_is_express_eligible(&tx, Some(&hints)));
+}
+
+#[test]
+fn block_with_hinted_contracts_executes_correctly() {
+    // Acceptance criterion 5: block with hinted contracts (is_express_eligible = true)
+    // executes correctly — same result as sequential.
+    let exec = executor();
+    let base = seeded_base();
+    let contract = addr(7);
+    let hints = express_eligible_hints(contract, "transfer");
+    let txs = vec![transfer(0, 0, 1, 1000), transfer(1, 2, 3, 500)];
+    let blk = block();
+
+    let seq = execute_block_sequential(&exec, &txs, &blk, Arc::clone(&base));
+    let par = execute_block_parallel(
+        &exec,
+        &txs,
+        &blk,
+        base,
+        FluxConfig { num_workers: 4 },
+        Some(&hints),
+    );
+
+    // Correctness: results identical regardless of hints.
+    assert_eq!(seq.receipts, par.receipts);
+    assert_eq!(seq.writes, par.writes);
+}
+
+#[test]
+fn hint_map_with_multiple_contracts_classifies_correctly() {
+    // Multiple contracts in hint map: only the matching one is Express-eligible.
+    let contract_a = addr(7);
+    let contract_b = addr(8);
+
+    let hint_a = FunctionHint {
+        reads: ["SenderSlot:balances".to_string()].into(),
+        writes: ["SenderSlot:balances".to_string()].into(),
+        is_express_eligible: true,
+    };
+    let hint_b = FunctionHint {
+        reads: ["Field:totalSupply".to_string()].into(),
+        writes: ["Field:totalSupply".to_string()].into(),
+        is_express_eligible: false,
+    };
+
+    let mut hints: HintMap = BTreeMap::new();
+    hints.insert(
+        contract_a,
+        ContractHints {
+            functions: [("transfer".to_string(), hint_a)].into(),
+        },
+    );
+    hints.insert(
+        contract_b,
+        ContractHints {
+            functions: [("mint".to_string(), hint_b)].into(),
+        },
+    );
+
+    let tx_a = contract_call(0, 0, contract_a);
+    let tx_b = contract_call(1, 1, contract_b);
+
+    assert!(tx_is_express_eligible(&tx_a, Some(&hints)));
+    assert!(!tx_is_express_eligible(&tx_b, Some(&hints)));
 }

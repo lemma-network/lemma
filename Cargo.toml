@@ -79,6 +79,10 @@ wasmtime = "45"
 # WASM emitter (codegen backend — deterministic byte emission, bytecodealliance/wasm-tools suite)
 # Pinned exact per AGENTS §9.3; versioned in lockstep with wasmtime. See decisions-log DB-A50.
 wasm-encoder = "=0.251.0"
+# WASM parser — used by lemma-vm to read "lemma.meta" custom sections (B5-3b).
+# Pinned to 0.251.0 to match the already-locked version used by wasm-encoder
+# 0.251.0 (AGENTS §9.3 — minimize dep count; pin exact per §9.3).
+wasmparser = "=0.251.0"
 
 # ZK (Veil — BLS12-377 + decaf377, Penumbra stack).
 # PINNED to arkworks 0.4.x to match Penumbra's audited circuits + trusted-setup

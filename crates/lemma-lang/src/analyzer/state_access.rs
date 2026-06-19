@@ -49,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::parser::{Expr, Param, Stmt};
+use crate::parser::{CallArg, Expr, Param, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_expr, walk_stmt, Visitor};
 
@@ -333,14 +333,32 @@ impl Visitor for AccessWalker<'_> {
             }
             // Collection mutator on own state: `self.field.set(k, v)` — a write.
             // Continue walking (args are reads) via `walk_expr` below.
-            // TODO(step5/step7): set(msg.sender, v) could refine to SenderSlot
-            // instead of whole-Field — deferred behind msg.sender resolution
-            // (P3-checker-14, Step 7). Tracked: living-notes Technical Debt
-            // (collection-mutator-sender-slot).
-            Expr::Call { callee, .. } => {
+            //
+            // P3-checker-14 (Step 7): now that `msg.sender` resolves, refine
+            // `self.field.set(msg.sender, v)` to `SenderSlot` instead of whole-Field.
+            // This enables the Express fast-path for contracts using the collection API.
+            // See living-notes Technical Debt (collection-mutator-sender-slot).
+            Expr::Call { callee, args, .. } => {
                 if let Expr::Member(recv, method, _) = callee.as_ref() {
                     if is_collection_mutator(method) {
-                        if let Some(key) = classify_access_key(recv, self.params) {
+                        if let Some(field) = self_field_name(recv) {
+                            // Inspect the first argument: if it is `msg.sender`,
+                            // emit SenderSlot instead of whole-Field.
+                            let first_arg_is_sender = args.first().is_some_and(|a| {
+                                let arg_expr = match a {
+                                    CallArg::Positional(e) => e,
+                                    CallArg::Named(_, e) => e,
+                                };
+                                is_msg_sender(arg_expr)
+                            });
+                            let key = if first_arg_is_sender {
+                                AccessKey::SenderSlot(field)
+                            } else {
+                                // Fall back to classify_access_key for param-keyed
+                                // or dynamic slots.
+                                classify_access_key(recv, self.params)
+                                    .unwrap_or(AccessKey::Field(field))
+                            };
                             self.acc.writes.insert(key);
                         }
                     }

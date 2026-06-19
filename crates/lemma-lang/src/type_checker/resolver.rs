@@ -530,6 +530,36 @@ impl Resolver {
         self.push_value_scope();
         self.push_type_scope();
 
+        // P3-checker-14: pre-declare built-in execution-context globals.
+        //
+        // `msg`   — {sender: Address, value: u128}  (caller + attached value)
+        // `block` — {height: u64, timestamp: u64}   (current block context)
+        //
+        // These are injected at runtime by the VM (08-EXECUTION_SPEC §1.2).
+        // Their field types are resolved by `builtin_member_type` in infer.rs.
+        // Registered BEFORE user items so they are always in scope and cannot
+        // be shadowed at the global scope level (contract-body `let msg = …`
+        // is allowed — inner scopes shadow, global scope does not).
+        //
+        // `define_value` (not `define_value_or_err`) is used here because
+        // these are pre-declared by the compiler, not by user code — no
+        // duplicate-declaration error should fire for them.
+        let msg_id = self.alloc_typed(
+            "msg",
+            crate::lexer::token::Span::at(0, 0, 0),
+            SymbolKind::BuiltinGlobal,
+            ResolvedType::MsgContext,
+        );
+        self.define_value("msg", msg_id);
+
+        let block_id = self.alloc_typed(
+            "block",
+            crate::lexer::token::Span::at(0, 0, 0),
+            SymbolKind::BuiltinGlobal,
+            ResolvedType::BlockContext,
+        );
+        self.define_value("block", block_id);
+
         for item in &ast.items {
             match item {
                 Item::Contract(c) => {

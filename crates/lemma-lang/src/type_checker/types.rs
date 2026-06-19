@@ -137,6 +137,27 @@ pub enum ResolvedType {
     /// whose type is resolved in a later subtask.  Must not appear in a fully
     /// type-checked program (the checker reports an error if it does).
     Unknown,
+
+    // ── Built-in execution-context globals (P3-checker-14) ─────────────────
+    /// The `msg` execution-context object.
+    ///
+    /// Available in every contract method body.  Fields:
+    /// - `msg.sender: Address` — the immediate caller's address.
+    /// - `msg.value: u128`    — the LEM value attached to the call (in Drop).
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §3.9` and `builtin_member_type` in
+    /// `type_checker/infer.rs` for the field-type table.
+    MsgContext,
+
+    /// The `block` execution-context object.
+    ///
+    /// Available in every contract method body.  Fields:
+    /// - `block.height: u64`    — the current block height.
+    /// - `block.timestamp: u64` — the current block timestamp (Unix seconds).
+    ///
+    /// See `docs/03-LANGUAGE_SPEC.md §3.9` and `builtin_member_type` in
+    /// `type_checker/infer.rs` for the field-type table.
+    BlockContext,
 }
 
 impl ResolvedType {
@@ -351,6 +372,8 @@ impl ResolvedType {
             Self::TypeParam(name) => name.clone(),
             Self::Unit => "()".into(),
             Self::Unknown => "<unknown>".into(),
+            Self::MsgContext => "msg".into(),
+            Self::BlockContext => "block".into(),
         }
     }
 }
@@ -563,6 +586,14 @@ pub enum SymbolKind {
     /// Treated as opaque in 3b; resolved to concrete kinds when the standard
     /// library is available (P3·Step 8).
     Imported,
+
+    // ── Built-in execution-context globals (P3-checker-14) ────────────────
+    /// A built-in execution-context global (`msg`, `block`).
+    ///
+    /// Pre-declared in the global value scope by the resolver before any
+    /// user-defined names are registered.  These are not user-definable and
+    /// cannot be shadowed at the contract scope level.
+    BuiltinGlobal,
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

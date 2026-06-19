@@ -2453,6 +2453,25 @@ fn builtin_member_type(base_ty: &ResolvedType, name: &str) -> Option<ResolvedTyp
             "toHash" => Some(ResolvedType::HashTy),
             _ => None,
         },
+        // P3-checker-14: built-in execution-context globals.
+        //
+        // `msg`   — {sender: Address, value: u128}
+        // `block` — {height: u64, timestamp: u64}
+        //
+        // These are the only fields defined on these pseudo-types.  Any other
+        // member access on `msg` or `block` returns `Unknown` (not an error —
+        // future fields may be added; reject-on-doubt is handled by the safety
+        // analyzer, not the type checker).
+        ResolvedType::MsgContext => match name {
+            "sender" => Some(ResolvedType::AddressTy),
+            "value" => Some(ResolvedType::U128),
+            _ => None,
+        },
+        ResolvedType::BlockContext => match name {
+            "height" => Some(ResolvedType::U64),
+            "timestamp" => Some(ResolvedType::U64),
+            _ => None,
+        },
         _ => None,
     }
 }
