@@ -7,33 +7,31 @@
 //! ## Pipeline position
 //!
 //! ```text
-//! tokenize → parse → check → analyze_safety → analyze_state_access
-//!                                                         ↓
-//!                                               codegen::compile  ← HERE
-//!                                                         ↓
-//!                                               Vec<u8>  (WASM binary)
+//! tokenize → parse → check (WF + safety)
+//!                        ↓
+//!                  TypedAst::contracts()
+//!                        ↓
+//!              codegen::compile(&TypedContract)  ← HERE
+//!                        ↓
+//!               Vec<u8>  (WASM binary with
+//!                         "lemma.abi" + "lemma.meta"
+//!                          custom sections)
 //! ```
 //!
 //! ## Sub-modules
 //!
-//! - [`wasm`]     — WASM section builder (wasm-encoder backend, DB-A52)
-//! - [`abi`]      — ABI emission stub (full implementation in P3·Step 6i)
-//! - [`metadata`] — Custom-section metadata stub (full implementation in P3·Step 6i)
-//! - [`types`]    — Lem → WASM type mapping (P3·Step 6c)
+//! - [`wasm`] — WASM section builder (wasm-encoder, DB-A52). Full lowering:
+//!   expressions, statements, functions, storage dispatch, modifiers, Address
+//!   constants (6c–6g). Custom section embed (6i).
+//! - [`abi`] — ABI descriptor emission: JSON `[{name, selector, params, returns}]` (6i).
+//! - [`metadata`] — `"lemma.meta"` custom section: contract name, compiler
+//!   version, per-function state-access hints for Flux/Express (B5-3, 6i).
+//! - [`types`] — Lem → WASM type mapping (6c).
 //!
 //! ## Phase status
 //!
-//! - **6a** (this file): skeleton + minimal valid WASM with `call` entry point.
-//! - **6c**: expression lowering (literals, checked arithmetic, comparison, local var read).
-//! - **6d–6e**: statement/function lowering (not yet implemented).
-//! - **6i**: ABI + metadata emission.
-//! - **6j**: wire into `lib.rs` public pipeline.
-//!
-//! ## Wiring note
-//!
-//! `pub(crate) mod codegen` is declared in `lib.rs` but `compile` is NOT yet
-//! re-exported at the crate root — that is P3·Step 6j's job. Do not add a
-//! `pub use codegen::compile` to `lib.rs` until 6j.
+//! Steps 6a–6j complete (P3·Step 6 ✅). Re-exported at the crate root as
+//! `lemma_lang::compile`.
 
 pub(crate) mod abi;
 pub(crate) mod metadata;
@@ -46,23 +44,37 @@ use crate::type_checker::typed_contract::TypedContract;
 /// Compile a type-checked Lem contract to a WASM binary.
 ///
 /// Accepts a [`TypedContract`] — the output of the full compiler pipeline
-/// (tokenize → parse → check → analyze_safety). The contract MUST be
-/// well-formed (P3·Step 4e-bis gate, DB-A38); codegen trusts its input
+/// (`tokenize → parse → check`). The contract MUST be well-formed
+/// (WF gate, DB-A38); `check()` enforces this. Codegen trusts its input
 /// and does not re-validate.
 ///
-/// # Returns
+/// The emitted binary is a self-describing WASM module that contains:
+/// - Full function lowering (all supported expression/statement forms)
+/// - Storage read/write dispatch (NEAR-style register model, DB-A53)
+/// - Built-in `Address` constants in linear memory (DB-A37)
+/// - `"lemma.abi"` custom section: JSON function descriptors (DB-A56)
+/// - `"lemma.meta"` custom section: state-access hints for Flux/Express
+///   (B5-3 part-a, DB-A56)
 ///
-/// A `Vec<u8>` containing a valid WebAssembly binary, or a
-/// [`LangError::Codegen`] if WASM emission fails.
+/// # Errors
 ///
-/// # Phase note
+/// Returns [`LangError::Codegen`] if WASM emission fails (e.g. an
+/// expression or type that is not yet supported by the current codegen).
+/// All type and well-formedness errors are caught earlier by `check()`.
 ///
-/// In P3·Step 6a this emits a **minimal valid placeholder** WASM module
-/// containing only the `call` entry-point export (no real lowering yet).
-/// Real expression/statement/function lowering lands in 6c–6e.
-// consumer: lib.rs public pipeline re-export (P3·Step 6j)
-#[allow(dead_code)]
-pub(crate) fn compile(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangError> {
+/// # Examples
+///
+/// ```ignore
+/// use lemma_lang::{tokenize, parse, check, compile};
+///
+/// let tokens = tokenize("contract Foo {}")?;
+/// let ast = parse(tokens)?;
+/// let typed = check(ast)?;
+/// for contract in typed.contracts() {
+///     let wasm: Vec<u8> = compile(&contract)?;
+/// }
+/// ```
+pub fn compile(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangError> {
     wasm::emit_module(contract)
 }
 

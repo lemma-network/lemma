@@ -381,8 +381,7 @@ fn find_modifier<'a>(
 ///
 /// Calling this function twice with the same input produces byte-identical
 /// output. See module-level doc for the determinism guarantee.
-// consumer: codegen::compile orchestrator (P3·Step 6a+); lib.rs pipeline (P3·Step 6j)
-#[allow(dead_code)]
+// consumer: codegen::compile (P3·Step 6j — wired into public pipeline)
 pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangError> {
     let mut module = Module::new();
 
