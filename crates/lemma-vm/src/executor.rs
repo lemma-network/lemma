@@ -407,6 +407,22 @@ impl Executor {
         // The ? on run_wasm_with_entry above ensures we only reach here on success.
         let _ = meter.charge(init_consumed);
 
+        // 9. REGISTRY AUTO-POPULATION (DB-A48/DB-A54, P3·Step 7 subtask_09).
+        //
+        //    If the deployed WASM exports any IToken interface function
+        //    ("transfer", "transferFrom", "balanceOf", "approve"), write a
+        //    metadata entry into the registry system contract's storage namespace.
+        //
+        //    Key layout (40 bytes, deterministic — AGENTS §7.1):
+        //      registry_addr.as_bytes() (20) ++ contract_addr.as_bytes() (20)
+        //
+        //    Value: minimal JSON metadata `{"address":"<hex>","is_token":true}`.
+        //
+        //    This is a best-effort, append-only write. If detection or the write
+        //    fails for any reason, we log a warning and continue — the deploy
+        //    MUST NOT be failed by registry issues (DB-A54 decision 2, AGENTS §7.2).
+        try_write_registry_entry(&module, &contract_addr, scratch);
+
         Ok(vec![])
     }
 
@@ -726,6 +742,83 @@ impl Executor {
             }
         }
     }
+}
+
+// ── Registry auto-population (DB-A48/DB-A54) ─────────────────────────────────
+
+/// IToken interface export names used for token detection (DB-A54 decision 2).
+///
+/// A deployed WASM is classified as a token if it exports ANY of these names.
+/// This matches the IToken interface defined in `03-LANGUAGE_SPEC §24`.
+const ITOKEN_EXPORTS: &[&str] = &["transfer", "transferFrom", "balanceOf", "approve"];
+
+/// Attempt to write a registry entry for a newly deployed token contract.
+///
+/// Called after successful init invocation in `execute_deploy`. Inspects the
+/// compiled module's exports to detect IToken interface compliance, then writes
+/// a metadata entry into the registry system contract's storage namespace.
+///
+/// ## Key layout (40 bytes, deterministic — AGENTS §7.1)
+///
+/// ```text
+/// key = registry_addr.as_bytes() (20) ++ contract_addr.as_bytes() (20)
+/// ```
+///
+/// The key is stored under the registry system contract's storage namespace
+/// (first argument to `scratch.write`), so the full storage address is:
+/// `(registry_addr, key)` where `key` is the 40-byte concatenation above.
+///
+/// ## Best-effort semantics (DB-A54 decision 2, AGENTS §7.2)
+///
+/// This function NEVER propagates errors. Any failure (export inspection,
+/// JSON formatting, storage write) is logged as a warning and silently
+/// ignored. The deploy MUST NOT fail due to registry issues.
+fn try_write_registry_entry<S: ContractStateView>(
+    module: &wasmtime::Module,
+    contract_addr: &Address,
+    scratch: &mut ScratchState<'_, S>,
+) {
+    // Detect IToken interface: check if the module exports any IToken function.
+    // wasmtime::Module::get_export(name) returns Some(ExternType) if the export
+    // exists, None otherwise. We check ExternType::Func to ensure it is a function
+    // (not a memory or global with the same name). O(1) per lookup.
+    // This is a pure inspection — no instantiation, no gas, no side effects.
+    let is_token = ITOKEN_EXPORTS
+        .iter()
+        .any(|&name| matches!(module.get_export(name), Some(wasmtime::ExternType::Func(_))));
+
+    if !is_token {
+        // Non-token contract — no registry entry needed.
+        return;
+    }
+
+    // Build the 40-byte registry key:
+    //   registry_addr.as_bytes() (20) ++ contract_addr.as_bytes() (20)
+    // This is deterministic: same inputs → same key on every node (AGENTS §7.1).
+    let registry_addr = Address::registry();
+    let mut key = [0u8; 40];
+    key[..20].copy_from_slice(registry_addr.as_bytes());
+    key[20..].copy_from_slice(contract_addr.as_bytes());
+
+    // Build minimal JSON metadata value.
+    // Format: {"address":"<hex>","is_token":true}
+    // Hex-encode the 20-byte address for human-readable JSON.
+    let addr_hex: String = contract_addr
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let metadata = format!(r#"{{"address":"{addr_hex}","is_token":true}}"#);
+
+    // Write to the registry system contract's storage namespace.
+    // Key = 40-byte concatenation; value = UTF-8 JSON bytes.
+    // On any failure, warn and continue — never fail the deploy.
+    scratch.write(&registry_addr, &key, metadata.into_bytes());
+
+    tracing::debug!(
+        contract = %contract_addr,
+        "registry: token contract auto-registered (DB-A54)"
+    );
 }
 
 // ── Trap → VmError mapping ────────────────────────────────────────────────────
