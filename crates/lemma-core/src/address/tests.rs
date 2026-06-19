@@ -203,6 +203,61 @@ fn native_lem_bytes_match_blake3_hash() {
     );
 }
 
+// ── Address::registry() ───────────────────────────────────────────────────────
+
+#[test]
+fn registry_is_not_zero() {
+    assert!(!Address::registry().is_zero());
+}
+
+#[test]
+fn registry_is_not_burn() {
+    assert!(!Address::registry().is_burn());
+}
+
+#[test]
+fn registry_is_distinct_from_native_lem() {
+    assert_ne!(Address::registry(), Address::native_lem());
+}
+
+#[test]
+fn registry_is_distinct_from_zero() {
+    assert_ne!(Address::registry(), Address::zero());
+}
+
+#[test]
+fn registry_is_distinct_from_burn() {
+    assert_ne!(Address::registry(), Address::burn());
+}
+
+#[test]
+fn registry_is_deterministic() {
+    // Two calls must return the same address — blake3 is deterministic.
+    assert_eq!(Address::registry(), Address::registry());
+}
+
+#[test]
+fn registry_bytes_match_blake3_hash() {
+    // Verifies that Address::registry() returns the correct blake3-derived bytes.
+    // This is the canonical correctness check — if the derivation formula ever
+    // changes, this test will catch it. See DB-A54.
+    let hash = blake3::hash(b"lemma:system:registry");
+    let expected = &hash.as_bytes()[..20];
+    assert_eq!(
+        Address::registry().as_bytes(),
+        expected,
+        "registry() must return blake3(b\"lemma:system:registry\")[0..20]"
+    );
+}
+
+#[test]
+fn registry_encodes_as_contract_type_on_mainnet() {
+    let encoded = Address::registry()
+        .to_bech32(HRP_MAINNET, AddressType::Contract)
+        .unwrap();
+    assert!(encoded.starts_with("lem1c"), "got: {}", encoded);
+}
+
 // ── Address::from_public_key ──────────────────────────────────────────────────
 
 #[test]

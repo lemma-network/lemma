@@ -1,6 +1,6 @@
 //! RocksDB wrapper with column family management for Lemma.
 //!
-//! [`LemmaDb`] opens (or creates) a RocksDB database with all 8 column
+//! [`LemmaDb`] opens (or creates) a RocksDB database with all 9 column
 //! families defined in the Lemma storage spec. All operations are routed
 //! through typed methods that resolve column family handles internally —
 //! callers never deal with raw handle lifetime gymnastics.
@@ -17,6 +17,7 @@
 //! | [`CF_RECEIPTS`] | `receipts` | Transaction receipts |
 //! | [`CF_TRIE_NODES`] | `trie_nodes` | Merkle Patricia Trie nodes |
 //! | [`CF_METADATA`] | `metadata` | Chain metadata (latest height, etc.) |
+//! | [`CF_CODE`] | `code` | Content-addressed bytecode store (`blake3(bytecode)` → bytecode) |
 //!
 //! ## Batch writes
 //!
@@ -78,7 +79,19 @@ pub const CF_TRIE_NODES: &str = "trie_nodes";
 /// Examples: `b"latest_height"` → `u64 BE`, `b"latest_hash"` → `Hash (32 bytes)`.
 pub const CF_METADATA: &str = "metadata";
 
-/// All 8 column family names in stable declaration order.
+/// Content-addressed bytecode store.
+///
+/// Key: `blake3(bytecode)` (32 bytes). Value: raw WASM bytecode.
+///
+/// **Append-only — never deleted.** The first deployer of a given bytecode
+/// pays the storage cost; later deployers of identical bytecode pay only the
+/// account pointer write (`Account.code_hash` in `CF_STATE`). This deduplicates
+/// bytecode across contract instances without reference-counting.
+///
+/// See DB-A23 and 08-EXECUTION_SPEC §3.4(b).
+pub const CF_CODE: &str = "code";
+
+/// All 9 column family names in stable declaration order.
 ///
 /// Used by [`LemmaDb::open`] to build `ColumnFamilyDescriptor`s. Order must
 /// not change once a database has been written to disk — RocksDB tracks CFs
@@ -92,6 +105,7 @@ pub(crate) const ALL_CFS: &[&str] = &[
     CF_RECEIPTS,
     CF_TRIE_NODES,
     CF_METADATA,
+    CF_CODE,
 ];
 
 // ─── LemmaDb ──────────────────────────────────────────────────────────────────
@@ -99,7 +113,7 @@ pub(crate) const ALL_CFS: &[&str] = &[
 /// RocksDB wrapper for Lemma's persistent storage layer.
 ///
 /// Owns a single RocksDB database handle and exposes typed read, write, and
-/// batch-write operations routed through named column families. All 8 column
+/// batch-write operations routed through named column families. All 9 column
 /// families are opened (and created if missing) at construction time, so
 /// there are no deferred failures after [`open`] returns `Ok`.
 ///
@@ -114,7 +128,7 @@ pub struct LemmaDb {
 impl LemmaDb {
     /// Open (or create) the Lemma database at `path`.
     ///
-    /// Creates the directory and all 8 column families if they do not exist.
+    /// Creates the directory and all 9 column families if they do not exist.
     /// If the database already exists, any missing column families from
     /// [`ALL_CFS`] are created automatically.
     ///
@@ -145,7 +159,7 @@ impl LemmaDb {
     ///
     /// Returns `Err(ColumnFamilyNotFound)` as a safety net for caller bugs
     /// (e.g. passing a typo'd or unregistered CF name). After a successful
-    /// [`open`], all 8 CFs in [`ALL_CFS`] are guaranteed to exist.
+    /// [`open`], all 9 CFs in [`ALL_CFS`] are guaranteed to exist.
     ///
     /// Using `impl AsColumnFamilyRef + '_` avoids exposing the internal
     /// `rocksdb::BoundColumnFamily` type in the public API.
@@ -166,15 +180,15 @@ impl LemmaDb {
     /// `Ok(None)` into domain-specific errors like
     /// [`StorageError::AccountNotFound`].
     ///
-    /// `cf_name` must be one of the 8 column family constants declared in
-    /// this module (`CF_STATE`, `CF_BLOCKS`, etc.). The `&'static str` bound
-    /// is intentional — column family names are compile-time constants, not
+    /// `cf_name` must be one of the 9 column family constants declared in
+    /// this module (`CF_STATE`, `CF_BLOCKS`, `CF_CODE`, etc.). The `&'static str`
+    /// bound is intentional — column family names are compile-time constants, not
     /// runtime strings.
     ///
     /// # Errors
     ///
     /// - [`StorageError::ColumnFamilyNotFound`] — `cf_name` is not one of the
-    ///   8 registered constants.
+    ///   9 registered constants.
     /// - [`StorageError::Database`] — RocksDB I/O failure.
     pub fn get(&self, cf_name: &'static str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let cf = self.resolve_cf(cf_name)?;
@@ -186,8 +200,8 @@ impl LemmaDb {
     /// If `key` already exists its value is overwritten. For multi-key
     /// updates that must be atomic, prefer [`write_batch`].
     ///
-    /// `cf_name` must be one of the 8 column family constants (`CF_STATE`,
-    /// `CF_BLOCKS`, etc.) — see [`get`] for the full constraint explanation.
+    /// `cf_name` must be one of the 9 column family constants (`CF_STATE`,
+    /// `CF_BLOCKS`, `CF_CODE`, etc.) — see [`get`] for the full constraint explanation.
     ///
     /// # Errors
     ///
@@ -205,8 +219,8 @@ impl LemmaDb {
     ///
     /// If `key` does not exist this is a no-op — not an error.
     ///
-    /// `cf_name` must be one of the 8 column family constants (`CF_STATE`,
-    /// `CF_BLOCKS`, etc.) — see [`get`] for the full constraint explanation.
+    /// `cf_name` must be one of the 9 column family constants (`CF_STATE`,
+    /// `CF_BLOCKS`, `CF_CODE`, etc.) — see [`get`] for the full constraint explanation.
     ///
     /// # Errors
     ///

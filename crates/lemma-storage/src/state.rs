@@ -45,7 +45,7 @@ use lemma_core::{Address, Amount, Hash};
 
 use crate::{
     account::Account,
-    db::{LemmaDb, CF_STORAGE},
+    db::{LemmaDb, CF_CODE, CF_STORAGE},
     trie::{MerklePatriciaTrie, MerkleProof},
     StorageError,
 };
@@ -303,6 +303,51 @@ impl WorldState {
     pub fn delete_storage(&mut self, address: &Address, slot: &Hash) -> Result<(), StorageError> {
         let key = storage_key(address, slot);
         self.db.delete(CF_STORAGE, &key)
+    }
+
+    // ── Bytecode store ────────────────────────────────────────────────────────
+
+    /// Store contract bytecode in the content-addressed code store.
+    ///
+    /// The key is `code_hash` (the Blake3 hash of `bytecode`). The caller is
+    /// responsible for computing `code_hash = blake3(bytecode)` before calling
+    /// this method — typically done by the deploy handler in the execution layer.
+    ///
+    /// **Append-only / idempotent:** if `code_hash` is already present in
+    /// `CF_CODE`, this method returns `Ok(())` immediately without overwriting
+    /// the existing value. This enforces the spec invariant that bytecode is
+    /// never mutated or deleted after first write (08-EXECUTION_SPEC §3.4(b),
+    /// DB-A23). The first deployer of a given bytecode pays the storage cost;
+    /// later deployers of identical bytecode pay only the account pointer write.
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::Database`] — RocksDB read or write failed.
+    pub fn put_code(&self, code_hash: &Hash, bytecode: &[u8]) -> Result<(), StorageError> {
+        // Append-only: check presence before writing. If the hash is already
+        // stored, return immediately — no overwrite, no error.
+        if self.db.get(CF_CODE, code_hash.as_bytes())?.is_some() {
+            return Ok(());
+        }
+        self.db.put(CF_CODE, code_hash.as_bytes(), bytecode)
+    }
+
+    /// Retrieve contract bytecode by its content hash.
+    ///
+    /// Returns `Ok(None)` if no bytecode has been stored under `code_hash`.
+    /// Returns `Ok(Some(bytes))` if the bytecode is present.
+    ///
+    /// The returned bytes are the raw WASM bytecode as originally stored by
+    /// [`put_code`]. The caller can verify integrity by recomputing
+    /// `blake3(bytes)` and comparing to `code_hash`.
+    ///
+    /// [`put_code`]: WorldState::put_code
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::Database`] — RocksDB read failed.
+    pub fn get_code(&self, code_hash: &Hash) -> Result<Option<Vec<u8>>, StorageError> {
+        self.db.get(CF_CODE, code_hash.as_bytes())
     }
 
     // ── Proof ─────────────────────────────────────────────────────────────────

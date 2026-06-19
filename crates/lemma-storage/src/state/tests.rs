@@ -496,6 +496,102 @@ fn delete_then_put_storage_restores_slot() {
     );
 }
 
+// ── Bytecode store ────────────────────────────────────────────────────────────
+
+/// Compute a deterministic test code hash from a seed byte.
+///
+/// In production, `code_hash = blake3(bytecode)`. For tests we use a fixed
+/// 32-byte pattern so tests are self-contained without importing blake3.
+fn code_hash(seed: u8) -> Hash {
+    Hash::from_bytes([seed; 32])
+}
+
+#[test]
+fn get_code_on_absent_hash_returns_none() {
+    let (ws, _dir) = world_state();
+    let result = ws
+        .get_code(&code_hash(0x01))
+        .expect("get_code must not error on absent hash");
+    assert!(result.is_none(), "absent code hash must return None");
+}
+
+#[test]
+fn put_then_get_code_returns_same_bytecode() {
+    let (ws, _dir) = world_state();
+    let hash = code_hash(0x02);
+    let bytecode = b"(module (func))";
+    ws.put_code(&hash, bytecode).expect("put_code must succeed");
+    let got = ws.get_code(&hash).expect("get_code must not error");
+    assert_eq!(
+        got,
+        Some(bytecode.to_vec()),
+        "get_code must return the stored bytecode"
+    );
+}
+
+#[test]
+fn put_code_is_idempotent_on_duplicate_hash() {
+    // Append-only invariant: storing the same hash twice must return Ok(())
+    // and must NOT overwrite the existing value.
+    let (ws, _dir) = world_state();
+    let hash = code_hash(0x03);
+    let first = b"first bytecode";
+    let second = b"second bytecode \xE2\x80\x94 must NOT overwrite";
+
+    ws.put_code(&hash, first)
+        .expect("first put_code must succeed");
+    // Second put with the same hash must succeed (idempotent, not an error).
+    ws.put_code(&hash, second)
+        .expect("second put_code with same hash must succeed (idempotent)");
+
+    // The stored value must still be the first write — append-only.
+    let got = ws.get_code(&hash).expect("get_code must not error");
+    assert_eq!(
+        got,
+        Some(first.to_vec()),
+        "put_code must not overwrite existing bytecode (append-only)"
+    );
+}
+
+#[test]
+fn put_code_different_hashes_are_independent() {
+    // Two distinct code hashes must store and retrieve independently.
+    let (ws, _dir) = world_state();
+    let hash_a = code_hash(0xAA);
+    let hash_b = code_hash(0xBB);
+    let bytecode_a = b"bytecode for contract A";
+    let bytecode_b = b"bytecode for contract B";
+
+    ws.put_code(&hash_a, bytecode_a)
+        .expect("put_code A must succeed");
+    ws.put_code(&hash_b, bytecode_b)
+        .expect("put_code B must succeed");
+
+    assert_eq!(
+        ws.get_code(&hash_a).expect("get_code A must succeed"),
+        Some(bytecode_a.to_vec()),
+    );
+    assert_eq!(
+        ws.get_code(&hash_b).expect("get_code B must succeed"),
+        Some(bytecode_b.to_vec()),
+    );
+}
+
+#[test]
+fn put_code_empty_bytecode_is_valid() {
+    // Empty bytecode is a degenerate but valid case — must round-trip cleanly.
+    let (ws, _dir) = world_state();
+    let hash = code_hash(0x04);
+    ws.put_code(&hash, b"")
+        .expect("put_code with empty bytecode must succeed");
+    let got = ws.get_code(&hash).expect("get_code must not error");
+    assert_eq!(
+        got,
+        Some(vec![]),
+        "empty bytecode must be stored, not treated as absent"
+    );
+}
+
 // ── Edge cases (continued) ───────────────────────────────────────────────────
 
 #[test]

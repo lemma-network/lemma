@@ -89,3 +89,26 @@ fn engine_setup_failed_displays_reason() {
     };
     assert!(e.to_string().contains("config conflict"));
 }
+
+#[test]
+fn contract_too_large_displays_size_and_limit() {
+    // Verify the Display output contains both the actual size and the limit so
+    // that operators can diagnose oversized deploys from receipts alone
+    // (08-EXECUTION_SPEC §3.4(a), DB-A21).
+    //
+    // We use the canonical constant value directly (2 MiB = 2_097_152) so this
+    // test also acts as a regression guard: if MAX_CONTRACT_WASM_SIZE ever
+    // changes, the caller site in lemma-vm must be updated too.
+    let size = 3_000_000_usize;
+    let limit = lemma_core::MAX_CONTRACT_WASM_SIZE;
+    let e = VmError::ContractTooLarge { size, limit };
+    let msg = e.to_string();
+    assert!(
+        msg.contains(&size.to_string()),
+        "error message must contain the actual size ({size}); got: {msg}"
+    );
+    assert!(
+        msg.contains(&limit.to_string()),
+        "error message must contain the limit ({limit}); got: {msg}"
+    );
+}

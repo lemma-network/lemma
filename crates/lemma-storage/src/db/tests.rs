@@ -1,6 +1,6 @@
 //! Tests for `lemma_storage::db`.
 //!
-//! Covers: database open/reopen, all 8 column families, get/put/delete
+//! Covers: database open/reopen, all 9 column families, get/put/delete
 //! single-key ops, batch writes across column families, missing-key
 //! semantics, and the `From<rocksdb::Error>` → `StorageError::Database`
 //! conversion (issue #3 — deferred from error/tests.rs).
@@ -84,7 +84,7 @@ fn open_regular_file_path_produces_database_error() {
     );
 }
 
-// ── Column families — all 8 reachable ────────────────────────────────────────
+// ── Column families — all 9 reachable ────────────────────────────────────────
 
 #[test]
 fn all_column_families_are_accessible_after_open() {
@@ -107,7 +107,7 @@ fn all_column_families_are_accessible_after_open() {
 }
 
 #[test]
-fn all_eight_column_family_constants_are_distinct() {
+fn all_nine_column_family_constants_are_distinct() {
     // Guard: if any two constants accidentally share a name, tests above would
     // silently pass while cross-contaminating data.
     let mut seen = std::collections::BTreeSet::new();
@@ -117,7 +117,7 @@ fn all_eight_column_family_constants_are_distinct() {
             "duplicate column family name found: '{name}'",
         );
     }
-    assert_eq!(seen.len(), 8, "expected exactly 8 distinct column families");
+    assert_eq!(seen.len(), 9, "expected exactly 9 distinct column families");
 }
 
 // ── get — single key ─────────────────────────────────────────────────────────

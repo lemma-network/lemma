@@ -69,6 +69,23 @@ pub enum VmError {
     #[error("invalid WASM module: {reason}")]
     InvalidModule { reason: String },
 
+    /// The `ContractDeploy` bytecode exceeds `MAX_CONTRACT_WASM_SIZE`.
+    ///
+    /// Rejected **before** gas is charged and **before** AOT compilation is
+    /// attempted — a validator must never let an oversized module occupy its
+    /// compiler and stall block production (DoS gate, 08-EXECUTION_SPEC §3.4(a),
+    /// DB-A21).
+    ///
+    /// The caller should return a failed [`TransactionReceipt`] with zero gas
+    /// charged (the node did no meaningful work beyond the size check).
+    #[error("contract bytecode {size} bytes exceeds maximum allowed size {limit} bytes")]
+    ContractTooLarge {
+        /// Actual bytecode length in bytes.
+        size: usize,
+        /// The limit that was exceeded (`lemma_core::MAX_CONTRACT_WASM_SIZE`).
+        limit: usize,
+    },
+
     /// A WASM trap occurred that does not map to a specific known variant.
     ///
     /// `Trap` is `#[non_exhaustive]` in wasmtime — new trap variants may appear

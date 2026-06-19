@@ -3,7 +3,7 @@
 //! Covers: happy path, idempotency, empty-balances devnet, invalid config,
 //! persistence of block + metadata, and validator-set hash determinism.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use tempfile::TempDir;
 
@@ -11,10 +11,11 @@ use lemma_core::{
     address::Address,
     amount::{Amount, DROPS_PER_LEM},
     genesis::GenesisConfig,
+    hash::Hash,
     validator::{ConsensusKey, Stake, Validator, ValidatorStatus},
     validator_set::ValidatorSet,
 };
-use lemma_storage::db::LemmaDb;
+use lemma_storage::{db::LemmaDb, state::WorldState};
 
 use super::*;
 
@@ -185,8 +186,7 @@ fn init_chain_credits_genesis_balance_to_state_trie() {
         serde_json::from_slice(&block_bytes).expect("block deserialise must succeed");
     let state_root = block.header.state_root;
 
-    let ws =
-        lemma_storage::state::WorldState::with_state_root(std::sync::Arc::new(db2), state_root);
+    let ws = WorldState::with_state_root(Arc::new(db2), state_root);
     let balance = ws
         .get_balance(&addr(0x01))
         .expect("get_balance must succeed");
@@ -259,7 +259,12 @@ fn init_chain_handles_empty_initial_balances_devnet() {
 }
 
 #[test]
-fn init_chain_devnet_genesis_block_has_zero_state_root() {
+fn init_chain_devnet_genesis_block_has_nonzero_state_root() {
+    // Since DB-A54 (step 4b in genesis_boot.rs), init_chain always writes
+    // the native_lem and registry system accounts, so the state root is
+    // non-zero even when initial_balances is empty. The old assertion
+    // (state_root.is_zero()) was correct before system accounts were added;
+    // this test now verifies the updated invariant.
     let (db, dir) = open_temp_db();
     init_chain(db, &devnet_genesis()).expect("devnet init must succeed");
 
@@ -272,8 +277,8 @@ fn init_chain_devnet_genesis_block_has_zero_state_root() {
     let block: lemma_core::block::Block =
         serde_json::from_slice(&block_bytes).expect("block deserialise must succeed");
     assert!(
-        block.header.state_root.is_zero(),
-        "empty-balance genesis must have zero state_root",
+        !block.header.state_root.is_zero(),
+        "genesis with system accounts must have non-zero state_root (DB-A54)",
     );
 }
 
@@ -402,4 +407,103 @@ fn from_active_validators_errors_on_empty_active_set() {
             lemma_core::error::ValidatorError::EmptyValidatorSet { .. }
         )
     ));
+}
+
+// ── System contract accounts (DB-A54) ─────────────────────────────────────────
+
+/// Helper: read the state trie from a persisted genesis DB and return the
+/// [`WorldState`] rooted at the genesis block's `state_root`.
+fn open_genesis_state(dir: &tempfile::TempDir) -> WorldState {
+    let db2 = LemmaDb::open(dir.path()).expect("re-open must succeed");
+    let block_bytes = db2
+        .get(lemma_storage::db::CF_BLOCKS, &0u64.to_be_bytes())
+        .expect("get CF_BLOCKS must succeed")
+        .expect("genesis block must exist");
+    let block: lemma_core::block::Block =
+        serde_json::from_slice(&block_bytes).expect("block deserialise must succeed");
+    WorldState::with_state_root(Arc::new(db2), block.header.state_root)
+}
+
+#[test]
+fn init_chain_creates_native_lem_system_account_at_genesis() {
+    let (db, dir) = open_temp_db();
+    init_chain(db, &minimal_genesis()).expect("init_chain must succeed");
+
+    let ws = open_genesis_state(&dir);
+    let account = ws
+        .get_account(&Address::native_lem())
+        .expect("get_account must succeed")
+        .expect("native_lem system account must exist after genesis");
+
+    // Protocol-level account: no bytecode, no balance, nonce 0 (DB-A54).
+    assert_eq!(
+        account.code_hash,
+        Hash::zero(),
+        "native_lem must have code_hash = Hash::zero()"
+    );
+    assert!(
+        account.balance.is_zero(),
+        "native_lem must have zero balance at genesis"
+    );
+    assert_eq!(account.nonce, 0, "native_lem must have nonce 0 at genesis");
+}
+
+#[test]
+fn init_chain_creates_registry_system_account_at_genesis() {
+    let (db, dir) = open_temp_db();
+    init_chain(db, &minimal_genesis()).expect("init_chain must succeed");
+
+    let ws = open_genesis_state(&dir);
+    let account = ws
+        .get_account(&Address::registry())
+        .expect("get_account must succeed")
+        .expect("registry system account must exist after genesis");
+
+    // Protocol-level account: no bytecode, no balance, nonce 0 (DB-A54).
+    assert_eq!(
+        account.code_hash,
+        Hash::zero(),
+        "registry must have code_hash = Hash::zero()"
+    );
+    assert!(
+        account.balance.is_zero(),
+        "registry must have zero balance at genesis"
+    );
+    assert_eq!(account.nonce, 0, "registry must have nonce 0 at genesis");
+}
+
+#[test]
+fn init_chain_system_accounts_do_not_affect_user_account_count() {
+    // The `accounts` field in InitOutcome::Initialized counts only user
+    // allocations from initial_balances — not protocol system accounts.
+    let (db, _dir) = open_temp_db();
+    let genesis = minimal_genesis(); // 1 user account
+
+    let outcome = init_chain(db, &genesis).expect("init_chain must succeed");
+
+    assert!(
+        matches!(outcome, InitOutcome::Initialized { accounts: 1, .. }),
+        "system accounts must not inflate the user account count; got {outcome:?}",
+    );
+}
+
+#[test]
+fn init_chain_system_accounts_present_on_devnet_empty_balances() {
+    // Even with no user accounts, system contracts must be written.
+    let (db, dir) = open_temp_db();
+    init_chain(db, &devnet_genesis()).expect("devnet init must succeed");
+
+    let ws = open_genesis_state(&dir);
+    assert!(
+        ws.get_account(&Address::native_lem())
+            .expect("get_account must succeed")
+            .is_some(),
+        "native_lem must exist even on devnet with no user accounts",
+    );
+    assert!(
+        ws.get_account(&Address::registry())
+            .expect("get_account must succeed")
+            .is_some(),
+        "registry must exist even on devnet with no user accounts",
+    );
 }

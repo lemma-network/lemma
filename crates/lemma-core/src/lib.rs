@@ -17,6 +17,7 @@
 //! | [`genesis`] | [`GenesisConfig`] — chain bootstrap configuration |
 //! | [`hash`] | [`Hash`] — 32-byte Blake3 hash newtype |
 //! | [`header`] | [`BlockHeader`] — block metadata commitment |
+//! | [`limits`] | Protocol hard limits — [`MAX_CONTRACT_WASM_SIZE`] etc. |
 //! | [`signature`] | [`Signature`] — Classical / PostQuantum / Hybrid wrapper |
 //! | [`transaction`] | [`Transaction`], [`TxType`], [`TransactionReceipt`], [`Log`] |
 //! | [`validator`] | [`Validator`], [`ValidatorStatus`], [`ConsensusKey`], [`Stake`], [`VotingPower`] |
@@ -38,6 +39,7 @@ pub mod error;
 pub mod genesis;
 pub mod hash;
 pub mod header;
+pub mod limits;
 pub mod signature;
 pub mod transaction;
 pub mod validator;
@@ -50,6 +52,7 @@ pub mod validator_set;
 pub use address::{Address, AddressType, HRP_DEVNET, HRP_MAINNET, HRP_TESTNET};
 pub use amount::{Amount, DRIPS_PER_LEM, DROPS_PER_DRIP, DROPS_PER_LEM};
 pub use hash::Hash;
+pub use limits::MAX_CONTRACT_WASM_SIZE;
 pub use signature::Signature;
 
 pub use error::{

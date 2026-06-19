@@ -15,6 +15,7 @@
 //! 2.  ChainStore::new(&db).latest_height()     — idempotency guard
 //! 3.  WorldState::new(db)                      — empty trie
 //! 4.  put_account() × initial_balances         — credit genesis allocations
+//! 4b. put_account() × system contracts         — native_lem + registry (DB-A54)
 //! 5.  state_root = state.state_root()          — trie root (None → Hash::zero())
 //! 6.  db = state.into_db()                     — reclaim DB handle
 //! 7.  ValidatorSet::from_active_validators(0)  — validators_hash = vset.hash()
@@ -29,7 +30,7 @@ use std::sync::Arc;
 
 use lemma_core::{
     address::Address, block::Block, genesis::GenesisConfig, hash::Hash, header::BlockHeader,
-    validator_set::ValidatorSet,
+    validator_set::ValidatorSet, Amount,
 };
 use lemma_storage::{account::Account, state::WorldState, ChainStore, LemmaDb};
 
@@ -91,6 +92,15 @@ pub fn init_chain(db: LemmaDb, genesis: &GenesisConfig) -> Result<InitOutcome, N
     for (addr, amount) in &genesis.initial_balances {
         state.put_account(addr, &Account::new_eoa(*amount))?;
     }
+
+    // Step 4b: write protocol-level system contract accounts (DB-A54).
+    // These are reserved addresses established at genesis — not WASM contracts
+    // (code_hash = Hash::zero()), not pre-funded (balance = Amount::zero()).
+    // Written as EOAs (code_hash = Hash::zero()) because no bytecode exists at
+    // genesis; the executor populates their state namespaces at deploy time.
+    // They are NOT counted in `accounts` — that field tracks user allocations.
+    state.put_account(&Address::native_lem(), &Account::new_eoa(Amount::zero()))?;
+    state.put_account(&Address::registry(), &Account::new_eoa(Amount::zero()))?;
 
     // Step 5: capture the state root (None when initial_balances is empty).
     let state_root = state.state_root().unwrap_or(Hash::zero());

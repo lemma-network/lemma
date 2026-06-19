@@ -157,8 +157,26 @@ pub struct GasSchedule {
     // ── Contract deployment ───────────────────────────────────────────────────
     /// Base cost to deploy a contract (EVM: CREATE = 32 000).
     pub deploy_base: Gas,
-    /// Per-byte cost of WASM bytecode stored (EVM: code deposit = 200/byte).
+    /// Phase-2 placeholder — superseded by `deploy_storage_per_byte` for the
+    /// storage-cost component and `code_cold_surcharge` for the AOT-compile
+    /// component (DB-A22). Retained for backward compatibility until callers
+    /// are migrated in subtask_05.
     pub deploy_per_byte: Gas,
+    /// Per-byte gas for storing bytecode in CF_CODE on ContractDeploy.
+    ///
+    /// Charged only when the `code_hash` is NEW (first deployer pays storage);
+    /// later deployers of identical bytecode pay only `deploy_base` (the account
+    /// pointer write). Supersedes the Phase-2 `deploy_per_byte` semantic for the
+    /// storage-cost component. See DB-A22/DB-A23 and 08-EXECUTION_SPEC §3.4(b/c).
+    pub deploy_storage_per_byte: Gas,
+    /// Flat gas surcharge charged on the FIRST call to a contract
+    /// (code-cold = not yet in the wasmtime engine's compiled-module cache).
+    ///
+    /// Covers the one-time AOT compilation cost. Subsequent calls to the same
+    /// contract in the same block are code-warm and pay only execution fuel.
+    /// Flat per module — NOT per-instruction instrumentation
+    /// (see DB-A22 and 08-EXECUTION_SPEC §3.4(c)).
+    pub code_cold_surcharge: Gas,
 
     // ── Memory ────────────────────────────────────────────────────────────────
     /// Cost per 64 KiB WASM linear-memory page grown (super-linear to bound blowup).
@@ -216,7 +234,13 @@ impl GasSchedule {
 
             // Deploy
             deploy_base: Gas(32_000),  // EVM: CREATE = 32 000
-            deploy_per_byte: Gas(200), // EVM: code deposit = 200/byte
+            deploy_per_byte: Gas(200), // Phase-2 placeholder (see field doc)
+            // Per-byte storage cost for new bytecode in CF_CODE (DB-A22/DB-A23).
+            // Same value as Phase-2 placeholder for now; benchmarked post-testnet.
+            deploy_storage_per_byte: Gas(200),
+            // Flat AOT-compile surcharge on first call to a cold module (DB-A22).
+            // Placeholder — final value requires post-validator-hardware benchmarking.
+            code_cold_surcharge: Gas(100_000),
 
             // Memory
             memory_grow_per_page: Gas(3), // per 64 KiB page

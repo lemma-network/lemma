@@ -174,6 +174,24 @@ impl Address {
         Address(NATIVE_LEM_BYTES)
     }
 
+    /// Reserved address for the Lemma token registry system contract.
+    ///
+    /// Derived from `blake3(b"lemma:system:registry")[0..20]`. Written at
+    /// genesis in `genesis_boot::init_chain`. The executor auto-populates this
+    /// namespace on `ContractDeploy` of token contracts (DB-A54). Off-chain
+    /// RPC reads and on-chain agent reads are wired in Phase 4 / Steps 11–17.
+    ///
+    /// Encodes with `AddressType::Contract` → `lem1c...` (mainnet).
+    pub fn registry() -> Self {
+        // blake3(b"lemma:system:registry")[0..20] — see DB-A54.
+        // Not const fn: blake3::hash is not const-evaluable. This is a cold
+        // path (genesis + tests only) so the runtime cost is negligible.
+        let hash = blake3::hash(b"lemma:system:registry");
+        let mut bytes = [0u8; 20];
+        bytes.copy_from_slice(&hash.as_bytes()[..20]);
+        Address(bytes)
+    }
+
     // ── Raw construction ─────────────────────────────────────────────────────
 
     /// Create an `Address` directly from a raw 20-byte array.
