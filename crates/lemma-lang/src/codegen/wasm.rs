@@ -51,12 +51,13 @@ use std::collections::BTreeMap;
 
 use lemma_core::{Address, DROPS_PER_DRIP, DROPS_PER_LEM};
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataCountSection, DataSection, EntityType, ExportKind, ExportSection,
-    Function, FunctionSection, GlobalSection, GlobalType, ImportSection, Instruction,
-    MemorySection, MemoryType, Module, TypeSection, ValType,
+    CodeSection, ConstExpr, CustomSection, DataCountSection, DataSection, EntityType, ExportKind,
+    ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    Instruction, MemorySection, MemoryType, Module, TypeSection, ValType,
 };
 
 use crate::codegen::abi::{self, HOST_IMPORT_COUNT, IMPORT_MODULE, IMPORT_ORDER};
+use crate::codegen::metadata;
 use crate::codegen::types::{is_i64, is_signed, is_sub_word, wasm_valtype};
 use crate::error::LangError;
 use crate::lexer::token::Span;
@@ -251,11 +252,12 @@ pub(crate) fn compute_selector(
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-/// Canonical type name for selector signature computation.
+/// Canonical type name for selector signature computation and ABI descriptors.
 ///
-/// Maps `ResolvedType` to a stable string used in the blake3 hash input.
+/// Maps `ResolvedType` to a stable string used in the blake3 hash input
+/// (selector) and in the `"lemma.abi"` custom-section JSON (P3·Step 6i).
 /// Must be deterministic and consistent across validators (AGENTS §7.1).
-fn type_canonical_name(ty: &ResolvedType) -> String {
+pub(crate) fn type_canonical_name(ty: &ResolvedType) -> String {
     match ty {
         ResolvedType::Bool => "bool".into(),
         ResolvedType::U8 => "u8".into(),
@@ -555,6 +557,32 @@ pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangE
     );
 
     module.section(&data);
+
+    // ── Custom sections (P3·Step 6i) ─────────────────────────────────────────
+    //
+    // Custom sections are appended last per WASM spec §5.5.2. They are ignored
+    // by WASM validators and execution engines but readable by the VM host and
+    // off-chain tooling (explorer, wallet, SDK).
+    //
+    // "lemma.abi" — JSON array of public function descriptors (name, selector,
+    //   param types, return type). For off-chain callers: SDK ABI encoding,
+    //   explorer display, wallet contract interaction.
+    //
+    // "lemma.meta" — JSON object with contract identity + per-function
+    //   state-access hints (B5-3 part-a). Consumed by LemmaVM at deploy time
+    //   to pre-seed the Flux dependency graph and Express eligibility check
+    //   (P3·Step 7).
+    let abi_bytes = abi::build_abi(contract);
+    module.section(&CustomSection {
+        name: "lemma.abi".into(),
+        data: std::borrow::Cow::Owned(abi_bytes),
+    });
+
+    let meta_bytes = metadata::build_metadata(contract);
+    module.section(&CustomSection {
+        name: "lemma.meta".into(),
+        data: std::borrow::Cow::Owned(meta_bytes),
+    });
 
     Ok(module.finish())
 }

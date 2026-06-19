@@ -222,15 +222,119 @@ pub(crate) const IMPORT_ORDER: &[&str] = &[
 /// correct when new imports are appended.
 pub(crate) const HOST_IMPORT_COUNT: u32 = IMPORT_ORDER.len() as u32;
 
-// ── ABI descriptor emission ───────────────────────────────────────────────────
+// ── ABI descriptor emission (P3·Step 6i) ─────────────────────────────────────
 
-/// Build the contract ABI descriptor (JSON) for off-chain callers.
+use serde::Serialize;
+
+use crate::parser::Visibility;
+use crate::type_checker::types::SymbolSig;
+
+use super::wasm::{compute_selector, type_canonical_name};
+
+/// A single parameter in the ABI descriptor.
 ///
-/// **Stub** — real ABI emission (function selectors, argument types) is P3·Step 6i.
-/// Returns empty bytes; callers should not treat empty as an error in this phase.
-// consumer: codegen/wasm.rs ABI custom-section embed (P3·Step 6i)
-pub(crate) fn build_abi(_contract: &TypedContract<'_>) -> Vec<u8> {
-    vec![]
+/// `type` is the canonical Lem type name (e.g. `"Address"`, `"u128"`, `"bool"`).
+#[derive(Serialize)]
+struct ParamDescriptor {
+    name: String,
+    #[serde(rename = "type")]
+    ty: String,
+}
+
+/// ABI descriptor for one public contract function.
+///
+/// `selector` is the 4-byte LE blake3 dispatch selector used in calldata
+/// (see `compute_selector` in `wasm.rs` and DB-A53 §4.5).
+#[derive(Serialize)]
+struct FunctionDescriptor {
+    name: String,
+    /// 4-byte LE function selector (u32). Callers encode as little-endian bytes.
+    selector: u32,
+    params: Vec<ParamDescriptor>,
+    /// Canonical return type name, or `"()"` for unit functions.
+    returns: String,
+}
+
+/// Build the contract ABI descriptor as a JSON byte array.
+///
+/// Returns a UTF-8 JSON `[{"name":…,"selector":…,"params":[…],"returns":…}, …]`
+/// array containing one entry per **public** contract function (visibility `pub`
+/// or `external`). Private functions and modifiers are excluded.
+///
+/// The output is embedded in the `"lemma.abi"` WASM custom section by
+/// `emit_module` (P3·Step 6i). It is also the basis for off-chain ABI tooling
+/// (SDK ABI encoding, explorer display, wallet contract interaction).
+///
+/// ## Determinism
+///
+/// Functions are emitted in the order returned by [`TypedContract::functions`],
+/// which preserves source declaration order. Param names and types come from
+/// the resolved symbol arena (deterministic across compilations of the same
+/// source). The JSON serializer is deterministic for structs (no map iteration).
+///
+/// ## Error handling
+///
+/// If a function's selector cannot be computed (missing symbol — should not
+/// occur for well-formed programs), that function is silently skipped rather
+/// than failing the whole build. The selector computation is best-effort here;
+/// codegen's dispatch emit catches genuine failures at compile time.
+// consumer: codegen/wasm.rs "lemma.abi" custom-section embed (P3·Step 6i)
+pub(crate) fn build_abi(contract: &TypedContract<'_>) -> Vec<u8> {
+    let mut descriptors: Vec<FunctionDescriptor> = Vec::new();
+
+    for func in contract.functions() {
+        // Include only externally-callable functions.
+        // Modifiers, private helpers, and receive/fallback specials are
+        // dispatched differently (not via the selector mechanism).
+        if !matches!(func.visibility, Visibility::Pub | Visibility::External) {
+            continue;
+        }
+
+        // Compute 4-byte selector (blake3 over canonical signature string).
+        let selector = match compute_selector(&func, contract) {
+            Ok(s) => s,
+            // Best-effort: skip if selector is not computable.
+            // This should not occur for well-formed, type-checked contracts.
+            Err(_) => continue,
+        };
+
+        // Resolve parameter names + canonical types from the symbol arena.
+        // The FnSig carries (name: String, ty: ResolvedType, has_default: bool).
+        let params: Vec<ParamDescriptor> = match func.symbol_id {
+            Some(sym_id) => match contract.sig(sym_id) {
+                Some(SymbolSig::Function(fn_sig)) => fn_sig
+                    .params
+                    .iter()
+                    .map(|(name, ty, _)| ParamDescriptor {
+                        name: name.clone(),
+                        ty: type_canonical_name(ty),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+
+        // Return type — Unit/no-annotation functions use "()" for ABI consumers.
+        let returns = func
+            .return_type
+            .as_ref()
+            .map(type_canonical_name)
+            .unwrap_or_else(|| "()".into());
+
+        descriptors.push(FunctionDescriptor {
+            name: func.name.to_owned(),
+            selector,
+            params,
+            returns,
+        });
+    }
+
+    // Serialize to JSON bytes. Infallible for our fully-serializable types
+    // (structs with String/u32/Vec fields). unwrap_or_default returns empty
+    // on the impossible error (serde_json only fails for non-serializable types
+    // or recursive references, which our types don't have).
+    serde_json::to_vec(&descriptors).unwrap_or_default()
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

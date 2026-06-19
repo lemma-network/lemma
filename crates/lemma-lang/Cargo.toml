@@ -6,6 +6,8 @@ description = "Lem language: lexer, parser, type checker, safety analyzer (12 ru
 
 [dependencies]
 serde = { workspace = true }
+# JSON serialization — ABI descriptors and "lemma.meta" custom section (P3·Step 6i)
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 bech32 = { workspace = true }
 lemma-core = { path = "../lemma-core" }

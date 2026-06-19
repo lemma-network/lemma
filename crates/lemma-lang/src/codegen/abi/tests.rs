@@ -17,6 +17,10 @@ use crate::codegen::abi::{
 use crate::type_checker::TypedAst;
 use crate::{parse, tokenize};
 
+// `serde_json` is available as a dev-dep via the workspace (P3·Step 6i tests).
+// It is used in the build_abi functional tests below to parse and inspect the
+// emitted JSON without hardcoding byte offsets.
+
 // ─── Shared fixtures ──────────────────────────────────────────────────────────
 
 fn typed_ast_for(src: &str) -> TypedAst {
@@ -309,30 +313,83 @@ fn adding_to_end_of_import_order_would_not_shift_existing_indices() {
     );
 }
 
-// ─── build_abi — stub contract ────────────────────────────────────────────────
+// ─── build_abi — functional tests (P3·Step 6i) ───────────────────────────────
 
 #[test]
-fn build_abi_returns_empty_bytes_in_stub_phase() {
-    // In P3·Step 6b the ABI emitter is still a stub — it returns empty bytes.
-    // Full ABI emission (function signatures, parameter/return type encoding)
-    // is implemented in P3·Step 6i.
+fn build_abi_empty_contract_returns_empty_json_array() {
+    // A contract with no public functions produces a valid empty JSON array.
     let typed = typed_ast_for("contract Foo {}");
     let contracts = typed.contracts();
     let abi_bytes = build_abi(&contracts[0]);
+    let json: serde_json::Value =
+        serde_json::from_slice(&abi_bytes).expect("build_abi must return valid JSON");
+    assert!(json.is_array(), "ABI JSON must be an array, got: {json}");
     assert_eq!(
-        abi_bytes,
-        Vec::<u8>::new(),
-        "expected empty ABI bytes in stub phase, got {} bytes",
-        abi_bytes.len()
+        json.as_array().unwrap().len(),
+        0,
+        "empty contract ABI must have zero entries"
     );
 }
 
 #[test]
-fn build_abi_is_deterministic_in_stub_phase() {
-    // Even the stub must be deterministic (AGENTS §7.1).
-    let typed = typed_ast_for("contract Foo {}");
+fn build_abi_includes_public_function() {
+    // A public function appears in the ABI with correct name and param types.
+    let typed = typed_ast_for("contract C { pub fn transfer(to: Address, amount: u128) { } }");
+    let contracts = typed.contracts();
+    let abi_bytes = build_abi(&contracts[0]);
+    let json: serde_json::Value = serde_json::from_slice(&abi_bytes).expect("valid JSON");
+    let fns = json.as_array().expect("array");
+    assert_eq!(fns.len(), 1, "expected exactly 1 public function");
+
+    let f = &fns[0];
+    assert_eq!(f["name"], "transfer");
+    assert!(f["selector"].is_number(), "selector must be a number");
+
+    let params = f["params"].as_array().expect("params must be array");
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0]["name"], "to");
+    assert_eq!(params[0]["type"], "Address");
+    assert_eq!(params[1]["name"], "amount");
+    assert_eq!(params[1]["type"], "u128");
+}
+
+#[test]
+fn build_abi_excludes_private_function() {
+    // Private functions must NOT appear in the ABI.
+    let typed = typed_ast_for("contract C { fn internal_helper() { } pub fn visible() { } }");
+    let contracts = typed.contracts();
+    let abi_bytes = build_abi(&contracts[0]);
+    let json: serde_json::Value = serde_json::from_slice(&abi_bytes).expect("valid JSON");
+    let fns = json.as_array().expect("array");
+
+    assert!(
+        fns.iter().all(|f| f["name"] != "internal_helper"),
+        "private function must not appear in ABI"
+    );
+    assert_eq!(fns.len(), 1, "only the public function should be in ABI");
+    assert_eq!(fns[0]["name"], "visible");
+}
+
+#[test]
+fn build_abi_return_type_is_present() {
+    // Return types are emitted correctly.
+    let typed = typed_ast_for(
+        "contract C { pub fn get_balance(owner: Address) -> u128 { return 0u128; } }",
+    );
+    let contracts = typed.contracts();
+    let abi_bytes = build_abi(&contracts[0]);
+    let json: serde_json::Value = serde_json::from_slice(&abi_bytes).expect("valid JSON");
+    let fns = json.as_array().expect("array");
+    assert_eq!(fns.len(), 1);
+    assert_eq!(fns[0]["returns"], "u128");
+}
+
+#[test]
+fn build_abi_is_deterministic() {
+    // Two calls on the same contract must produce byte-identical JSON (AGENTS §7.1).
+    let typed = typed_ast_for("contract C { pub fn f(x: u64) -> bool { return true; } }");
     let contracts = typed.contracts();
     let first = build_abi(&contracts[0]);
     let second = build_abi(&contracts[0]);
-    assert_eq!(first, second, "build_abi stub is not deterministic");
+    assert_eq!(first, second, "build_abi must be deterministic");
 }

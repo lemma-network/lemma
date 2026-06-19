@@ -3121,6 +3121,91 @@ fn is_contract_returns_codegen_error() {
     );
 }
 
+// ── Custom section tests (P3·Step 6i) ────────────────────────────────────────
+//
+// Verify that emit_module appends both "lemma.abi" and "lemma.meta" WASM
+// custom sections and that their content is valid UTF-8 JSON.
+
+/// Scan a WASM binary for a named custom section; return its data bytes if found.
+///
+/// Uses `wasmparser` (the same org as wasm-encoder) so the search is
+/// spec-correct — no byte offset arithmetic.
+fn find_custom_section(wasm: &[u8], name: &str) -> Option<Vec<u8>> {
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        if let Ok(wasmparser::Payload::CustomSection(cs)) = payload {
+            if cs.name() == name {
+                return Some(cs.data().to_vec());
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn emit_module_contains_lemma_abi_custom_section() {
+    // Every compiled contract must have a "lemma.abi" custom section.
+    let typed = typed_ast_for("contract Foo {}");
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    assert!(
+        find_custom_section(&bytes, "lemma.abi").is_some(),
+        "emitted WASM must contain a 'lemma.abi' custom section"
+    );
+}
+
+#[test]
+fn emit_module_contains_lemma_meta_custom_section() {
+    // Every compiled contract must have a "lemma.meta" custom section.
+    let typed = typed_ast_for("contract Foo {}");
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    assert!(
+        find_custom_section(&bytes, "lemma.meta").is_some(),
+        "emitted WASM must contain a 'lemma.meta' custom section"
+    );
+}
+
+#[test]
+fn emit_module_lemma_abi_section_is_valid_json() {
+    // "lemma.abi" data must be parseable UTF-8 JSON.
+    // Use u64/bool — types currently supported by codegen; Address is deferred.
+    let typed = typed_ast_for("contract C { pub fn get_value(x: u64) -> u64 { return x; } }");
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    let data =
+        find_custom_section(&bytes, "lemma.abi").expect("'lemma.abi' section must be present");
+    let json: serde_json::Value =
+        serde_json::from_slice(&data).expect("'lemma.abi' must be valid JSON");
+    assert!(
+        json.is_array(),
+        "'lemma.abi' JSON must be an array, got: {json}"
+    );
+    // One public function → one ABI entry.
+    assert_eq!(json.as_array().unwrap().len(), 1);
+    assert_eq!(json[0]["name"], "get_value");
+}
+
+#[test]
+fn emit_module_lemma_meta_section_is_valid_json() {
+    // "lemma.meta" data must be parseable UTF-8 JSON with the expected top-level keys.
+    let typed = typed_ast_for("contract MyToken {}");
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("emit_module failed");
+    let data =
+        find_custom_section(&bytes, "lemma.meta").expect("'lemma.meta' section must be present");
+    let json: serde_json::Value =
+        serde_json::from_slice(&data).expect("'lemma.meta' must be valid JSON");
+    assert!(json.is_object(), "'lemma.meta' JSON must be an object");
+    assert_eq!(json["contract"], "MyToken");
+    assert!(
+        json["compiler"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("lemma-lang/"),
+        "compiler field must start with 'lemma-lang/'"
+    );
+}
+
 // ── Address constant unknown field error ─────────────────────────────────────
 
 #[test]

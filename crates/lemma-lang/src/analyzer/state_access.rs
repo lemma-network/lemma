@@ -47,6 +47,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+
 use crate::parser::{Expr, Param, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_expr, walk_stmt, Visitor};
@@ -68,7 +70,8 @@ use super::util::is_self;
 /// available — lemma-lang must not depend on lemma-vm (AGENTS §8).
 ///
 /// `Ord` is derived for deterministic `BTreeSet` iteration (AGENTS §7.1).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// `Serialize` is derived for JSON embedding in the `"lemma.meta"` custom section (P3·Step 6i).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum AccessKey {
     /// Whole field, no keying.  e.g. `self.totalSupply`, `self.paused`.
     Field(String),
@@ -99,7 +102,8 @@ pub enum AccessKey {
 /// Per-function state-access summary produced by [`analyze_state_access`].
 ///
 /// `reads`/`writes` use [`BTreeSet`] for deterministic iteration (AGENTS §7.1).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// `Serialize` is derived for JSON embedding in the `"lemma.meta"` custom section (P3·Step 6i).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct StateAccessInfo {
     /// Slots read by the function (direct body + transitive callees + modifiers).
     pub reads: BTreeSet<AccessKey>,
