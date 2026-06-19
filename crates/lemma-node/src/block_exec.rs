@@ -272,10 +272,22 @@ fn apply_one_write(
 
         // ── Code ──────────────────────────────────────────────────────────────
         (StateKey::Code(addr), StateValue::Code(Some(bytecode))) => {
-            // Record code_hash in the account (included in state_root).
-            // TODO(Phase 3): store bytecode bytes in a CF_CODE column family
-            // keyed by code_hash, so the executor can load it on ContractCall.
+            // Compute code_hash = blake3(bytecode) — canonical Blake3 primitive
+            // (AGENTS §2.2). Used as both the CF_CODE key and the account pointer.
             let code_hash = lemma_crypto::hash_bytes(bytecode);
+
+            // Store bytecode in CF_CODE (content-addressed, append-only).
+            // WorldState::put_code is idempotent: if code_hash already exists,
+            // it returns Ok(()) immediately without overwriting (DB-A23).
+            // This closes the TODO(Phase 3) that was here: bytecode is now
+            // persisted in CF_CODE so execute_call can load it on ContractCall
+            // via account.code_hash → CF_CODE[code_hash] → bytecode.
+            // StorageError → NodeError via #[from] (error.rs).
+            world.put_code(&code_hash, bytecode)?;
+
+            // Record code_hash in the account trie (included in state_root).
+            // The account holds only the 32-byte thin pointer (DB-A22); the
+            // full bytecode lives in CF_CODE keyed by code_hash.
             let mut account = world.get_account(addr)?.unwrap_or_default();
             account.code_hash = code_hash;
             world.put_account(addr, &account)?;

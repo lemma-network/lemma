@@ -1173,3 +1173,163 @@ fn per_byte_gas_scales_with_data_size() {
         min_expected,
     );
 }
+
+// ── Cold/warm code access tests (08-EXECUTION_SPEC §3.4(c), DB-A22) ──────────
+
+/// Verifies that the first call to a contract in a block charges the cold
+/// surcharge, and the second call to the same contract does not.
+///
+/// Acceptance criteria 3 and 4: first call charges code_cold_surcharge;
+/// second call to same code_hash in same block does not.
+#[test]
+fn first_call_charges_cold_surcharge_second_call_does_not() {
+    let schedule = GasSchedule::devnet();
+    // Use a single Executor instance (same block scope) for both calls.
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    // Deploy the noop contract.
+    let deploy = deploy_tx(sender, NOOP_WAT.to_vec(), 0, 500_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+
+    // First call — code-cold: must charge code_cold_surcharge.
+    let call1 = call_tx(sender, contract_addr, 1, 500_000);
+    let receipt1 = executor.execute_transaction(&call1, test_block(sender), &mut state);
+    assert!(receipt1.success, "first call must succeed");
+    let gas_first = receipt1.gas_used;
+
+    // Second call — code-warm: same code_hash, same Executor (same block).
+    // Must NOT charge code_cold_surcharge again.
+    let call2 = call_tx(sender, contract_addr, 2, 500_000);
+    let receipt2 = executor.execute_transaction(&call2, test_block(sender), &mut state);
+    assert!(receipt2.success, "second call must succeed");
+    let gas_second = receipt2.gas_used;
+
+    // The difference between first and second call gas must be exactly the
+    // cold surcharge (all other costs are identical: same bytecode, same tx).
+    let cold_surcharge = schedule.code_cold_surcharge.as_u64();
+    assert!(
+        gas_first > gas_second,
+        "first (cold) call must use more gas than second (warm) call: \
+         first={gas_first}, second={gas_second}"
+    );
+    assert_eq!(
+        gas_first - gas_second,
+        cold_surcharge,
+        "gas difference must equal exactly code_cold_surcharge ({cold_surcharge}): \
+         first={gas_first}, second={gas_second}, diff={}",
+        gas_first - gas_second,
+    );
+}
+
+/// Verifies that two contracts with the same bytecode (same code_hash) share
+/// the warm set: the second contract call is warm even though it is a different
+/// contract address.
+///
+/// Acceptance criterion 7: two contracts with same code_hash — second is warm.
+#[test]
+fn two_contracts_same_code_hash_second_is_warm() {
+    let schedule = GasSchedule::devnet();
+    // Single Executor for both calls (same block scope).
+    let executor = test_executor();
+    let sender_a = test_address(1);
+    let sender_b = test_address(2);
+    let mut state = InMemoryStateView::new();
+
+    // Deploy the same bytecode from two different senders → two different
+    // contract addresses, but identical code_hash (blake3(NOOP_WAT)).
+    let deploy_a = deploy_tx(sender_a, NOOP_WAT.to_vec(), 0, 500_000);
+    let receipt_a = executor.execute_transaction(&deploy_a, test_block(sender_a), &mut state);
+    assert!(receipt_a.success, "first deploy must succeed");
+
+    let deploy_b = deploy_tx(sender_b, NOOP_WAT.to_vec(), 0, 500_000);
+    let receipt_b = executor.execute_transaction(&deploy_b, test_block(sender_b), &mut state);
+    assert!(receipt_b.success, "second deploy must succeed");
+
+    let addr_a = Address::from_deployer(&sender_a, 0);
+    let addr_b = Address::from_deployer(&sender_b, 0);
+
+    // Call contract A first — code-cold (first call to this code_hash in block).
+    let call_a = call_tx(sender_a, addr_a, 1, 500_000);
+    let call_receipt_a = executor.execute_transaction(&call_a, test_block(sender_a), &mut state);
+    assert!(call_receipt_a.success, "call to contract A must succeed");
+    let gas_cold = call_receipt_a.gas_used;
+
+    // Call contract B — code-warm (same code_hash already in warm set).
+    // Even though it is a different contract address, the code_hash is identical.
+    let call_b = call_tx(sender_b, addr_b, 1, 500_000);
+    let call_receipt_b = executor.execute_transaction(&call_b, test_block(sender_b), &mut state);
+    assert!(call_receipt_b.success, "call to contract B must succeed");
+    let gas_warm = call_receipt_b.gas_used;
+
+    // Contract B call must be warm: gas difference = code_cold_surcharge.
+    let cold_surcharge = schedule.code_cold_surcharge.as_u64();
+    assert!(
+        gas_cold > gas_warm,
+        "cold call (A) must use more gas than warm call (B): \
+         cold={gas_cold}, warm={gas_warm}"
+    );
+    assert_eq!(
+        gas_cold - gas_warm,
+        cold_surcharge,
+        "gas difference must equal exactly code_cold_surcharge ({cold_surcharge}): \
+         cold={gas_cold}, warm={gas_warm}, diff={}",
+        gas_cold - gas_warm,
+    );
+}
+
+/// Verifies that a new Executor (new block) resets the warm set: the same
+/// contract is cold again in the next block.
+///
+/// Acceptance criterion 4 (block boundary reset): warm set resets per block.
+#[test]
+fn new_executor_resets_warm_set_contract_is_cold_again() {
+    let schedule = GasSchedule::devnet();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    // Deploy the noop contract using a fresh executor (block 1).
+    let executor_block1 = test_executor();
+    let deploy = deploy_tx(sender, NOOP_WAT.to_vec(), 0, 500_000);
+    let deploy_receipt =
+        executor_block1.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+
+    // First call in block 1 — cold.
+    let call1 = call_tx(sender, contract_addr, 1, 500_000);
+    let receipt_block1 =
+        executor_block1.execute_transaction(&call1, test_block(sender), &mut state);
+    assert!(receipt_block1.success, "block 1 call must succeed");
+    let gas_block1 = receipt_block1.gas_used;
+
+    // New Executor for block 2 — warm set is reset.
+    let executor_block2 = test_executor();
+
+    // First call in block 2 — cold again (new Executor, fresh warm set).
+    let call2 = call_tx(sender, contract_addr, 2, 500_000);
+    let receipt_block2 =
+        executor_block2.execute_transaction(&call2, test_block(sender), &mut state);
+    assert!(receipt_block2.success, "block 2 call must succeed");
+    let gas_block2 = receipt_block2.gas_used;
+
+    // Both calls are cold (different Executor instances) — gas must be equal.
+    assert_eq!(
+        gas_block1, gas_block2,
+        "both calls are cold (new Executor per block): \
+         block1={gas_block1}, block2={gas_block2}"
+    );
+
+    // Verify the cold surcharge is included in both (gas > warm baseline).
+    // A warm call would be gas_block1 - cold_surcharge.
+    let cold_surcharge = schedule.code_cold_surcharge.as_u64();
+    assert!(
+        gas_block1 >= cold_surcharge,
+        "cold call gas ({gas_block1}) must be at least the cold surcharge ({cold_surcharge})"
+    );
+}

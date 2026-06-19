@@ -31,7 +31,8 @@
 
 pub mod linker;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 
 use lemma_core::{
     address::Address,
@@ -63,8 +64,25 @@ const ENTRY_POINT: &str = "call";
 
 /// Single-transaction executor with panic-free settlement.
 ///
-/// Create once at node startup (or per-test) and reuse across transactions.
-/// The engine is cheaply cloneable (`Arc`-backed); the schedule is `Copy`.
+/// Create once per block (see `execute_committed_block`) and reuse across
+/// transactions within that block. The engine is cheaply cloneable
+/// (`Arc`-backed); the schedule is `Copy`.
+///
+/// ## Cold/warm code tracking (08-EXECUTION_SPEC §3.4(c), DB-A22)
+///
+/// `warm_code` tracks which `code_hash` values have already been charged the
+/// `code_cold_surcharge` in the current block. The first call to a given
+/// `code_hash` in a block is "cold" — it charges the flat AOT-compile
+/// surcharge. Subsequent calls to the same `code_hash` in the same block are
+/// "warm" — no surcharge.
+///
+/// `Mutex<BTreeSet<Hash>>` provides thread-safe interior mutability so the
+/// parallel scheduler can share `&Executor` across worker threads while still
+/// updating the warm set. `BTreeSet` (not `HashSet`) for determinism
+/// (AGENTS.md §7.1).
+///
+/// The warm set resets at block boundaries because `Executor` is created fresh
+/// per block in `execute_committed_block`.
 ///
 /// # Settlement contract
 ///
@@ -75,17 +93,30 @@ pub struct Executor {
     engine: LemmaEngine,
     /// Named gas cost constants for all operation categories.
     schedule: GasSchedule,
+    /// Block-scoped warm code set: `code_hash` values already charged the
+    /// cold surcharge in this block (08-EXECUTION_SPEC §3.4(c), DB-A22).
+    ///
+    /// `Mutex` for thread-safe interior mutability (parallel scheduler shares
+    /// `&Executor` across workers). `BTreeSet` for determinism (AGENTS §7.1).
+    warm_code: Mutex<BTreeSet<Hash>>,
 }
 
 impl Executor {
     /// Create a new `Executor`.
     ///
+    /// Call once per block (not once at node startup) so the `warm_code` set
+    /// resets at block boundaries (08-EXECUTION_SPEC §3.4(c)).
+    ///
     /// # Arguments
     ///
-    /// * `engine` — shared [`LemmaEngine`] (create once at startup).
+    /// * `engine` — shared [`LemmaEngine`] (create once at startup, clone cheaply).
     /// * `schedule` — gas cost schedule (use [`GasSchedule::devnet`] for tests).
     pub fn new(engine: LemmaEngine, schedule: GasSchedule) -> Self {
-        Self { engine, schedule }
+        Self {
+            engine,
+            schedule,
+            warm_code: Mutex::new(BTreeSet::new()),
+        }
     }
 
     /// Execute a single transaction and return its receipt.
@@ -365,6 +396,35 @@ impl Executor {
                 .ok_or_else(|| VmError::InvalidParameter {
                     reason: format!("no contract deployed at {contract_addr}"),
                 })?;
+
+        // Cold/warm code access tracking (08-EXECUTION_SPEC §3.4(c), DB-A22).
+        //
+        // Compute the code_hash for this bytecode to determine cold vs warm.
+        // The warm set is block-scoped: first call to a code_hash in a block
+        // charges the flat AOT-compile surcharge; subsequent calls are warm
+        // (no surcharge — the compiled module is already in the engine cache).
+        //
+        // Gas is charged BEFORE execution (spec §3.1 rule 1, AGENTS §7.5).
+        // Surcharge is FLAT per cold module, NOT per-instruction.
+        //
+        // Mutex::lock() is infallible in practice (only panics if a thread
+        // holding the lock panicked — impossible here since we hold no lock
+        // across any panic boundary). The `expect` message is for diagnostics.
+        let code_hash = lemma_crypto::hash_bytes(&bytecode);
+        {
+            // Scope the lock guard so it is released before WASM execution.
+            let mut warm = self
+                .warm_code
+                .lock()
+                .expect("warm_code mutex poisoned — executor thread panicked");
+            if warm.insert(code_hash) {
+                // First call to this code_hash in this block: code-cold.
+                // Charge the flat surcharge BEFORE execution (spec §3.1 rule 1).
+                meter.charge(self.schedule.code_cold_surcharge)?;
+            }
+            // If insert() returned false, the hash was already present: code-warm.
+            // No surcharge — execution fuel only.
+        }
 
         // Compile the stored bytecode.
         let module = self.engine.compile_module(&bytecode)?;
