@@ -11,6 +11,7 @@ use lemma_core::{
     hash::Hash,
     signature::Signature,
     transaction::{Transaction, TxType},
+    MAX_CONTRACT_WASM_SIZE,
 };
 
 use crate::{
@@ -294,6 +295,176 @@ fn deploy_invalid_wasm_yields_failed_receipt() {
     assert!(
         state.code(&contract_addr).is_none(),
         "no code must be stored on failed deploy"
+    );
+}
+
+// ── Size gate tests (DB-A21) ──────────────────────────────────────────────────
+
+/// Verifies that a valid WASM deploy under the size limit succeeds.
+///
+/// Acceptance criterion 7: deploy succeeds for valid WASM under size limit.
+#[test]
+fn deploy_valid_wasm_under_size_limit_succeeds() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    // NOOP_WAT is well under MAX_CONTRACT_WASM_SIZE (2 MiB).
+    assert!(
+        NOOP_WAT.len() < MAX_CONTRACT_WASM_SIZE,
+        "NOOP_WAT must be under the size limit for this test to be meaningful"
+    );
+
+    let deploy = deploy_tx(sender, NOOP_WAT.to_vec(), 0, 500_000);
+    let receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+
+    assert!(receipt.success, "deploy under size limit must succeed");
+    assert!(receipt.gas_used > 0, "gas must be consumed");
+    assert!(receipt.gas_used <= deploy.gas_limit, "gas_used ≤ gas_limit");
+
+    // Bytecode stored at derived address.
+    let contract_addr = Address::from_deployer(&sender, 0);
+    assert!(
+        state.code(&contract_addr).is_some(),
+        "bytecode must be stored at derived address"
+    );
+}
+
+/// Verifies that an oversized deploy is rejected BEFORE deploy gas is charged (DB-A21).
+///
+/// Acceptance criteria 1 and 8: ContractTooLarge returned before deploy gas charged.
+///
+/// The size gate fires inside `execute_deploy` AFTER intrinsic gas is charged by
+/// `execute_transaction`. The spec "reject-before-charge" means no DEPLOY-specific
+/// gas is charged (no `deploy_base + deploy_storage_per_byte × len`). The intrinsic
+/// `tx_base` is still charged — the validator did work to receive and validate the
+/// tx structure; the DoS protection is against the AOT compiler.
+///
+/// We use a small oversized payload (MAX + 1 bytes of valid-looking data) with a
+/// gas limit large enough to cover intrinsic gas, so the size gate is the failure
+/// cause (not intrinsic OOG).
+#[test]
+fn deploy_oversized_wasm_rejected_with_contract_too_large_no_deploy_gas() {
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    // Build a bytecode that exceeds MAX_CONTRACT_WASM_SIZE by exactly 1 byte.
+    // Use a simple byte pattern — doesn't need to be valid WASM (size gate fires first).
+    let oversized = vec![0u8; MAX_CONTRACT_WASM_SIZE + 1];
+    let data_len = oversized.len() as u64;
+
+    // Gas limit must cover intrinsic gas so the size gate (not intrinsic OOG) fires.
+    // Intrinsic = tx_base (21_000) + tx_calldata_per_byte (16) × data_len.
+    let schedule = GasSchedule::devnet();
+    let intrinsic_cost =
+        schedule.tx_base.as_u64() + schedule.tx_calldata_per_byte.as_u64() * data_len;
+    // Add deploy_base + deploy_storage_per_byte × len as headroom (size gate fires before these).
+    let deploy_cost =
+        schedule.deploy_base.as_u64() + schedule.deploy_storage_per_byte.as_u64() * data_len;
+    let gas_limit = intrinsic_cost + deploy_cost + 100_000;
+
+    let deploy = deploy_tx(sender, oversized, 0, gas_limit);
+    let receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+
+    assert!(
+        !receipt.success,
+        "oversized deploy must produce failed receipt"
+    );
+    assert!(receipt.logs.is_empty(), "failed receipt must have no logs");
+
+    // gas_used must be ≤ gas_limit (always).
+    assert!(
+        receipt.gas_used <= gas_limit,
+        "gas_used ({}) must not exceed gas_limit ({})",
+        receipt.gas_used,
+        gas_limit
+    );
+
+    // No deploy gas charged — gas_used must equal only the intrinsic cost.
+    // The size gate fires before deploy_base or deploy_storage_per_byte are charged.
+    assert_eq!(
+        receipt.gas_used, intrinsic_cost,
+        "only intrinsic gas must be charged for oversized deploy (no deploy gas): \
+         expected {intrinsic_cost}, got {}",
+        receipt.gas_used
+    );
+
+    // No code stored at the derived address.
+    let contract_addr = Address::from_deployer(&sender, 0);
+    assert!(
+        state.code(&contract_addr).is_none(),
+        "no code must be stored for oversized deploy"
+    );
+
+    // Nonce still advances (failed tx still increments nonce).
+    assert_eq!(
+        state.nonce(&sender),
+        1,
+        "nonce advances even on failed deploy"
+    );
+}
+
+/// Verifies that a second deploy of identical bytecode charges less gas (DB-A23).
+///
+/// Acceptance criteria 3, 4, and 9: first deployer pays storage gas; later
+/// deployer pays only base gas (dedup savings).
+#[test]
+fn deploy_identical_bytecode_second_time_charges_less_gas() {
+    let executor = test_executor();
+    let sender_a = test_address(1);
+    let sender_b = test_address(2);
+    let mut state = InMemoryStateView::new();
+
+    // First deploy: sender_a deploys NOOP_WAT — pays storage gas.
+    let deploy_a = deploy_tx(sender_a, NOOP_WAT.to_vec(), 0, 500_000);
+    let receipt_a = executor.execute_transaction(&deploy_a, test_block(sender_a), &mut state);
+    assert!(receipt_a.success, "first deploy must succeed");
+    let gas_first = receipt_a.gas_used;
+
+    // Second deploy: sender_b deploys the SAME bytecode — pays only base gas.
+    let deploy_b = deploy_tx(sender_b, NOOP_WAT.to_vec(), 0, 500_000);
+    let receipt_b = executor.execute_transaction(&deploy_b, test_block(sender_b), &mut state);
+    assert!(
+        receipt_b.success,
+        "second deploy of identical bytecode must succeed"
+    );
+    let gas_second = receipt_b.gas_used;
+
+    // Second deployer must pay less gas than first deployer (dedup savings).
+    // First deployer: deploy_base + deploy_storage_per_byte × len + intrinsic.
+    // Second deployer: deploy_base + intrinsic (no storage gas).
+    assert!(
+        gas_second < gas_first,
+        "second deploy of identical bytecode must charge less gas: \
+         first={gas_first}, second={gas_second}"
+    );
+
+    // Both contracts are deployed at their respective addresses.
+    let addr_a = Address::from_deployer(&sender_a, 0);
+    let addr_b = Address::from_deployer(&sender_b, 0);
+    assert!(
+        state.code(&addr_a).is_some(),
+        "first contract must be deployed"
+    );
+    assert!(
+        state.code(&addr_b).is_some(),
+        "second contract must be deployed"
+    );
+
+    // Both can be called (bytecode is valid and accessible).
+    let call_a = call_tx(sender_a, addr_a, 1, 500_000);
+    let call_receipt_a = executor.execute_transaction(&call_a, test_block(sender_a), &mut state);
+    assert!(
+        call_receipt_a.success,
+        "call to first contract must succeed"
+    );
+
+    let call_b = call_tx(sender_b, addr_b, 1, 500_000);
+    let call_receipt_b = executor.execute_transaction(&call_b, test_block(sender_b), &mut state);
+    assert!(
+        call_receipt_b.success,
+        "call to second contract must succeed"
     );
 }
 

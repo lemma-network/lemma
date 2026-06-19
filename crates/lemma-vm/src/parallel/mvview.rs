@@ -231,6 +231,22 @@ impl<S: ContractStateView> ContractStateView for MvStateView<S> {
     fn set_code(&mut self, addr: &Address, code: Vec<u8>) {
         self.buffer(StateKey::Code(*addr), StateValue::Code(Some(code)));
     }
+
+    fn has_code_hash(&self, hash: &lemma_core::Hash) -> bool {
+        // MvStateView tracks code by address (StateKey::Code), not by hash.
+        // For the content-addressed dedup check (DB-A23), fall through to the
+        // base state which maintains the hash index (InMemoryStateView.code_by_hash
+        // or the production WorldState CF_CODE store).
+        //
+        // NOTE: This does NOT check buffered writes in the current incarnation.
+        // A same-block deploy of identical bytecode by a later tx will not see
+        // the earlier tx's write until it is committed to base. This is acceptable:
+        // the dedup is a gas-savings optimization, not a correctness invariant.
+        // Worst case: two txs in the same block both pay first-deployer gas.
+        // Intentional-deferred: full same-block dedup requires a CodeHash StateKey
+        // variant in MvState (tracked in living-notes Technical Debt).
+        self.base.has_code_hash(hash)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

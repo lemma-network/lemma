@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use lemma_core::{address::Address, amount::Amount};
+use lemma_core::{address::Address, amount::Amount, hash::Hash};
 
 // ── ContractStateView ─────────────────────────────────────────────────────────
 
@@ -144,6 +144,22 @@ pub trait ContractStateView {
     /// * `addr` — the contract address (derived via `Address::from_deployer`).
     /// * `code` — the compiled WASM bytecode to store.
     fn set_code(&mut self, addr: &Address, code: Vec<u8>);
+
+    /// Check whether bytecode with the given content hash is already stored.
+    ///
+    /// Used by the deploy path for content-addressed dedup (DB-A23): the first
+    /// deployer of a given bytecode pays storage gas; later deployers of identical
+    /// bytecode pay only the base pointer-write cost.
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` — the Blake3 hash of the bytecode to check.
+    ///
+    /// # Returns
+    ///
+    /// `true` if bytecode with this hash is already stored (in committed state
+    /// or in the current transaction's scratch), `false` otherwise.
+    fn has_code_hash(&self, hash: &Hash) -> bool;
 }
 
 // ── InMemoryStateView ─────────────────────────────────────────────────────────
@@ -167,6 +183,11 @@ pub struct InMemoryStateView {
     nonces: BTreeMap<Address, u64>,
     /// Deployed contract bytecode: `contract_address → WASM bytes`.
     code: BTreeMap<Address, Vec<u8>>,
+    /// Content-addressed bytecode store: `code_hash → WASM bytes` (DB-A23).
+    ///
+    /// Populated by `set_code` (which also inserts into `code` by address).
+    /// Used by `has_code_hash` to implement cross-transaction dedup checks.
+    code_by_hash: BTreeMap<Hash, Vec<u8>>,
 }
 
 impl InMemoryStateView {
@@ -177,6 +198,7 @@ impl InMemoryStateView {
             balances: BTreeMap::new(),
             nonces: BTreeMap::new(),
             code: BTreeMap::new(),
+            code_by_hash: BTreeMap::new(),
         }
     }
 
@@ -194,6 +216,7 @@ impl InMemoryStateView {
             balances,
             nonces: BTreeMap::new(),
             code: BTreeMap::new(),
+            code_by_hash: BTreeMap::new(),
         }
     }
 }
@@ -245,7 +268,15 @@ impl ContractStateView for InMemoryStateView {
     }
 
     fn set_code(&mut self, addr: &Address, code: Vec<u8>) {
+        // Also index by content hash for has_code_hash() dedup checks (DB-A23).
+        // lemma_crypto::hash_bytes is the canonical Blake3 primitive (AGENTS §2.2).
+        let hash = lemma_crypto::hash_bytes(&code);
+        self.code_by_hash.insert(hash, code.clone());
         self.code.insert(*addr, code);
+    }
+
+    fn has_code_hash(&self, hash: &Hash) -> bool {
+        self.code_by_hash.contains_key(hash)
     }
 }
 

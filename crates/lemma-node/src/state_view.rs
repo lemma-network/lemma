@@ -136,6 +136,12 @@ impl ContractStateView for WorldStateView {
     fn set_code(&mut self, _addr: &Address, _code: Vec<u8>) {
         unreachable!("WorldStateView is read-only — code writes route through MvStateView")
     }
+
+    fn has_code_hash(&self, hash: &Hash) -> bool {
+        // Delegate to WorldState::get_code (CF_CODE content-addressed store, DB-A23).
+        // Returns true if bytecode with this hash is already stored in committed state.
+        self.inner.get_code(hash).ok().flatten().is_some()
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
