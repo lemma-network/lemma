@@ -2718,7 +2718,8 @@ fn check_wf013_expr(expr: &Expr, typed_ast: &TypedAst, out: &mut Vec<TypeError>)
 ///
 /// **Token** (base):
 /// - Mandatory: `name` (Str), `symbol` (Str), `decimals` (Int), `maxSupply` (Int)
-/// - Optional: `maxWallet` (Int, bps), `approvalExpiry` (Unit or Int), `approvalOneTime` (Bool)
+/// - Optional: `maxWallet` (Int, bps), `approvalExpiry` (Unit or Int), `approvalOneTime` (Bool),
+///   `mintable`/`pausable`/`freezable`/`upgradeable` (Bool), `externalChecker` (Str)
 /// - Conditional: `maxWallet` present → contract must implement `isWalletExempt` or
 ///   have state field `walletExempt`
 ///
@@ -2728,8 +2729,9 @@ fn check_wf013_expr(expr: &Expr, typed_ast: &TypedAst, out: &mut Vec<TypeError>)
 /// - Optional: `maxFeePercent` (Int, bps, default = PROTOCOL_MAX_FEE_BPS)
 /// - Rule: `sum(fees.burn + fees.holders + fees.others) <= maxFeePercent <= PROTOCOL_MAX_FEE_BPS`
 /// - Rule: `fees.others > 0` → contract must implement `distributeTaxes`
-/// - Conditional (DB-A43): `fairLaunch` block if present →
-///   `{ cooldownBetweenBuys: Int, antiSnipeBlocks: Int }` both mandatory
+///
+/// Note: `antiHoneypot` removed (DB-A57) — protocol invariant, no opt-in flag.
+/// Note: `fairLaunch` removed (DB-A57) — SAFETY-024 retired, feature dropped.
 ///
 /// **NFT**:
 /// - Mandatory: `name` (Str), `symbol` (Str), `maxSupply` (Int)
@@ -2812,7 +2814,7 @@ fn check_wf014_token_config(typed_ast: &TypedAst) -> Vec<TypeError> {
                 // TaxToken has its own complete schema (Token mandatory keys +
                 // TaxToken-specific keys).  We do NOT call check_wf014_token_schema
                 // here because that function's unknown-key check would reject
-                // TaxToken-specific keys (maxFeePercent, fees, fairLaunch).
+                // TaxToken-specific keys (maxFeePercent, fees).
                 check_wf014_taxtoken_full_schema(
                     entries,
                     config_span,
@@ -2841,12 +2843,14 @@ fn check_wf014_token_config(typed_ast: &TypedAst) -> Vec<TypeError> {
 /// Validate the base Token schema.
 ///
 /// Mandatory: `name` (Str), `symbol` (Str), `decimals` (Int), `maxSupply` (Int)
-/// Optional: `antiHoneypot` (Bool, §24.1 anti-scam flag — enables SAFETY-001),
-///           `maxWallet` (Int, bps), `approvalExpiry` (Unit or Int), `approvalOneTime` (Bool),
-///           `mintable` (Bool), `pausable` (Bool), `freezable` (Bool), `upgradeable` (Bool),
-///           `fairLaunch` (Object — §24.8, available to both Token and TaxToken)
+/// Optional: `maxWallet` (Int, bps), `approvalExpiry` (Unit or Int), `approvalOneTime` (Bool),
+///           `mintable` (Bool), `pausable` (Bool), `freezable` (Bool), `upgradeable` (Bool)
 /// Unknown keys: rejected.
 /// Conditional: `maxWallet` present → `isWalletExempt` fn or `walletExempt` state field.
+///
+/// Note: `antiHoneypot` removed (DB-A57) — anti-honeypot is a protocol invariant,
+/// SAFETY-001 fires unconditionally for all tokens.
+/// Note: `fairLaunch` removed (DB-A57) — SAFETY-024 retired, feature dropped.
 fn check_wf014_token_schema(
     entries: &[crate::parser::ConfigEntry],
     config_span: crate::lexer::token::Span,
@@ -2856,10 +2860,7 @@ fn check_wf014_token_schema(
 ) {
     const MANDATORY: &[&str] = &["name", "symbol", "decimals", "maxSupply"];
     // Capability flags (mintable/pausable/freezable/upgradeable) are ratchet-off booleans.
-    // antiHoneypot: §24.1 anti-scam flag — enables SAFETY-001 symmetric sell-path check.
-    // fairLaunch: §24.8 launch-window protections — available to both Token and TaxToken.
     const OPTIONAL: &[&str] = &[
-        "antiHoneypot",
         "maxWallet",
         "approvalExpiry",
         "approvalOneTime",
@@ -2867,7 +2868,6 @@ fn check_wf014_token_schema(
         "pausable",
         "freezable",
         "upgradeable",
-        "fairLaunch",
         // §3-010 (SAFETY-010): declares the address of an external transfer
         // checker, making a transfer-path external call explicit + monitored.
         "externalChecker",
@@ -2921,13 +2921,9 @@ fn check_wf014_token_schema(
                 "approvalExpiry" => {
                     matches!(entry.value, ConfigValue::Unit(_, _) | ConfigValue::Int(_))
                 }
-                // §24.1 anti-scam flag (Bool) — enables SAFETY-001 symmetric sell-path check.
-                "antiHoneypot" | "approvalOneTime" | "mintable" | "pausable" | "freezable"
-                | "upgradeable" => {
+                "approvalOneTime" | "mintable" | "pausable" | "freezable" | "upgradeable" => {
                     matches!(entry.value, ConfigValue::Bool(_))
                 }
-                // §24.8 fairLaunch block — validated separately below.
-                "fairLaunch" => matches!(entry.value, ConfigValue::Object(_)),
                 // §3-010 externalChecker: an address literal (string form).
                 "externalChecker" => matches!(entry.value, ConfigValue::Str(_)),
                 _ => true,
@@ -2964,46 +2960,6 @@ fn check_wf014_token_schema(
                 });
             }
         }
-    }
-
-    // Conditional (§24.8): fairLaunch block if present →
-    // { cooldownBetweenBuys: Int, antiSnipeBlocks: Int, duration: Int } all mandatory.
-    // Token and TaxToken both support fairLaunch (spec §24.8).
-    // `duration` added per DB-A43 — SAFETY-024 requires a self-expiring launch window.
-    if let Some(fl_entry) = entry_map.get("fairLaunch") {
-        if let ConfigValue::Object(fl_entries) = &fl_entry.value {
-            let fl_map: BTreeMap<&str, &crate::parser::ConfigEntry> =
-                fl_entries.iter().map(|e| (e.key.as_str(), e)).collect();
-            for key in &["cooldownBetweenBuys", "antiSnipeBlocks", "duration"] {
-                match fl_map.get(key) {
-                    None => {
-                        out.push(TypeError {
-                            kind: TypeErrorKind::InvalidTokenConfig {
-                                reason: format!(
-                                    "`fairLaunch` block is missing mandatory key `{key}`"
-                                ),
-                                span: fl_entry.span,
-                            },
-                            span: fl_entry.span,
-                            message: format!("WF-014: `fairLaunch` block missing `{key}`"),
-                        });
-                    }
-                    Some(fl_key_entry) => {
-                        if !matches!(fl_key_entry.value, ConfigValue::Int(_)) {
-                            out.push(TypeError {
-                                kind: TypeErrorKind::InvalidTokenConfig {
-                                    reason: format!("`fairLaunch.{key}` must be an integer"),
-                                    span: fl_key_entry.span,
-                                },
-                                span: fl_key_entry.span,
-                                message: format!("WF-014: `fairLaunch.{key}` must be an integer"),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        // Non-object fairLaunch is already caught by the type check above.
     }
 
     // Unknown keys: reject any key not in MANDATORY ∪ OPTIONAL.
@@ -3045,10 +3001,12 @@ fn check_wf014_token_schema(
 /// TaxToken known keys:
 /// - Mandatory (from Token): `name` (Str), `symbol` (Str), `decimals` (Int), `maxSupply` (Int)
 /// - Mandatory (TaxToken): `fees` block `{ burn: Int(bps), holders: Int(bps), others: Int(bps) }`
-/// - Optional (from Token): `antiHoneypot` (Bool, §24.1 anti-scam flag),
-///   `maxWallet` (Int, bps), `approvalExpiry`, `approvalOneTime` (Bool),
+/// - Optional (from Token): `maxWallet` (Int, bps), `approvalExpiry`, `approvalOneTime` (Bool),
 ///   `mintable` (Bool), `pausable` (Bool), `freezable` (Bool), `upgradeable` (Bool)
-/// - Optional (TaxToken): `maxFeePercent` (Int, bps), `fairLaunch` block (§24.8)
+/// - Optional (TaxToken): `maxFeePercent` (Int, bps)
+///
+/// Note: `antiHoneypot` removed (DB-A57) — protocol invariant, no opt-in flag.
+/// Note: `fairLaunch` removed (DB-A57) — SAFETY-024 retired, feature dropped.
 fn check_wf014_taxtoken_full_schema(
     entries: &[crate::parser::ConfigEntry],
     config_span: crate::lexer::token::Span,
@@ -3063,8 +3021,7 @@ fn check_wf014_taxtoken_full_schema(
         "symbol",
         "decimals",
         "maxSupply",
-        // Token optional — §24.1 anti-scam flag (enables SAFETY-001).
-        "antiHoneypot",
+        // Token optional
         "maxWallet",
         "approvalExpiry",
         "approvalOneTime",
@@ -3076,7 +3033,6 @@ fn check_wf014_taxtoken_full_schema(
         "fees",
         // TaxToken optional
         "maxFeePercent",
-        "fairLaunch",
         // §3-010 (SAFETY-010): external transfer-checker address declaration.
         "externalChecker",
     ];
@@ -3122,9 +3078,7 @@ fn check_wf014_taxtoken_full_schema(
     }
 
     // Check Token optional keys (shared with Token schema).
-    // antiHoneypot: §24.1 anti-scam flag — enables SAFETY-001 symmetric sell-path check.
     for key in &[
-        "antiHoneypot",
         "maxWallet",
         "approvalExpiry",
         "approvalOneTime",
@@ -3140,9 +3094,7 @@ fn check_wf014_taxtoken_full_schema(
                 "approvalExpiry" => {
                     matches!(entry.value, ConfigValue::Unit(_, _) | ConfigValue::Int(_))
                 }
-                // §24.1 anti-scam flag (Bool) — enables SAFETY-001.
-                "antiHoneypot" | "approvalOneTime" | "mintable" | "pausable" | "freezable"
-                | "upgradeable" => {
+                "approvalOneTime" | "mintable" | "pausable" | "freezable" | "upgradeable" => {
                     matches!(entry.value, ConfigValue::Bool(_))
                 }
                 // §3-010 externalChecker: an address literal (string form).
@@ -3220,8 +3172,6 @@ fn check_wf014_taxtoken_full_schema(
 /// Optional: `maxFeePercent` (Int, bps)
 /// Rule: `sum(fees.*) <= maxFeePercent <= PROTOCOL_MAX_FEE_BPS`
 /// Rule: `fees.others > 0` → `distributeTaxes` function must exist
-/// Conditional (DB-A43): `fairLaunch` block if present →
-///   `{ cooldownBetweenBuys: Int, antiSnipeBlocks: Int }` both mandatory
 fn check_wf014_taxtoken_schema(
     entries: &[crate::parser::ConfigEntry],
     config_span: crate::lexer::token::Span,
@@ -3409,60 +3359,6 @@ fn check_wf014_taxtoken_schema(
                     },
                     span: entry.span,
                     message: "WF-014: `maxFeePercent` must be an integer (bps mandate)".into(),
-                });
-            }
-        }
-    }
-
-    // Conditional (DB-A43): fairLaunch block if present →
-    // { cooldownBetweenBuys: Int, antiSnipeBlocks: Int, duration: Int } all mandatory.
-    // `duration` added per DB-A43 — SAFETY-024 requires a self-expiring launch window.
-    if let Some(fl_entry) = entry_map.get("fairLaunch") {
-        match &fl_entry.value {
-            ConfigValue::Object(fl_entries) => {
-                let fl_map: BTreeMap<&str, &crate::parser::ConfigEntry> =
-                    fl_entries.iter().map(|e| (e.key.as_str(), e)).collect();
-                for key in &["cooldownBetweenBuys", "antiSnipeBlocks", "duration"] {
-                    match fl_map.get(key) {
-                        None => {
-                            out.push(TypeError {
-                                kind: TypeErrorKind::InvalidTokenConfig {
-                                    reason: format!(
-                                        "`fairLaunch` block is missing mandatory key `{key}`"
-                                    ),
-                                    span: fl_entry.span,
-                                },
-                                span: fl_entry.span,
-                                message: format!("WF-014: `fairLaunch` block missing `{key}`"),
-                            });
-                        }
-                        Some(fl_key_entry) => {
-                            if !matches!(fl_key_entry.value, ConfigValue::Int(_)) {
-                                out.push(TypeError {
-                                    kind: TypeErrorKind::InvalidTokenConfig {
-                                        reason: format!("`fairLaunch.{key}` must be an integer"),
-                                        span: fl_key_entry.span,
-                                    },
-                                    span: fl_key_entry.span,
-                                    message: format!(
-                                        "WF-014: `fairLaunch.{key}` must be an integer"
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {
-                out.push(TypeError {
-                    kind: TypeErrorKind::InvalidTokenConfig {
-                        reason: "`fairLaunch` must be an object block \
-                                 `{ cooldownBetweenBuys: Int, antiSnipeBlocks: Int }`"
-                            .into(),
-                        span: fl_entry.span,
-                    },
-                    span: fl_entry.span,
-                    message: "WF-014: `fairLaunch` must be an object block".into(),
                 });
             }
         }

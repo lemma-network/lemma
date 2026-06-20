@@ -1952,7 +1952,8 @@ fn check_wf014_rejects_taxtoken_fees_others_without_distribute_taxes() {
 fn check_wf014_accepts_spec_canonical_token_example() {
     // Uses the exact config from docs/03-LANGUAGE_SPEC.md §24.1.
     // If this test breaks, WF-014 has diverged from the spec's own example.
-    // antiHoneypot: true is the spec's canonical anti-scam flag (§24.1, SAFETY-001).
+    // Note: antiHoneypot removed (DB-A57) — protocol invariant, no opt-in flag.
+    // Note: fairLaunch removed (DB-A57) — SAFETY-024 retired, feature dropped.
     assert_passes(
         r#"
         token MyToken extends Token {
@@ -1961,8 +1962,6 @@ fn check_wf014_accepts_spec_canonical_token_example() {
                 symbol: "EXT"
                 decimals: 18
                 maxSupply: 1000000000
-
-                antiHoneypot: true
 
                 approvalExpiry: 86400
                 approvalOneTime: true
@@ -1979,101 +1978,35 @@ fn check_wf014_accepts_spec_canonical_token_example() {
 }
 
 #[test]
-fn check_wf014_accepts_token_with_anti_honeypot_false() {
-    // antiHoneypot: false is also a valid Bool value — passes schema check.
-    assert_passes(
-        r#"
-        token MyToken extends Token {
-            config {
-                name: "MyToken"
-                symbol: "MTK"
-                decimals: 18
-                maxSupply: 1000000
-                antiHoneypot: false
-            }
-            init() {}
-        }
-        "#,
-    );
-}
-
-#[test]
-fn check_wf014_rejects_anti_honeypot_wrong_type_int() {
-    // (neg) antiHoneypot: 1 — Int instead of Bool → InvalidTokenConfig.
+fn check_wf014_rejects_anti_honeypot_as_unknown_key() {
+    // (neg) antiHoneypot is no longer a valid config key (DB-A57) — rejected as unknown.
     assert_wf_error(
         r#"
         token MyToken extends Token {
-            config {
-                name: "MyToken"
-                symbol: "MTK"
-                decimals: 18
-                maxSupply: 1000000
-                antiHoneypot: 1
-            }
-            init() {}
-        }
-        "#,
-        |kind| {
-            matches!(
-                kind,
-                TypeErrorKind::InvalidTokenConfig { reason, .. }
-                    if reason.contains("antiHoneypot")
-            )
-        },
-    );
-}
-
-#[test]
-fn check_wf014_rejects_anti_honeypot_wrong_type_str() {
-    // (neg) antiHoneypot: "yes" — Str instead of Bool → InvalidTokenConfig.
-    assert_wf_error(
-        r#"
-        token MyToken extends Token {
-            config {
-                name: "MyToken"
-                symbol: "MTK"
-                decimals: 18
-                maxSupply: 1000000
-                antiHoneypot: "yes"
-            }
-            init() {}
-        }
-        "#,
-        |kind| {
-            matches!(
-                kind,
-                TypeErrorKind::InvalidTokenConfig { reason, .. }
-                    if reason.contains("antiHoneypot")
-            )
-        },
-    );
-}
-
-#[test]
-fn check_wf014_accepts_taxtoken_with_anti_honeypot() {
-    // (pos) TaxToken also accepts antiHoneypot: true — it is a shared Token optional key.
-    assert_passes(
-        r#"
-        token MyToken extends TaxToken {
             config {
                 name: "MyToken"
                 symbol: "MTK"
                 decimals: 18
                 maxSupply: 1000000
                 antiHoneypot: true
-                fees: { burn: 0 holders: 0 others: 0 }
             }
             init() {}
         }
         "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidTokenConfig { reason, .. }
+                    if reason.contains("antiHoneypot")
+            )
+        },
     );
 }
 
 #[test]
-fn check_wf014_accepts_token_with_fair_launch() {
-    // (pos) Token with fairLaunch block (§24.8 — available to both Token and TaxToken).
-    // `duration` is now mandatory per DB-A43 (WF-014 fix, 4f-launch).
-    assert_passes(
+fn check_wf014_rejects_fair_launch_as_unknown_key() {
+    // (neg) fairLaunch is no longer a valid config key (DB-A57) — rejected as unknown.
+    assert_wf_error(
         r#"
         token MyToken extends Token {
             config {
@@ -2090,32 +2023,11 @@ fn check_wf014_accepts_token_with_fair_launch() {
             init() {}
         }
         "#,
-    );
-}
-
-#[test]
-fn check_wf014_rejects_token_fair_launch_missing_mandatory_key() {
-    // (neg) Token fairLaunch block missing cooldownBetweenBuys → InvalidTokenConfig.
-    assert_wf_error(
-        r#"
-        token MyToken extends Token {
-            config {
-                name: "MyToken"
-                symbol: "MTK"
-                decimals: 18
-                maxSupply: 1000000
-                fairLaunch: {
-                    antiSnipeBlocks: 3
-                }
-            }
-            init() {}
-        }
-        "#,
         |kind| {
             matches!(
                 kind,
                 TypeErrorKind::InvalidTokenConfig { reason, .. }
-                    if reason.contains("cooldownBetweenBuys")
+                    if reason.contains("fairLaunch")
             )
         },
     );

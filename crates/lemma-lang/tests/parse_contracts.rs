@@ -10,7 +10,7 @@
 //!
 //! ## Layout
 //!
-//! - `token_*` — token standard scenarios (non-tax, tax, flags, fairLaunch,
+//! - `token_*` — token standard scenarios (non-tax, tax, flags, nested objects,
 //!   nested objects, metadata, all unit suffixes, ident values, full-featured)
 //! - `contract_dex_*` — DEX/AMM contract
 //! - `contract_staking_*` — staking contract
@@ -127,10 +127,11 @@ upgradeable: false
     assert_eq!(entry_value(cfg, "upgradeable"), &ConfigValue::Bool(false));
 }
 
-/// Scenario 3 — approval and anti-honeypot config (Unit + Bool + Int values).
-/// Covers approvalExpiry: 24.hours, approvalOneTime, antiHoneypot, maxFeePercent.
+/// Scenario 3 — approval config (Unit + Bool + Int values).
+/// Covers approvalExpiry: 24.hours, approvalOneTime, mintable.
+/// Note: antiHoneypot removed per DB-A57 (protocol invariant, no opt-in flag).
 #[test]
-fn token_approval_and_anti_honeypot_config() {
+fn token_approval_config() {
     let decl = token_decl(
         r#"token SafeToken extends Token {
 config {
@@ -138,16 +139,14 @@ name: "Safe Token"
 symbol: "SAFE"
 decimals: 18
 maxSupply: 100000000
-antiHoneypot: true
-maxFeePercent: 10
+mintable: true
 approvalExpiry: 24.hours
 approvalOneTime: true
 }
 }"#,
     );
     let cfg = config_of(&decl);
-    assert_eq!(entry_value(cfg, "antiHoneypot"), &ConfigValue::Bool(true));
-    assert_eq!(entry_value(cfg, "maxFeePercent"), &ConfigValue::Int(10));
+    assert_eq!(entry_value(cfg, "mintable"), &ConfigValue::Bool(true));
     assert_eq!(
         entry_value(cfg, "approvalExpiry"),
         &ConfigValue::Unit(24, UnitKind::Hours)
@@ -169,8 +168,7 @@ name: "Tax Token"
 symbol: "TAX"
 decimals: 18
 maxSupply: 1000000000
-antiHoneypot: true
-maxFeePercent: 5
+mintable: false
 }
 #[onTransfer]
 fn onTransfer(from: Address, to: Address, amount: u128) {
@@ -183,8 +181,7 @@ self.distributeToHolders(tax * 0.30)
     );
     // Config present
     let cfg = config_of(&decl);
-    assert_eq!(entry_value(cfg, "antiHoneypot"), &ConfigValue::Bool(true));
-    assert_eq!(entry_value(cfg, "maxFeePercent"), &ConfigValue::Int(5));
+    assert_eq!(entry_value(cfg, "mintable"), &ConfigValue::Bool(false));
 
     // Function member present with correct name
     let hook = decl.members.iter().find_map(|m| match m {
@@ -198,50 +195,45 @@ self.distributeToHolders(tax * 0.30)
     assert_eq!(hook.params.len(), 3);
 }
 
-/// Scenario 5 — fairLaunch nested config block.
+/// Scenario 5 — nested config block (parser is schema-agnostic).
 /// Proves nested Object with .seconds and .hours unit values, int + bool fields.
+/// Note: fairLaunch removed per DB-A57; this tests generic nested-object parsing.
 #[test]
-fn token_fair_launch_nested_block() {
+fn token_nested_config_block() {
     let decl = token_decl(
-        r#"token FairLaunchToken extends Token {
+        r#"token NestedToken extends Token {
 config {
-name: "FairLaunch Token"
-symbol: "FAIR"
+name: "Nested Token"
+symbol: "NEST"
 decimals: 18
 maxSupply: 200000000
-fairLaunch: {
+launchParams: {
 enabled: true
-maxBuyPerWallet: 10000
-cooldownBetweenBuys: 30.seconds
-antiSnipeBlocks: 3
+maxPerWallet: 10000
+cooldown: 30.seconds
+maxBlocks: 3
 duration: 24.hours
 }
 }
 }"#,
     );
     let cfg = config_of(&decl);
-    let fair_launch = match entry_value(cfg, "fairLaunch") {
+    let nested = match entry_value(cfg, "launchParams") {
         ConfigValue::Object(entries) => entries,
-        other => panic!("expected Object for fairLaunch, got: {other:?}"),
+        other => panic!("expected Object for launchParams, got: {other:?}"),
     };
-    assert_eq!(fair_launch.len(), 5);
+    assert_eq!(nested.len(), 5);
 
-    let enabled = fair_launch.iter().find(|e| e.key == "enabled").unwrap();
+    let enabled = nested.iter().find(|e| e.key == "enabled").unwrap();
     assert_eq!(enabled.value, ConfigValue::Bool(true));
 
-    let max_buy = fair_launch
-        .iter()
-        .find(|e| e.key == "maxBuyPerWallet")
-        .unwrap();
-    assert_eq!(max_buy.value, ConfigValue::Int(10_000));
+    let max_per = nested.iter().find(|e| e.key == "maxPerWallet").unwrap();
+    assert_eq!(max_per.value, ConfigValue::Int(10_000));
 
-    let cooldown = fair_launch
-        .iter()
-        .find(|e| e.key == "cooldownBetweenBuys")
-        .unwrap();
+    let cooldown = nested.iter().find(|e| e.key == "cooldown").unwrap();
     assert_eq!(cooldown.value, ConfigValue::Unit(30, UnitKind::Seconds));
 
-    let duration = fair_launch.iter().find(|e| e.key == "duration").unwrap();
+    let duration = nested.iter().find(|e| e.key == "duration").unwrap();
     assert_eq!(duration.value, ConfigValue::Unit(24, UnitKind::Hours));
 }
 
@@ -350,6 +342,7 @@ distributionMode: Proportional
 /// Scenario 10 — full-featured token: config + tax hook + metadata.
 /// This mirrors the real ExampleToken from lemma-contracts.
 /// Proves all three member types coexist in one token declaration.
+/// Note: antiHoneypot/fairLaunch removed per DB-A57 (protocol invariant, feature dropped).
 #[test]
 fn token_full_featured_all_member_types() {
     let src = r#"token ExampleToken extends Token {
@@ -358,20 +351,12 @@ name: "Example Token"
 symbol: "EXT"
 decimals: 18
 maxSupply: 1000000000
-antiHoneypot: true
-maxFeePercent: 10
 approvalExpiry: 24.hours
 approvalOneTime: true
 mintable: false
 pausable: false
 freezable: false
 upgradeable: false
-fairLaunch: {
-enabled: true
-cooldownBetweenBuys: 30.seconds
-antiSnipeBlocks: 3
-duration: 24.hours
-}
 }
 #[onTransfer]
 fn onTransfer(from: Address, to: Address, amount: u128) {
@@ -405,11 +390,6 @@ socials: { twitter: "@example", telegram: "t.me/example" }
         entry_value(cfg, "approvalExpiry"),
         &ConfigValue::Unit(24, UnitKind::Hours)
     );
-    let fair_launch = match entry_value(cfg, "fairLaunch") {
-        ConfigValue::Object(v) => v,
-        other => panic!("expected fairLaunch Object, got: {other:?}"),
-    };
-    assert_eq!(fair_launch.len(), 4);
 
     // Hook fn
     let hook = decl.members.iter().find_map(|m| match m {
@@ -766,7 +746,7 @@ fn no_panic_on_all_realistic_samples() {
         "contract",
         "import { X } from",
         "token T extends {",
-        "token T extends Token { config { fairLaunch: { enabled: true }",
+        "token T extends Token { config { nested: { enabled: true }",
     ];
     for src in &samples {
         let _ = tokenize(src).and_then(parse);

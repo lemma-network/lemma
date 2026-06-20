@@ -897,7 +897,7 @@ symbol: "EXT"
     #[test]
     fn parse_config_bool_value() {
         let cfg = single_config(
-            "token T extends Token {\nconfig {\nantiHoneypot: true\nmintable: false\n}\n}",
+            "token T extends Token {\nconfig {\npausable: true\nmintable: false\n}\n}",
         );
         assert_eq!(cfg.entries.len(), 2);
         assert_eq!(cfg.entries[0].value, ConfigValue::Bool(true));
@@ -948,21 +948,21 @@ symbol: "EXT"
 
     #[test]
     fn parse_config_nested_object() {
-        // The real `fairLaunch` block — nested Object with Bool/Unit/Int values.
+        // Nested Object with Bool/Unit/Int values — tests generic config block parsing.
         let cfg = single_config(
             r#"token T extends Token {
 config {
-fairLaunch: {
+launchParams: {
 enabled: true
 cooldownBetweenBuys: 30.seconds
-antiSnipeBlocks: 3
+maxBlocks: 3
 duration: 24.hours
 }
 }
 }"#,
         );
         assert_eq!(cfg.entries.len(), 1);
-        assert_eq!(cfg.entries[0].key, "fairLaunch");
+        assert_eq!(cfg.entries[0].key, "launchParams");
         match &cfg.entries[0].value {
             ConfigValue::Object(inner) => {
                 assert_eq!(inner.len(), 4);
@@ -970,7 +970,7 @@ duration: 24.hours
                 assert_eq!(inner[0].value, ConfigValue::Bool(true));
                 assert_eq!(inner[1].key, "cooldownBetweenBuys");
                 assert_eq!(inner[1].value, ConfigValue::Unit(30, UnitKind::Seconds));
-                assert_eq!(inner[2].key, "antiSnipeBlocks");
+                assert_eq!(inner[2].key, "maxBlocks");
                 assert_eq!(inner[2].value, ConfigValue::Int(3));
                 assert_eq!(inner[3].key, "duration");
                 assert_eq!(inner[3].value, ConfigValue::Unit(24, UnitKind::Hours));
@@ -1031,17 +1031,18 @@ socials: { twitter: "@example", telegram: "t.me/example" }
     #[test]
     fn parse_full_token_standard_example() {
         // Abridged §24 example — all config value forms + metadata in one token.
+        // antiHoneypot/fairLaunch removed per DB-A57 (protocol invariant, feature dropped).
         let src = r#"token MyToken extends Token {
 config {
 name: "Example Token"
 symbol: "EXT"
 decimals: 18
-antiHoneypot: true
+mintable: true
 approvalExpiry: 24.hours
-fairLaunch: {
-enabled: true
-cooldownBetweenBuys: 30.seconds
-antiSnipeBlocks: 3
+fees: {
+burn: 100
+holders: 200
+others: 0
 }
 }
 metadata {
