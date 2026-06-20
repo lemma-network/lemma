@@ -1,2 +1,157 @@
-// @std/token — Token + TaxToken base implementations
-// Content: P3·Step 8 subtask 06
+// @std/token — Token (plain) and TaxToken (fee-on-transfer) bases
+// See docs/03-LANGUAGE_SPEC.md §24 for the full spec.
+//
+// Token is the plain base — the common case. No fees, no hooks.
+// TaxToken extends Token with the three-component fee model (§24.2).
+//
+// These are the CANONICAL implementations. User contracts extend them:
+//   token MyToken extends Token { config { ... } }
+//   token MyTaxToken extends TaxToken { config { ... } }
+
+struct ApprovalOpts {
+    amount: u128,
+    expiry: u64,
+    oneTime: bool
+}
+
+struct Allowance {
+    amount: u128,
+    expiry: u64,
+    oneTime: bool
+}
+
+// Token — plain token base (no fee) (§24.1)
+contract Token {
+    state {
+        balances: Map<Address, u128>,
+        totalSupply: u128,
+        owner: Address,
+        allowances: Map<Address, Map<Address, Allowance>>
+    }
+
+    event Transfer { @indexed from: Address, @indexed to: Address, amount: u128 }
+    event Approval { @indexed owner: Address, @indexed spender: Address, amount: u128, expiry: u64, oneTime: bool }
+
+    pub fn transfer(to: Address, amount: u128) -> bool {
+        assert(self.balances.get(msg.sender) >= amount, "Insufficient balance")
+        self.balances.set(msg.sender, self.balances.get(msg.sender) - amount)
+        self.balances.set(to, self.balances.get(to) + amount)
+        emit Transfer { from: msg.sender, to: to, amount: amount }
+        return true
+    }
+
+    pub fn approve(spender: Address, opts: ApprovalOpts) -> bool {
+        assert(opts.amount > 0, "Amount must be positive")
+        self.allowances.get(msg.sender).set(spender, Allowance {
+            amount: opts.amount,
+            expiry: opts.expiry,
+            oneTime: opts.oneTime
+        })
+        emit Approval { owner: msg.sender, spender: spender, amount: opts.amount, expiry: opts.expiry, oneTime: opts.oneTime }
+        return true
+    }
+
+    pub fn transferFrom(from: Address, to: Address, amount: u128) -> bool {
+        let a = self.allowances.get(from).get(msg.sender)
+        assert(block.timestamp <= a.expiry, "Approval expired")
+        assert(amount <= a.amount, "Insufficient allowance")
+        self.balances.set(from, self.balances.get(from) - amount)
+        self.balances.set(to, self.balances.get(to) + amount)
+        if (a.oneTime) {
+            self.allowances.get(from).set(msg.sender, Allowance { amount: 0, expiry: 0, oneTime: false })
+        } else {
+            self.allowances.get(from).set(msg.sender, Allowance {
+                amount: a.amount - amount,
+                expiry: a.expiry,
+                oneTime: a.oneTime
+            })
+        }
+        emit Transfer { from: from, to: to, amount: amount }
+        return true
+    }
+
+    pub fn balanceOf(addr: Address) -> u128 {
+        return self.balances.get(addr)
+    }
+
+    pub fn totalSupply() -> u128 {
+        return self.totalSupply
+    }
+
+    pub fn allowance(owner: Address, spender: Address) -> Allowance {
+        return self.allowances.get(owner).get(spender)
+    }
+
+    @onlyOwner
+    pub fn mint(to: Address, amount: u128) {
+        self.totalSupply = self.totalSupply + amount
+        self.balances.set(to, self.balances.get(to) + amount)
+        emit Transfer { from: Address.zero, to: to, amount: amount }
+    }
+}
+
+// TaxToken — fee-on-transfer base (§24.2)
+//
+// Three fixed fee components: burn, holders, others (bps).
+// Protocol-managed fee deduction on transfer.
+// Dev implements isTaxable() and distributeTaxes().
+contract TaxToken {
+    state {
+        balances: Map<Address, u128>,
+        totalSupply: u128,
+        owner: Address,
+        allowances: Map<Address, Map<Address, Allowance>>,
+        taxPool: u128,
+        pairs: Set<Address>,
+        exempt: Set<Address>,
+        rewardExempt: Set<Address>
+    }
+
+    event Transfer { @indexed from: Address, @indexed to: Address, amount: u128 }
+    event Approval { @indexed owner: Address, @indexed spender: Address, amount: u128, expiry: u64, oneTime: bool }
+    event PairUpdated { @indexed pair: Address, on: bool }
+    event ExemptUpdated { @indexed addr: Address, on: bool }
+    event RewardExemptUpdated { @indexed addr: Address, on: bool }
+
+    pub fn transfer(to: Address, amount: u128) -> bool {
+        assert(self.balances.get(msg.sender) >= amount, "Insufficient balance")
+        self.balances.set(msg.sender, self.balances.get(msg.sender) - amount)
+        self.balances.set(to, self.balances.get(to) + amount)
+        emit Transfer { from: msg.sender, to: to, amount: amount }
+        return true
+    }
+
+    pub fn balanceOf(addr: Address) -> u128 {
+        return self.balances.get(addr)
+    }
+
+    pub fn totalSupply() -> u128 {
+        return self.totalSupply
+    }
+
+    @onlyOwner
+    pub fn setPair(pair: Address, on: bool) {
+        if (on) { self.pairs.add(pair) } else { self.pairs.remove(pair) }
+        emit PairUpdated { pair: pair, on: on }
+    }
+
+    @onlyOwner
+    pub fn setExempt(addr: Address, on: bool) {
+        if (on) { self.exempt.add(addr) } else { self.exempt.remove(addr) }
+        emit ExemptUpdated { addr: addr, on: on }
+    }
+
+    @onlyOwner
+    pub fn setRewardExempt(addr: Address, on: bool) {
+        if (on) { self.rewardExempt.add(addr) } else { self.rewardExempt.remove(addr) }
+        emit RewardExemptUpdated { addr: addr, on: on }
+    }
+
+    fn isPair(addr: Address) -> bool {
+        return self.pairs.has(addr)
+    }
+
+    fn isExempt(addr: Address) -> bool {
+        return self.exempt.has(addr)
+    }
+}
