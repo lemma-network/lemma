@@ -879,6 +879,203 @@ fn f(b: Bar) {}"#,
     );
 }
 
+// ── Base member injection (extends / uses) ────────────────────────────────────
+
+#[test]
+fn token_extends_token_sees_inherited_balances() {
+    // `self.balances` is inherited from Token — should resolve without error.
+    // Includes `transfer` to satisfy SAFETY-001 (no-disposal-path check).
+    let result = check_src(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+init() { let b = self.balances }
+pub fn transfer(to: Address, amount: u128) {}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.balances should resolve via inherited Token state: {result:?}"
+    );
+}
+
+#[test]
+fn token_extends_token_sees_inherited_transfer() {
+    // `self.transfer` is inherited from Token — should resolve without error.
+    // User also defines `transfer` to satisfy SAFETY-001.
+    let result = check_src(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+init() { let t = self.transfer }
+pub fn transfer(to: Address, amount: u128) {}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.transfer should resolve via inherited Token function: {result:?}"
+    );
+}
+
+#[test]
+fn token_extends_token_sees_inherited_total_supply() {
+    // `self.totalSupply` is inherited from Token — should resolve without error.
+    let result = check_src(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+init() { let s = self.totalSupply }
+pub fn transfer(to: Address, amount: u128) {}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.totalSupply should resolve via inherited Token state: {result:?}"
+    );
+}
+
+#[test]
+fn token_extends_token_sees_inherited_owner() {
+    // `self.owner` is inherited from Token — should resolve without error.
+    let result = check_src(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+init() { let o = self.owner }
+pub fn transfer(to: Address, amount: u128) {}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.owner should resolve via inherited Token state: {result:?}"
+    );
+}
+
+#[test]
+fn token_extends_tax_token_sees_tax_pool() {
+    // `self.taxPool` is inherited from TaxToken — should resolve without error.
+    // TaxToken requires a `fees` config block (WF-014).
+    let result = check_src(
+        r#"token T extends TaxToken {
+config {
+    name: "T" symbol: "T" decimals: 18 maxSupply: 1000000
+    fees: { burn: 1 holders: 1 others: 0 }
+}
+init() { let tp = self.taxPool }
+pub fn transfer(to: Address, amount: u128) {}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.taxPool should resolve via inherited TaxToken state: {result:?}"
+    );
+}
+
+#[test]
+fn contract_uses_ownable_sees_owner() {
+    // `self.owner` is inherited from Ownable — should resolve without error.
+    let result = check_src(
+        r#"contract C uses Ownable {
+pub fn getOwner() -> Address { return self.owner }
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.owner should resolve via Ownable trait: {result:?}"
+    );
+}
+
+#[test]
+fn contract_uses_ownable_sees_transfer_ownership() {
+    // `self.transferOwnership` is inherited from Ownable.
+    let result = check_src(
+        r#"contract C uses Ownable {
+pub fn f() { let t = self.transferOwnership }
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.transferOwnership should resolve via Ownable trait: {result:?}"
+    );
+}
+
+#[test]
+fn contract_uses_pausable_sees_paused() {
+    // `self.paused` is inherited from Pausable.
+    let result = check_src(
+        r#"contract C uses Pausable {
+pub fn isPaused() -> bool { return self.paused }
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.paused should resolve via Pausable trait: {result:?}"
+    );
+}
+
+#[test]
+fn contract_uses_multiple_traits_sees_all_members() {
+    // `uses Ownable, Pausable` — both owner and paused should resolve.
+    let result = check_src(
+        r#"contract C uses Ownable, Pausable {
+pub fn f() {
+    let o = self.owner
+    let p = self.paused
+}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "both Ownable.owner and Pausable.paused should resolve: {result:?}"
+    );
+}
+
+#[test]
+fn user_field_does_not_conflict_with_inherited() {
+    // User defines a field with the same name as an inherited one — should work.
+    // The user-defined field shadows the inherited one (inner scope wins).
+    // The field needs a default value to satisfy WF-001 (state initialization).
+    let result = check_src(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { owner: Address = msg.sender }
+init() { let o = self.owner }
+pub fn transfer(to: Address, amount: u128) {}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "user-defined field should shadow inherited without error: {result:?}"
+    );
+}
+
+#[test]
+fn user_function_does_not_conflict_with_inherited() {
+    // User defines a function with the same name as an inherited one — should work.
+    // The user-defined function shadows the inherited one (inner scope wins).
+    let result = check_src(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+init() {}
+pub fn transfer(to: Address, amount: u128) {}
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "user-defined function should shadow inherited without error: {result:?}"
+    );
+}
+
+#[test]
+fn contract_uses_access_control_sees_roles() {
+    // `self.roles` is inherited from AccessControl.
+    let result = check_src(
+        r#"contract C uses AccessControl {
+pub fn f() { let r = self.roles }
+}"#,
+    );
+    assert!(
+        result.is_ok(),
+        "self.roles should resolve via AccessControl trait: {result:?}"
+    );
+}
+
 // ── QoL: Expr::New span improvement ───────────────────────────────────────────
 
 #[test]

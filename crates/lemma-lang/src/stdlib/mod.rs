@@ -126,6 +126,256 @@ impl Default for StdLibRegistry {
     }
 }
 
+// ─── Base member definitions ──────────────────────────────────────────────────
+
+/// A state field inherited from a base standard or trait.
+///
+/// Used by the resolver to inject inherited state fields into the contract
+/// scope when `extends Token` or `uses Ownable` is encountered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StdField {
+    /// Field name (e.g. `"balances"`, `"owner"`).
+    pub name: &'static str,
+    /// Type name as it would appear in Lem source (e.g. `"Map<Address, u128>"`).
+    /// Informational only — the resolver registers the field by name and kind,
+    /// not by parsed type (full type resolution is deferred to codegen).
+    pub ty: &'static str,
+}
+
+/// A function signature inherited from a base standard or trait.
+///
+/// Used by the resolver to inject inherited function names into the contract
+/// scope so user code can reference them and the safety analyzer sees the
+/// complete function set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StdFunction {
+    /// Function name (e.g. `"transfer"`, `"transferOwnership"`).
+    pub name: &'static str,
+    /// Whether the function is `pub` (visible to external callers).
+    pub is_public: bool,
+}
+
+/// Members provided by a base standard (`Token`, `TaxToken`) or trait
+/// (`Ownable`, `Pausable`, `AccessControl`).
+///
+/// The resolver calls [`StdLibRegistry::base_members`] to get these when
+/// processing `extends` or `uses` clauses, then injects them into the
+/// contract's value scope BEFORE user-defined members.  This enables:
+/// - User code to reference `self.balances`, `self.owner` (inherited state)
+/// - Safety analyzer to see all functions (inherited + user-defined)
+/// - Codegen to generate code for the combined contract
+#[derive(Debug, Clone, PartialEq)]
+pub struct StdBaseMembers {
+    /// State fields provided by this base/trait.
+    pub state_fields: Vec<StdField>,
+    /// Functions provided by this base/trait.
+    pub functions: Vec<StdFunction>,
+}
+
+impl StdLibRegistry {
+    /// Get the members provided by a base standard or trait.
+    ///
+    /// Called by the resolver to inject inherited members into the contract
+    /// scope when `extends Token` or `uses Ownable` is encountered.
+    ///
+    /// Returns `None` for unknown bases (the user may be extending a
+    /// user-defined type — not yet supported, produces a type error elsewhere).
+    pub fn base_members(name: &str) -> Option<StdBaseMembers> {
+        match name {
+            "Token" => Some(StdBaseMembers {
+                state_fields: vec![
+                    StdField {
+                        name: "balances",
+                        ty: "Map<Address, u128>",
+                    },
+                    StdField {
+                        name: "totalSupply",
+                        ty: "u128",
+                    },
+                    StdField {
+                        name: "owner",
+                        ty: "Address",
+                    },
+                    StdField {
+                        name: "allowances",
+                        ty: "Map<Address, Map<Address, Allowance>>",
+                    },
+                ],
+                functions: vec![
+                    StdFunction {
+                        name: "transfer",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "approve",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "transferFrom",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "balanceOf",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "totalSupply",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "allowance",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "mint",
+                        is_public: true,
+                    },
+                ],
+            }),
+            "TaxToken" => Some(StdBaseMembers {
+                // TaxToken extends Token — includes all Token fields + tax-specific.
+                state_fields: vec![
+                    // From Token:
+                    StdField {
+                        name: "balances",
+                        ty: "Map<Address, u128>",
+                    },
+                    StdField {
+                        name: "totalSupply",
+                        ty: "u128",
+                    },
+                    StdField {
+                        name: "owner",
+                        ty: "Address",
+                    },
+                    StdField {
+                        name: "allowances",
+                        ty: "Map<Address, Map<Address, Allowance>>",
+                    },
+                    // TaxToken-specific:
+                    StdField {
+                        name: "taxPool",
+                        ty: "u128",
+                    },
+                    StdField {
+                        name: "pairs",
+                        ty: "Set<Address>",
+                    },
+                    StdField {
+                        name: "exempt",
+                        ty: "Set<Address>",
+                    },
+                    StdField {
+                        name: "rewardExempt",
+                        ty: "Set<Address>",
+                    },
+                ],
+                functions: vec![
+                    // From Token:
+                    StdFunction {
+                        name: "transfer",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "approve",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "transferFrom",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "balanceOf",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "totalSupply",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "allowance",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "mint",
+                        is_public: true,
+                    },
+                    // TaxToken-specific:
+                    StdFunction {
+                        name: "setPair",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "setExempt",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "setRewardExempt",
+                        is_public: true,
+                    },
+                ],
+            }),
+            "Ownable" => Some(StdBaseMembers {
+                state_fields: vec![StdField {
+                    name: "owner",
+                    ty: "Address",
+                }],
+                functions: vec![
+                    StdFunction {
+                        name: "transferOwnership",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "renounceOwnership",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "isRenounced",
+                        is_public: false,
+                    },
+                ],
+            }),
+            "Pausable" => Some(StdBaseMembers {
+                state_fields: vec![StdField {
+                    name: "paused",
+                    ty: "bool",
+                }],
+                functions: vec![
+                    StdFunction {
+                        name: "pause",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "unpause",
+                        is_public: true,
+                    },
+                ],
+            }),
+            "AccessControl" => Some(StdBaseMembers {
+                state_fields: vec![StdField {
+                    name: "roles",
+                    ty: "Map<u128, Set<Address>>",
+                }],
+                functions: vec![
+                    StdFunction {
+                        name: "hasRole",
+                        is_public: false,
+                    },
+                    StdFunction {
+                        name: "grantRole",
+                        is_public: true,
+                    },
+                    StdFunction {
+                        name: "revokeRole",
+                        is_public: true,
+                    },
+                ],
+            }),
+            _ => None,
+        }
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

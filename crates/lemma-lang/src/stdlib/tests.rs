@@ -159,3 +159,94 @@ fn is_std_module_false_for_relative_path() {
 fn is_std_module_false_for_bare_name() {
     assert!(!StdLibRegistry::is_std_module("token"));
 }
+
+// ── base_members ──────────────────────────────────────────────────────────────
+
+#[test]
+fn base_members_returns_token_fields_and_functions() {
+    let members = StdLibRegistry::base_members("Token").expect("Token should have base members");
+    let field_names: Vec<&str> = members.state_fields.iter().map(|f| f.name).collect();
+    assert!(
+        field_names.contains(&"balances"),
+        "Token should have balances"
+    );
+    assert!(
+        field_names.contains(&"totalSupply"),
+        "Token should have totalSupply"
+    );
+    assert!(field_names.contains(&"owner"), "Token should have owner");
+    assert!(
+        field_names.contains(&"allowances"),
+        "Token should have allowances"
+    );
+
+    let fn_names: Vec<&str> = members.functions.iter().map(|f| f.name).collect();
+    assert!(fn_names.contains(&"transfer"), "Token should have transfer");
+    assert!(fn_names.contains(&"approve"), "Token should have approve");
+    assert!(fn_names.contains(&"mint"), "Token should have mint");
+}
+
+#[test]
+fn base_members_returns_tax_token_includes_token_fields() {
+    let members =
+        StdLibRegistry::base_members("TaxToken").expect("TaxToken should have base members");
+    let field_names: Vec<&str> = members.state_fields.iter().map(|f| f.name).collect();
+    // Token fields:
+    assert!(
+        field_names.contains(&"balances"),
+        "TaxToken should inherit balances"
+    );
+    assert!(
+        field_names.contains(&"owner"),
+        "TaxToken should inherit owner"
+    );
+    // TaxToken-specific:
+    assert!(
+        field_names.contains(&"taxPool"),
+        "TaxToken should have taxPool"
+    );
+    assert!(field_names.contains(&"pairs"), "TaxToken should have pairs");
+}
+
+#[test]
+fn base_members_returns_ownable_fields_and_functions() {
+    let members =
+        StdLibRegistry::base_members("Ownable").expect("Ownable should have base members");
+    let field_names: Vec<&str> = members.state_fields.iter().map(|f| f.name).collect();
+    assert_eq!(field_names, vec!["owner"]);
+
+    let fn_names: Vec<&str> = members.functions.iter().map(|f| f.name).collect();
+    assert!(fn_names.contains(&"transferOwnership"));
+    assert!(fn_names.contains(&"renounceOwnership"));
+    assert!(fn_names.contains(&"isRenounced"));
+}
+
+#[test]
+fn base_members_returns_pausable_fields_and_functions() {
+    let members =
+        StdLibRegistry::base_members("Pausable").expect("Pausable should have base members");
+    let field_names: Vec<&str> = members.state_fields.iter().map(|f| f.name).collect();
+    assert_eq!(field_names, vec!["paused"]);
+
+    let fn_names: Vec<&str> = members.functions.iter().map(|f| f.name).collect();
+    assert!(fn_names.contains(&"pause"));
+    assert!(fn_names.contains(&"unpause"));
+}
+
+#[test]
+fn base_members_returns_access_control_fields_and_functions() {
+    let members = StdLibRegistry::base_members("AccessControl")
+        .expect("AccessControl should have base members");
+    let field_names: Vec<&str> = members.state_fields.iter().map(|f| f.name).collect();
+    assert_eq!(field_names, vec!["roles"]);
+
+    let fn_names: Vec<&str> = members.functions.iter().map(|f| f.name).collect();
+    assert!(fn_names.contains(&"hasRole"));
+    assert!(fn_names.contains(&"grantRole"));
+    assert!(fn_names.contains(&"revokeRole"));
+}
+
+#[test]
+fn base_members_returns_none_for_unknown() {
+    assert!(StdLibRegistry::base_members("UnknownBase").is_none());
+}

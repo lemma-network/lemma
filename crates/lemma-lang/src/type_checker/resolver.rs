@@ -41,7 +41,7 @@ use crate::parser::ast::{
     Ast, ContractMember, Expr, ForIter, Function, GenericParam, Item, LambdaBody, MatchArm,
     MatchBody, Pattern, Stmt, StructMember, TemplateExprSegment, Type,
 };
-use crate::stdlib::StdLibRegistry;
+use crate::stdlib::{StdBaseMembers, StdLibRegistry};
 
 use super::error::{TypeError, TypeErrorKind};
 use super::types::{
@@ -574,8 +574,9 @@ impl Resolver {
                 Item::Token_(t) => {
                     let id = self.alloc(&t.name, t.span, SymbolKind::Contract);
                     self.define_type_or_err(&t.name, id, t.span)?;
-                    // Tokens have no implements/uses in the AST — empty vec.
-                    self.struct_traits.insert(id, Vec::new());
+                    // Record the extends base for trait-bound checking.
+                    // `extends Token` means the token inherits Token's interface.
+                    self.struct_traits.insert(id, vec![t.extends.clone()]);
                 }
                 Item::Interface(i) => {
                     let id = self.alloc(&i.name, i.span, SymbolKind::Interface);
@@ -711,7 +712,13 @@ impl Resolver {
     fn resolve_item(&mut self, item: &Item) -> Result<(), LangError> {
         match item {
             Item::Contract(c) => {
-                self.resolve_contract_body(&c.members, c.span)?;
+                // Collect trait members from `uses` clause (e.g. `uses Ownable, Pausable`).
+                let trait_members: Vec<StdBaseMembers> = c
+                    .uses
+                    .iter()
+                    .filter_map(|name| StdLibRegistry::base_members(name))
+                    .collect();
+                self.resolve_contract_body_with_base(&c.members, c.span, None, &trait_members)?;
                 // P3-checker-8: collect contract function names for structural
                 // trait-bound checking (contracts don't get a SymbolSig::Struct).
                 if let Some(id) = self.lookup_type(&c.name) {
@@ -730,7 +737,9 @@ impl Resolver {
                 }
             }
             Item::Token_(t) => {
-                self.resolve_contract_body(&t.members, t.span)?;
+                // Get base members from the `extends` clause (e.g. `extends Token`).
+                let base = StdLibRegistry::base_members(&t.extends);
+                self.resolve_contract_body_with_base(&t.members, t.span, base.as_ref(), &[])?;
                 // P3-checker-8: same as Item::Contract above.
                 if let Some(id) = self.lookup_type(&t.name) {
                     let methods: Vec<String> = t
@@ -893,18 +902,32 @@ impl Resolver {
     // Contract body
     // ─────────────────────────────────────────────────────────────────────
 
-    fn resolve_contract_body(
+    /// Resolve a contract/token body with inherited base members injected.
+    ///
+    /// `base` — members from the `extends` clause (e.g. `extends Token`).
+    /// `traits` — members from `uses` clauses (e.g. `uses Ownable, Pausable`).
+    ///
+    /// Inherited members are injected into a **separate scope level** below the
+    /// user-member scope.  This ensures:
+    /// - User code can reference `self.balances`, `self.owner` (inherited state)
+    /// - Safety analyzer sees all functions (inherited + user-defined)
+    /// - User-defined members with the same name silently shadow inherited ones
+    ///   (inner scope wins in lookup_value's inner→outer search)
+    /// - Genuine user duplicates (two user-defined functions with the same name)
+    ///   still produce `DuplicateDeclaration` errors (same scope level)
+    fn resolve_contract_body_with_base(
         &mut self,
         members: &[ContractMember],
         contract_span: Span,
+        base: Option<&StdBaseMembers>,
+        traits: &[StdBaseMembers],
     ) -> Result<(), LangError> {
-        // Pass 1 — register all member names into the contract scope so
-        // forward references within the contract work (fn A calls fn B
-        // defined later in the same body).
+        // Scope layer 1 (outer): inherited members from base/traits.
+        // Pushed first so user members in the inner scope can shadow them.
         self.push_value_scope();
         self.push_type_scope();
 
-        // Register synthetic `self` binding.
+        // Register synthetic `self` binding in the inherited scope.
         // `self` is lexed as Token::SelfKw (lexer/scanner/keywords.rs:159), so
         // a Lem source field literally named "self" cannot parse — it would not
         // produce Token::Identifier in parse_state_block's expect_identifier.
@@ -912,6 +935,24 @@ impl Resolver {
         let self_id = self.alloc("self", contract_span, SymbolKind::SelfBinding);
         self.define_value("self", self_id);
 
+        // Inject inherited state fields and functions from the base standard
+        // (e.g. `extends Token` → Token's balances, totalSupply, owner, …).
+        if let Some(base) = base {
+            self.inject_base_members(base, contract_span);
+        }
+
+        // Inject trait members (e.g. `uses Ownable` → owner, transferOwnership, …).
+        for trait_def in traits {
+            self.inject_base_members(trait_def, contract_span);
+        }
+
+        // Scope layer 2 (inner): user-defined members.
+        // Pushed on top of the inherited scope so user members shadow inherited
+        // ones, and `define_value_or_err` only fires for genuine user duplicates.
+        self.push_value_scope();
+        self.push_type_scope();
+
+        // Pass 1 — register all user member names.
         for member in members {
             self.register_contract_member(member)?;
         }
@@ -924,9 +965,30 @@ impl Resolver {
         }
         self.in_method = prev_in_method;
 
+        // Pop both scope layers.
+        self.pop_type_scope();
+        self.pop_value_scope();
         self.pop_type_scope();
         self.pop_value_scope();
         Ok(())
+    }
+
+    /// Inject state fields and functions from a [`StdBaseMembers`] into the
+    /// current value scope.
+    ///
+    /// Uses `define_value` (not `define_value_or_err`) so that duplicate
+    /// inherited names (e.g. Token.owner + Ownable.owner) silently merge
+    /// (first wins — both refer to the same semantic field).
+    fn inject_base_members(&mut self, members: &StdBaseMembers, span: Span) {
+        for field in &members.state_fields {
+            let id = self.alloc(field.name, span, SymbolKind::StateField);
+            // Ignore duplicates — inherited fields may overlap across bases/traits.
+            let _ = self.define_value(field.name, id);
+        }
+        for func in &members.functions {
+            let id = self.alloc(func.name, span, SymbolKind::Function);
+            let _ = self.define_value(func.name, id);
+        }
     }
 
     fn register_contract_member(&mut self, member: &ContractMember) -> Result<(), LangError> {
