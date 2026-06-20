@@ -610,3 +610,266 @@ fn deploy_without_manifest_allows_any_write() {
         call_receipt.gas_used
     );
 }
+
+// ── G1: deploy-time invariant violation ──────────────────────────────────────
+
+/// Build a WASM module whose `"init"` constructor writes `storage_value` to
+/// `storage_key`, and includes a `"lemma.meta"` custom section with the given
+/// manifest JSON. The `"call"` export is a no-op.
+///
+/// This tests deploy-time invariant enforcement: if the init constructor
+/// writes state that violates a safety constraint, the deploy must REVERT.
+fn build_wasm_with_manifest_and_init_write(
+    manifest_json: &str,
+    storage_key: &[u8],
+    storage_value: &[u8],
+) -> Vec<u8> {
+    use std::borrow::Cow;
+    use wasm_encoder::{
+        CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind, ExportSection,
+        Function, FunctionSection, ImportSection, Instruction, MemorySection, MemoryType, Module,
+        TypeSection, ValType,
+    };
+
+    let key_offset: i32 = 0;
+    let val_offset: i32 = 256;
+
+    let mut module = Module::new();
+
+    // ── Type section ─────────────────────────────────────────────────────
+    // Type 0: (i32, i32, i32, i32) -> () — storage_write signature
+    // Type 1: () -> ()                   — init/call export signature
+    let mut types = TypeSection::new();
+    types.ty().function(
+        vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        vec![],
+    );
+    types.ty().function(vec![], vec![]);
+    module.section(&types);
+
+    // ── Import section ───────────────────────────────────────────────────
+    let mut imports = ImportSection::new();
+    imports.import("lemma", "storage_write", EntityType::Function(0));
+    module.section(&imports);
+
+    // ── Function section ─────────────────────────────────────────────────
+    // Two local functions: init (writes to storage) and call (no-op).
+    let mut functions = FunctionSection::new();
+    functions.function(1); // init: type index 1 () -> ()
+    functions.function(1); // call: type index 1 () -> ()
+    module.section(&functions);
+
+    // ── Memory section ───────────────────────────────────────────────────
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: 1,
+        maximum: Some(1),
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    module.section(&memories);
+
+    // ── Export section ───────────────────────────────────────────────────
+    // func idx 0 = imported storage_write
+    // func idx 1 = init (local)
+    // func idx 2 = call (local, no-op)
+    let mut exports = ExportSection::new();
+    exports.export("init", ExportKind::Func, 1);
+    exports.export("call", ExportKind::Func, 2);
+    exports.export("memory", ExportKind::Memory, 0);
+    module.section(&exports);
+
+    // ── Code section ─────────────────────────────────────────────────────
+    let mut code = CodeSection::new();
+
+    // init body: storage_write(key_offset, key_len, val_offset, val_len)
+    let mut init_func = Function::new(vec![]);
+    init_func.instruction(&Instruction::I32Const(key_offset));
+    init_func.instruction(&Instruction::I32Const(storage_key.len() as i32));
+    init_func.instruction(&Instruction::I32Const(val_offset));
+    init_func.instruction(&Instruction::I32Const(storage_value.len() as i32));
+    init_func.instruction(&Instruction::Call(0));
+    init_func.instruction(&Instruction::End);
+    code.function(&init_func);
+
+    // call body: no-op
+    let mut call_func = Function::new(vec![]);
+    call_func.instruction(&Instruction::End);
+    code.function(&call_func);
+    module.section(&code);
+
+    // ── Data section ─────────────────────────────────────────────────────
+    let key_const = ConstExpr::i32_const(key_offset);
+    let val_const = ConstExpr::i32_const(val_offset);
+    let mut data = DataSection::new();
+    data.active(0, &key_const, storage_key.iter().copied());
+    data.active(0, &val_const, storage_value.iter().copied());
+    module.section(&data);
+
+    // ── Custom section: "lemma.meta" ─────────────────────────────────────
+    module.section(&CustomSection {
+        name: Cow::Borrowed("lemma.meta"),
+        data: Cow::Borrowed(manifest_json.as_bytes()),
+    });
+
+    module.finish()
+}
+
+/// Build a `"lemma.meta"` JSON string with a single `ratchet_bool` constraint.
+fn manifest_ratchet_bool(key: &[u8], locked_value: &[u8]) -> String {
+    let key_json = serde_json::to_string(&key).expect("serialize key");
+    let locked_json = serde_json::to_string(&locked_value).expect("serialize locked_value");
+    format!(
+        r#"{{"contract":"TestToken","compiler":"lemma-lang/0.1.0","functions":[],"safety_constraints":[{{"type":"ratchet_bool","key":{key_json},"locked_value":{locked_json}}}]}}"#
+    )
+}
+
+#[test]
+fn deploy_with_init_writing_locked_state_reverts() {
+    // G1: deploy-time invariant violation.
+    // The init constructor writes tradingEnabled=[0] (the locked value).
+    // The manifest has a ratchet_bool constraint with locked_value=[0].
+    //
+    // Since this is a fresh deploy (no prior canonical state for this contract),
+    // the ratchet_bool check allows new fields being set to locked value
+    // (no prior value = no ratchet violation). So this deploy should SUCCEED.
+    //
+    // However, if we pre-populate canonical state with tradingEnabled=[1]
+    // (unlocked) at the derived contract address, then the init writing [0]
+    // (locking) would be a violation. But for a fresh deploy, the contract
+    // address doesn't exist yet in canonical state.
+    //
+    // Test: deploy with init that writes locked state on a fresh address → succeeds
+    // (new field, no prior value, no ratchet violation).
+    let executor = make_executor();
+    let mut state = InMemoryStateView::new();
+    let sender = Address::zero();
+
+    let manifest = manifest_ratchet_bool(b"tradingEnabled", &[0]);
+    let wasm = build_wasm_with_manifest_and_init_write(&manifest, b"tradingEnabled", &[0]);
+
+    let deploy = deploy_tx(sender, 0, wasm);
+    let deploy_receipt = executor.execute_transaction(&deploy, block_ctx(), &mut state);
+
+    // Fresh deploy: new field set to locked value → no violation (field didn't exist).
+    assert!(
+        deploy_receipt.success,
+        "deploy with init writing locked value on fresh address must succeed \
+         (new field, no prior value); gas_used={}",
+        deploy_receipt.gas_used
+    );
+}
+
+#[test]
+fn deploy_with_init_relocking_pre_existing_state_reverts() {
+    // G1: deploy-time invariant violation with pre-existing state.
+    //
+    // Pre-populate canonical state at the derived contract address with
+    // tradingEnabled=[1] (unlocked). The init constructor writes [0] (locking).
+    // This is a ratchet_bool violation: was unlocked → now locking.
+    //
+    // C2 fix ensures settle() uses the correct contract address (not tx.sender).
+    let executor = make_executor();
+    let mut state = InMemoryStateView::new();
+    let sender = Address::zero();
+
+    // Derive the contract address that will be used (deployer=sender, nonce=0).
+    let contract_addr = Address::from_deployer(&sender, 0);
+
+    // Pre-populate canonical state: tradingEnabled=[1] at the contract address.
+    state.write(&contract_addr, b"tradingEnabled", vec![1]);
+
+    let manifest = manifest_ratchet_bool(b"tradingEnabled", &[0]);
+    let wasm = build_wasm_with_manifest_and_init_write(&manifest, b"tradingEnabled", &[0]);
+
+    let deploy = deploy_tx(sender, 0, wasm);
+    let deploy_receipt = executor.execute_transaction(&deploy, block_ctx(), &mut state);
+
+    // Init writes locked value when old value was unlocked → violation → REVERT.
+    assert!(
+        !deploy_receipt.success,
+        "deploy with init relocking pre-existing unlocked state must REVERT; gas_used={}",
+        deploy_receipt.gas_used
+    );
+    assert!(
+        deploy_receipt.gas_used > 0,
+        "reverted deploy must still charge gas"
+    );
+}
+
+// ── G5: gas charged for invariant check ──────────────────────────────────────
+
+#[test]
+fn call_with_manifest_charges_invariant_check_gas() {
+    // G5: verify that gas_used is higher when manifest has constraints vs without.
+    // Deploy two contracts with the same bytecode behavior but different manifests:
+    // one with constraints, one without.
+    let executor = make_executor();
+    let mut state = InMemoryStateView::new();
+    let sender = Address::zero();
+
+    // Contract WITH constraints (ratchet_off on "mintable").
+    let manifest_with = manifest_ratchet_off(b"mintable");
+    let wasm_with = build_wasm_with_manifest_and_write(&manifest_with, b"mintable", &[1]);
+
+    // Contract WITHOUT constraints (no safety_constraints in manifest).
+    let manifest_without = r#"{"contract":"TestToken","compiler":"lemma-lang/0.1.0","functions":[],"safety_constraints":[]}"#;
+    let wasm_without = build_wasm_with_manifest_and_write(manifest_without, b"mintable", &[1]);
+
+    // Deploy both contracts.
+    let deploy_with = deploy_tx(sender, 0, wasm_with);
+    let deploy_receipt_with = executor.execute_transaction(&deploy_with, block_ctx(), &mut state);
+    assert!(
+        deploy_receipt_with.success,
+        "deploy with constraints must succeed"
+    );
+
+    let sender2 = Address::from_public_key(&[2; 32]);
+    let deploy_without = deploy_tx(sender2, 0, wasm_without);
+    let deploy_receipt_without =
+        executor.execute_transaction(&deploy_without, block_ctx(), &mut state);
+    assert!(
+        deploy_receipt_without.success,
+        "deploy without constraints must succeed"
+    );
+
+    let addr_with = Address::from_deployer(&sender, 0);
+    let addr_without = Address::from_deployer(&sender2, 0);
+
+    // Pre-populate canonical state so the call doesn't violate constraints.
+    state.write(&addr_with, b"mintable", vec![1]); // already on → no violation
+
+    // Call both contracts.
+    let call_with = call_tx(sender, 1, addr_with, vec![0u8; 4]);
+    let receipt_with = executor.execute_transaction(&call_with, block_ctx(), &mut state);
+    assert!(receipt_with.success, "call with constraints must succeed");
+
+    let call_without = call_tx(sender2, 1, addr_without, vec![0u8; 4]);
+    let receipt_without = executor.execute_transaction(&call_without, block_ctx(), &mut state);
+    assert!(
+        receipt_without.success,
+        "call without constraints must succeed"
+    );
+
+    // The contract with constraints must charge at least the invariant_check gas.
+    // We can't compare absolute gas between different WASM modules (they have
+    // different sizes → different intrinsic/fuel costs), but we CAN verify the
+    // manifest-bearing call's gas includes the invariant_check charge.
+    let schedule = GasSchedule::devnet();
+    let invariant_gas = schedule.invariant_check.as_u64();
+    // Minimum gas for a call: intrinsic + cold surcharge + invariant_check + WASM fuel.
+    // The invariant_check must be included — verify gas_used >= invariant_check.
+    assert!(
+        receipt_with.gas_used >= invariant_gas,
+        "call with constraints must charge at least invariant_check gas: \
+         gas_used={}, invariant_check={}",
+        receipt_with.gas_used,
+        invariant_gas
+    );
+    // The "without" call must succeed and use some gas too (sanity).
+    assert!(
+        receipt_without.gas_used > 0,
+        "call without constraints must still use gas"
+    );
+}

@@ -177,24 +177,44 @@ fn format_key_hex(key: &[u8]) -> String {
 
 /// Interpret a byte slice as a little-endian `u64` (zero-padded if < 8 bytes).
 ///
-/// Returns 0 for empty slices. Truncates to the first 8 bytes if longer.
+/// Returns 0 for empty slices. Returns `Err(HoneypotInvariantViolation)` if
+/// `bytes.len() > 8` — an oversized encoding is anomalous and must be rejected
+/// rather than silently truncated (C4 fix, AGENTS §7.2).
+///
 /// Used for fee-cap BPS values which are small integers.
-fn bytes_to_u64(bytes: &[u8]) -> u64 {
+fn bytes_to_u64(bytes: &[u8]) -> Result<u64, VmError> {
+    if bytes.len() > 8 {
+        return Err(VmError::HoneypotInvariantViolation {
+            reason: format!(
+                "storage value has {} bytes, expected ≤8 for u64 comparison",
+                bytes.len()
+            ),
+        });
+    }
     let mut buf = [0u8; 8];
-    let len = bytes.len().min(8);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    u64::from_le_bytes(buf)
+    buf[..bytes.len()].copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(buf))
 }
 
 /// Interpret a byte slice as a little-endian `u128` (zero-padded if < 16 bytes).
 ///
-/// Returns 0 for empty slices. Truncates to the first 16 bytes if longer.
+/// Returns 0 for empty slices. Returns `Err(HoneypotInvariantViolation)` if
+/// `bytes.len() > 16` — an oversized encoding is anomalous and must be rejected
+/// rather than silently truncated (C4 fix, AGENTS §7.2).
+///
 /// Used for ratchet-up comparisons where values may be large token amounts.
-fn bytes_to_u128(bytes: &[u8]) -> u128 {
+fn bytes_to_u128(bytes: &[u8]) -> Result<u128, VmError> {
+    if bytes.len() > 16 {
+        return Err(VmError::HoneypotInvariantViolation {
+            reason: format!(
+                "storage value has {} bytes, expected ≤16 for u128 comparison",
+                bytes.len()
+            ),
+        });
+    }
     let mut buf = [0u8; 16];
-    let len = bytes.len().min(16);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    u128::from_le_bytes(buf)
+    buf[..bytes.len()].copy_from_slice(bytes);
+    Ok(u128::from_le_bytes(buf))
 }
 
 // ── Post-execution invariant check ───────────────────────────────────────────
@@ -309,8 +329,11 @@ fn check_ratchet_bool<S: ContractStateView>(
 
 /// RatchetOff: a capability flag may disable but never re-enable.
 ///
-/// Convention: `[0]` = off/disabled, `[1]` = on/enabled (single byte boolean).
-/// A write changing from `[0]` (off) to `[1]` (on) is a violation (re-enabling).
+/// Boolean interpretation (W2 fix — normalized, not single-byte-only):
+/// - "truthy" = any byte is non-zero (enabled/on).
+/// - "falsy"  = all bytes are zero, or empty/absent (disabled/off).
+///
+/// A write changing from falsy (off) to truthy (on) is a violation (re-enabling).
 fn check_ratchet_off<S: ContractStateView>(
     contract_addr: &Address,
     key: &[u8],
@@ -322,18 +345,18 @@ fn check_ratchet_off<S: ContractStateView>(
         return Ok(());
     };
     let Some(new_value) = write_opt else {
-        // Deleted — not a re-enable.
+        // Deleted — not a re-enable (deletion = falsy).
         return Ok(());
     };
-    // Only check if the new value is [1] (re-enabling).
-    if new_value.as_slice() != [1] {
+    // Only check if the new value is truthy (re-enabling attempt).
+    if !is_truthy(new_value) {
         return Ok(());
     }
-    // New value is [1] (on) — check if old value was [0] (off).
+    // New value is truthy (on) — check if old value was falsy (off).
     let old_value = canonical.read(contract_addr, key);
     match old_value {
-        Some(ref old) if old.as_slice() == [0] => {
-            // Was off, now turning back on → violation.
+        Some(ref old) if !is_truthy(old) => {
+            // Was off (falsy), now turning back on (truthy) → violation.
             Err(VmError::HoneypotInvariantViolation {
                 reason: format!(
                     "ratchet_off: capability flag {} re-enabled",
@@ -342,10 +365,18 @@ fn check_ratchet_off<S: ContractStateView>(
             })
         }
         _ => {
-            // Was on, didn't exist, or some other value → no violation.
+            // Was on (truthy), didn't exist, or some other truthy value → no violation.
             Ok(())
         }
     }
+}
+
+/// Interpret a byte slice as a boolean: truthy if any byte is non-zero.
+///
+/// Empty slices are falsy (no bytes → no non-zero byte).
+/// Used by `check_ratchet_off` for normalized boolean interpretation (W2 fix).
+fn is_truthy(bytes: &[u8]) -> bool {
+    bytes.iter().any(|&b| b != 0)
 }
 
 /// FeeCap: the sum of fee component values must not exceed a cap.
@@ -384,14 +415,16 @@ fn check_fee_cap<S: ContractStateView>(
                 // Not written this tx — read from canonical.
                 if let Some(ref canonical_val) = canonical.read(contract_addr, fk) {
                     // Need to handle the borrow: convert to u64 immediately.
-                    sum = sum.saturating_add(bytes_to_u64(canonical_val));
+                    // C4 fix: reject oversized encodings instead of truncating.
+                    sum = sum.saturating_add(bytes_to_u64(canonical_val)?);
                     continue;
                 }
                 // Not in canonical either — treat as 0.
                 &[]
             }
         };
-        sum = sum.saturating_add(bytes_to_u64(value_bytes));
+        // C4 fix: reject oversized encodings instead of truncating.
+        sum = sum.saturating_add(bytes_to_u64(value_bytes)?);
     }
 
     if sum > u64::from(max_sum_bps) {
@@ -420,7 +453,8 @@ fn check_ratchet_up<S: ContractStateView>(
         // Deleted — interpret as setting to 0. Check if old value existed.
         let old_value = canonical.read(contract_addr, key);
         if let Some(ref old) = old_value {
-            let old_num = bytes_to_u128(old);
+            // C4 fix: reject oversized encodings instead of truncating.
+            let old_num = bytes_to_u128(old)?;
             if old_num > 0 {
                 return Err(VmError::HoneypotInvariantViolation {
                     reason: format!(
@@ -436,8 +470,9 @@ fn check_ratchet_up<S: ContractStateView>(
     let old_value = canonical.read(contract_addr, key);
     match old_value {
         Some(ref old) => {
-            let old_num = bytes_to_u128(old);
-            let new_num = bytes_to_u128(new_value);
+            // C4 fix: reject oversized encodings instead of truncating.
+            let old_num = bytes_to_u128(old)?;
+            let new_num = bytes_to_u128(new_value)?;
             if new_num < old_num {
                 Err(VmError::HoneypotInvariantViolation {
                     reason: format!(

@@ -52,6 +52,12 @@ use crate::{
     state::ContractStateView,
 };
 
+// ── Type aliases ──────────────────────────────────────────────────────────────
+
+/// Return type for `execute_deploy` and `execute_call`: the execution result
+/// paired with the contract's safety manifest (if any) for `settle()`.
+type ExecResult = (Result<Vec<Log>, VmError>, Option<(Address, SafetyManifest)>);
+
 // ── Entry point constants ─────────────────────────────────────────────────────
 
 /// WASM entry point for contract calls.
@@ -182,7 +188,9 @@ impl Executor {
 
         // Dispatch to the appropriate execution path.
         //
-        // Each path returns `(Result<Vec<Log>, VmError>, Option<SafetyManifest>)`.
+        // Each path returns `(Result<Vec<Log>, VmError>, Option<(Address, SafetyManifest)>)`.
+        // The tuple carries the contract address alongside the manifest so that
+        // settle() uses the correct storage namespace for invariant checks (C2 fix).
         // Transfers have no contract → `None`. Deploy/call parse the manifest
         // from the contract's `"lemma.meta"` WASM custom section (P3·Step 18).
         let (result, manifest) = match tx.tx_type {
@@ -310,7 +318,7 @@ impl Executor {
         block: BlockContext,
         scratch: &mut ScratchState<'_, S>,
         meter: &mut FuelMeter,
-    ) -> (Result<Vec<Log>, VmError>, Option<SafetyManifest>) {
+    ) -> ExecResult {
         // 1. SIZE GATE — reject-before-charge (DB-A21, 08-EXECUTION_SPEC §3.4(a)).
         //    No gas is charged for an oversized module: the validator did no meaningful
         //    work beyond the size check, and charging gas would reward DoS attempts.
@@ -466,15 +474,27 @@ impl Executor {
         //     settle() (and later, the invariant enforcer) has access to it.
         //     Also cache it for subsequent calls to this contract in the same block.
         let manifest = parse_safety_manifest(&tx.data);
+
+        // C1 fix: charge invariant-check gas if manifest has constraints (DB-A51).
+        // Charge BEFORE the check runs (charge-before-execute, AGENTS §7.5).
+        if !manifest.constraints.is_empty() {
+            if let Err(e) = meter.charge(self.schedule.invariant_check) {
+                return (Err(e), Some((contract_addr, manifest)));
+            }
+        }
+
         {
+            // W1 fix: recover from poisoned mutex instead of panicking.
             let mut cache = self
                 .safety_manifests
                 .lock()
-                .expect("safety_manifests mutex poisoned");
+                .unwrap_or_else(|e| e.into_inner());
             cache.insert(contract_addr, manifest.clone());
         }
 
-        (Ok(vec![]), Some(manifest))
+        // C2 fix: pass contract_addr alongside manifest so settle() uses the
+        // correct storage namespace (not tx.sender which is the deployer EOA).
+        (Ok(vec![]), Some((contract_addr, manifest)))
     }
 
     /// Execute a `ContractCall` transaction.
@@ -506,7 +526,7 @@ impl Executor {
         block: BlockContext,
         scratch: &mut ScratchState<'_, S>,
         meter: &mut FuelMeter,
-    ) -> (Result<Vec<Log>, VmError>, Option<SafetyManifest>) {
+    ) -> ExecResult {
         let contract_addr = match tx.to {
             Some(addr) => addr,
             None => {
@@ -557,27 +577,34 @@ impl Executor {
         // BTreeMap for determinism (AGENTS §7.1), Mutex for thread safety.
         let code_hash = lemma_crypto::hash_bytes(&bytecode);
         let manifest = {
+            // W1 fix: recover from poisoned mutex instead of panicking.
             let mut cache = self
                 .safety_manifests
                 .lock()
-                .expect("safety_manifests mutex poisoned");
+                .unwrap_or_else(|e| e.into_inner());
             cache
                 .entry(contract_addr)
                 .or_insert_with(|| parse_safety_manifest(&bytecode))
                 .clone()
         };
 
+        // C1 fix: charge invariant-check gas if manifest has constraints (DB-A51).
+        // Charge BEFORE the check runs (charge-before-execute, AGENTS §7.5).
+        if !manifest.constraints.is_empty() {
+            if let Err(e) = meter.charge(self.schedule.invariant_check) {
+                return (Err(e), Some((contract_addr, manifest)));
+            }
+        }
+
         {
             // Scope the lock guard so it is released before WASM execution.
-            let mut warm = self
-                .warm_code
-                .lock()
-                .expect("warm_code mutex poisoned — executor thread panicked");
+            // W1 fix: recover from poisoned mutex instead of panicking.
+            let mut warm = self.warm_code.lock().unwrap_or_else(|e| e.into_inner());
             if warm.insert(code_hash) {
                 // First call to this code_hash in this block: code-cold.
                 // Charge the flat surcharge BEFORE execution (spec §3.1 rule 1).
                 if let Err(e) = meter.charge(self.schedule.code_cold_surcharge) {
-                    return (Err(e), Some(manifest));
+                    return (Err(e), Some((contract_addr, manifest)));
                 }
             }
             // If insert() returned false, the hash was already present: code-warm.
@@ -587,7 +614,7 @@ impl Executor {
         // Compile the stored bytecode.
         let module = match self.engine.compile_module(&bytecode) {
             Ok(m) => m,
-            Err(e) => return (Err(e), Some(manifest)),
+            Err(e) => return (Err(e), Some((contract_addr, manifest))),
         };
 
         // Snapshot scratch state into an owned view for the host.
@@ -612,7 +639,7 @@ impl Executor {
 
         let (wasm_consumed, host_after) = match self.run_wasm(&module, host) {
             Ok(r) => r,
-            Err(e) => return (Err(e), Some(manifest)),
+            Err(e) => return (Err(e), Some((contract_addr, manifest))),
         };
 
         // Destructure host_after to avoid partial-move issues.
@@ -651,7 +678,9 @@ impl Executor {
         let _ = meter.charge(wasm_consumed);
 
         // Collect events from the host (cleared on failure in settle).
-        (Ok(events), Some(manifest))
+        // C2 fix: pass contract_addr alongside manifest so settle() uses the
+        // correct storage namespace for invariant checks.
+        (Ok(events), Some((contract_addr, manifest)))
     }
 
     /// Run a compiled WASM module to completion.
@@ -786,16 +815,18 @@ impl Executor {
     ///
     /// ## Safety manifest (P3·Step 18, DB-A51)
     ///
-    /// `manifest` is `Some` for contract calls and deploys (parsed from the
-    /// contract's `"lemma.meta"` WASM custom section). `None` for plain
-    /// transfers (no contract, no manifest). The manifest is not yet enforced
-    /// in this subtask — enforcement is wired in a later subtask (Step 18-05).
-    /// The parameter is accepted now so the plumbing is in place.
+    /// `manifest` is `Some((contract_addr, manifest))` for contract calls and
+    /// deploys (parsed from the contract's `"lemma.meta"` WASM custom section).
+    /// `None` for plain transfers (no contract, no manifest).
+    ///
+    /// The `contract_addr` is the address of the executing contract — NOT
+    /// `tx.sender` (which is the caller/deployer EOA). This ensures the
+    /// invariant check inspects the correct storage namespace (C2 fix).
     fn settle<S: ContractStateView>(
         &self,
         tx: &Transaction,
         result: Result<Vec<Log>, VmError>,
-        manifest: Option<SafetyManifest>,
+        manifest: Option<(Address, SafetyManifest)>,
         scratch: ScratchState<'_, S>,
         meter: FuelMeter,
     ) -> TransactionReceipt {
@@ -820,16 +851,13 @@ impl Executor {
                 // committing. A violation converts success → failure (scratch
                 // discarded, failed receipt produced). This is the runtime pair
                 // of compile-time SAFETY-001/002/005/009.
-                if let Some(ref m) = manifest {
+                //
+                // C2 fix: `contract_addr` is plumbed from execute_call/execute_deploy
+                // so settle() uses the correct storage namespace. Previously used
+                // `tx.to.unwrap_or(tx.sender)` which was WRONG for deploys (tx.to
+                // is None, fell back to tx.sender = deployer EOA, not the contract).
+                if let Some((contract_addr, ref m)) = manifest {
                     if !m.constraints.is_empty() {
-                        // Determine which contract's storage namespace to check.
-                        // For calls: tx.to (the called contract).
-                        // For deploys: tx.to is None — use the deployer address
-                        // as fallback (deploy-time init writes key on the derived
-                        // contract address, but settle() doesn't know it; the
-                        // deployer address is a safe fallback since deploy manifests
-                        // are checked against the contract's own namespace).
-                        let contract_addr = tx.to.unwrap_or(tx.sender);
                         if let Err(violation) = check_safety_invariants(
                             m,
                             &contract_addr,

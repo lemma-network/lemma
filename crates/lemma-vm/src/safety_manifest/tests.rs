@@ -799,48 +799,206 @@ fn check_ignores_writes_to_different_contract() {
 
 #[test]
 fn bytes_to_u64_handles_empty() {
-    assert_eq!(super::bytes_to_u64(&[]), 0);
+    assert_eq!(super::bytes_to_u64(&[]).unwrap(), 0);
 }
 
 #[test]
 fn bytes_to_u64_handles_short_slice() {
     // [100, 0] → 100 in LE
-    assert_eq!(super::bytes_to_u64(&[100, 0]), 100);
+    assert_eq!(super::bytes_to_u64(&[100, 0]).unwrap(), 100);
 }
 
 #[test]
 fn bytes_to_u64_handles_full_8_bytes() {
     let val: u64 = 123_456_789;
-    assert_eq!(super::bytes_to_u64(&val.to_le_bytes()), val);
+    assert_eq!(super::bytes_to_u64(&val.to_le_bytes()).unwrap(), val);
 }
 
 #[test]
-fn bytes_to_u64_truncates_long_slice() {
-    // More than 8 bytes → only first 8 used.
+fn bytes_to_u64_rejects_oversized_slice() {
+    // C4 fix: more than 8 bytes → Err (reject, not truncate).
     let mut bytes = 42u64.to_le_bytes().to_vec();
-    bytes.extend_from_slice(&[0xFF, 0xFF]); // extra bytes
-    assert_eq!(super::bytes_to_u64(&bytes), 42);
+    bytes.extend_from_slice(&[0xFF, 0xFF]); // 10 bytes total
+    let result = super::bytes_to_u64(&bytes);
+    assert!(result.is_err(), "oversized u64 encoding must be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("10 bytes"),
+        "error should mention the actual byte count: {msg}"
+    );
 }
 
 #[test]
 fn bytes_to_u128_handles_empty() {
-    assert_eq!(super::bytes_to_u128(&[]), 0);
+    assert_eq!(super::bytes_to_u128(&[]).unwrap(), 0);
 }
 
 #[test]
 fn bytes_to_u128_handles_short_slice() {
-    assert_eq!(super::bytes_to_u128(&[200, 0]), 200);
+    assert_eq!(super::bytes_to_u128(&[200, 0]).unwrap(), 200);
 }
 
 #[test]
 fn bytes_to_u128_handles_full_16_bytes() {
     let val: u128 = 999_999_999_999;
-    assert_eq!(super::bytes_to_u128(&val.to_le_bytes()), val);
+    assert_eq!(super::bytes_to_u128(&val.to_le_bytes()).unwrap(), val);
 }
 
 #[test]
-fn bytes_to_u128_truncates_long_slice() {
+fn bytes_to_u128_rejects_oversized_slice() {
+    // C4 fix: more than 16 bytes → Err (reject, not truncate).
     let mut bytes = 77u128.to_le_bytes().to_vec();
-    bytes.extend_from_slice(&[0xFF, 0xFF]);
-    assert_eq!(super::bytes_to_u128(&bytes), 77);
+    bytes.extend_from_slice(&[0xFF, 0xFF]); // 18 bytes total
+    let result = super::bytes_to_u128(&bytes);
+    assert!(result.is_err(), "oversized u128 encoding must be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("18 bytes"),
+        "error should mention the actual byte count: {msg}"
+    );
+}
+
+// ── C3 fix: double-write tests (ScratchState stores final write only) ────────
+
+#[test]
+fn ratchet_bool_lock_then_unlock_nets_to_unlocked_passes() {
+    // C3: ScratchState only stores the final write. If a tx writes locked then
+    // unlocked, the net effect is unlocked → no violation.
+    // This test confirms the final-write semantics: the scratch map contains
+    // only the last value written to a key.
+    let addr = test_address(1);
+    let manifest = SafetyManifest {
+        constraints: vec![ratchet_bool(b"tradingEnabled", b"\x00")],
+    };
+    // Simulate: first write locked ([0]), then overwrite with unlocked ([1]).
+    // ScratchState BTreeMap::insert overwrites → final value is [1] (unlocked).
+    let writes = writes_with(&addr, b"tradingEnabled", Some(vec![1])); // net: unlocked
+    let mut canonical = InMemoryStateView::new();
+    canonical.write(&addr, b"tradingEnabled", vec![1]); // was unlocked
+
+    // Net write is unlocked → no violation.
+    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+}
+
+#[test]
+fn ratchet_bool_unlock_then_lock_nets_to_locked_violates() {
+    // C3: If a tx writes unlocked then locked, the net effect is locked.
+    // ScratchState stores only the final write → locked value → violation.
+    let addr = test_address(1);
+    let manifest = SafetyManifest {
+        constraints: vec![ratchet_bool(b"tradingEnabled", b"\x00")],
+    };
+    // Simulate: first write unlocked ([1]), then overwrite with locked ([0]).
+    // ScratchState BTreeMap::insert overwrites → final value is [0] (locked).
+    let writes = writes_with(&addr, b"tradingEnabled", Some(vec![0])); // net: locked
+    let mut canonical = InMemoryStateView::new();
+    canonical.write(&addr, b"tradingEnabled", vec![1]); // was unlocked
+
+    // Net write is locked (was unlocked → now locked) → violation.
+    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("ratchet_bool"),
+        "error should mention ratchet_bool: {msg}"
+    );
+}
+
+// ── C4 fix: oversized bytes rejection in invariant checks ────────────────────
+
+#[test]
+fn fee_cap_oversized_bytes_rejects() {
+    // C4: fee value stored as 9 bytes → violation (oversized u64 encoding).
+    let addr = test_address(1);
+    let manifest = SafetyManifest {
+        constraints: vec![fee_cap(&[b"fees.burn"], 2500)],
+    };
+    // Write a 9-byte value (exceeds u64's 8-byte limit).
+    let oversized_value = vec![0u8; 9];
+    let writes = writes_with(&addr, b"fees.burn", Some(oversized_value));
+    let canonical = InMemoryStateView::new();
+
+    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    assert!(result.is_err(), "oversized fee value must be rejected");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("9 bytes"),
+        "error should mention the byte count: {msg}"
+    );
+}
+
+#[test]
+fn ratchet_up_oversized_bytes_rejects() {
+    // C4: ratchet-up value stored as 17 bytes → violation (oversized u128 encoding).
+    let addr = test_address(1);
+    let manifest = SafetyManifest {
+        constraints: vec![ratchet_up(b"maxWallet")],
+    };
+    // Write a 17-byte value (exceeds u128's 16-byte limit).
+    let oversized_value = vec![1u8; 17];
+    let writes = writes_with(&addr, b"maxWallet", Some(oversized_value));
+    let mut canonical = InMemoryStateView::new();
+    canonical.write(&addr, b"maxWallet", 100u128.to_le_bytes().to_vec());
+
+    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    assert!(
+        result.is_err(),
+        "oversized ratchet-up value must be rejected"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("17 bytes"),
+        "error should mention the byte count: {msg}"
+    );
+}
+
+// ── W2 fix: normalized boolean interpretation for RatchetOff ─────────────────
+
+#[test]
+fn ratchet_off_multi_byte_truthy_re_enable_violates() {
+    // W2: multi-byte truthy value (e.g. [0, 1]) re-enabling from falsy → violation.
+    let addr = test_address(1);
+    let manifest = SafetyManifest {
+        constraints: vec![ratchet_off(b"mintable")],
+    };
+    // New value is [0, 1] — truthy (second byte is non-zero).
+    let writes = writes_with(&addr, b"mintable", Some(vec![0, 1]));
+    let mut canonical = InMemoryStateView::new();
+    // Old value is [0, 0] — falsy (all zeros).
+    canonical.write(&addr, b"mintable", vec![0, 0]);
+
+    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    assert!(
+        result.is_err(),
+        "multi-byte truthy re-enable must be a violation"
+    );
+}
+
+#[test]
+fn ratchet_off_multi_byte_falsy_to_truthy_from_empty_passes() {
+    // W2: new field (no prior value) being set to truthy → no violation.
+    let addr = test_address(1);
+    let manifest = SafetyManifest {
+        constraints: vec![ratchet_off(b"mintable")],
+    };
+    let writes = writes_with(&addr, b"mintable", Some(vec![0, 0, 1]));
+    let canonical = InMemoryStateView::new(); // empty — field is new
+
+    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+}
+
+#[test]
+fn ratchet_off_all_zero_multi_byte_is_falsy_no_violation() {
+    // W2: writing all-zero multi-byte value is falsy → disabling, not re-enabling.
+    let addr = test_address(1);
+    let manifest = SafetyManifest {
+        constraints: vec![ratchet_off(b"mintable")],
+    };
+    // New value is [0, 0, 0] — falsy.
+    let writes = writes_with(&addr, b"mintable", Some(vec![0, 0, 0]));
+    let mut canonical = InMemoryStateView::new();
+    canonical.write(&addr, b"mintable", vec![1]); // was on
+
+    // Disabling (truthy → falsy) is allowed.
+    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
