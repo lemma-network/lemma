@@ -44,6 +44,7 @@ pub mod codegen;
 pub mod error;
 pub mod lexer;
 pub mod parser;
+pub mod stdlib;
 pub mod type_checker;
 pub(crate) mod visit;
 
