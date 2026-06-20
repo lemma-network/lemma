@@ -1,2 +1,57 @@
-// @std/interfaces — IToken, INFT, IMultiToken, IVault interfaces
-// Content: P3·Step 8 subtask 03
+// @std/interfaces — Token, NFT, MultiToken, Vault interfaces
+// See docs/03-LANGUAGE_SPEC.md §13 for the full spec.
+
+// Approval options passed to IToken::approve (§24.6)
+struct ApprovalOpts {
+    amount: u128
+    expiry: u64
+    oneTime: bool
+}
+
+// Allowance value object returned by IToken::allowance (§24.6)
+struct Allowance {
+    amount: u128
+    expiry: u64
+    oneTime: bool
+}
+
+// IToken — the standard fungible token interface (§13)
+//
+// Bounded approvals (SAFETY-006): approve() takes ApprovalOpts instead of a
+// bare amount, preventing infinite/perpetual allowances.
+interface IToken {
+    fn totalSupply() -> u128
+    fn balanceOf(addr: Address) -> u128
+    fn transfer(to: Address, amount: u128) -> bool
+    fn approve(spender: Address, opts: ApprovalOpts) -> bool
+    fn transferFrom(from: Address, to: Address, amount: u128) -> bool
+    fn allowance(owner: Address, spender: Address) -> Allowance
+
+    event Transfer { @indexed from: Address, @indexed to: Address, amount: u128 }
+    event Approval { @indexed owner: Address, @indexed spender: Address, amount: u128, expiry: u64, oneTime: bool }
+}
+
+// INFT — NFT interface (stub, Phase 4)
+interface INFT {
+    fn ownerOf(tokenId: u128) -> Address
+    fn transferFrom(from: Address, to: Address, tokenId: u128)
+    fn approve(to: Address, tokenId: u128)
+
+    event Transfer { @indexed from: Address, @indexed to: Address, @indexed tokenId: u128 }
+}
+
+// IMultiToken — Multi-token interface (stub, Phase 4)
+interface IMultiToken {
+    fn balanceOf(account: Address, id: u128) -> u128
+    fn transferFrom(from: Address, to: Address, id: u128, amount: u128)
+
+    event TransferSingle { @indexed operator: Address, @indexed from: Address, @indexed to: Address, id: u128, amount: u128 }
+}
+
+// IVault — Vault interface (stub, Phase 4)
+interface IVault {
+    fn asset() -> Address
+    fn totalAssets() -> u128
+    fn deposit(assets: u128, receiver: Address) -> u128
+    fn withdraw(assets: u128, receiver: Address, owner: Address) -> u128
+}

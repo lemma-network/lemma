@@ -1,2 +1,94 @@
-// @std/access — Ownable, Pausable, AccessControl traits
-// Content: P3·Step 8 subtask 02
+// @std/access — Ownership, pausing, and role-based access control traits
+// See docs/03-LANGUAGE_SPEC.md §13 for the full spec.
+//
+// These traits back the built-in modifiers:
+//   @onlyOwner  => requires `uses Ownable`
+//   @whenNotPaused / @whenPaused  => requires `uses Pausable`
+//   @onlyRole("...")  => requires `uses AccessControl`
+
+// Ownable — single-key ownership with renounce capability (§13)
+//
+// `@onlyOwner` is the built-in modifier; `Ownable` provides its backing
+// `owner` state. 1-step transferOwnership (Bech32m checksum guards typos).
+// renounceOwnership sets owner to Address.burn (irreversible).
+trait Ownable {
+    state {
+        owner: Address
+    }
+
+    event OwnershipTransferred { @indexed previousOwner: Address, @indexed newOwner: Address }
+    event OwnershipRenounced { @indexed previousOwner: Address }
+
+    @onlyOwner
+    pub fn transferOwnership(newOwner: Address) {
+        assert(newOwner != Address.burn, "Use renounceOwnership")
+        emit OwnershipTransferred { previousOwner: self.owner, newOwner: newOwner }
+        self.owner = newOwner
+    }
+
+    @onlyOwner
+    pub fn renounceOwnership() {
+        emit OwnershipRenounced { previousOwner: self.owner }
+        self.owner = Address.burn
+    }
+
+    fn isRenounced() -> bool {
+        return self.owner == Address.burn
+    }
+}
+
+// Pausable — emergency stop mechanism (§13)
+//
+// Backs `@whenNotPaused` and `@whenPaused` built-in modifiers.
+trait Pausable {
+    state {
+        paused: bool
+    }
+
+    event Paused { account: Address }
+    event Unpaused { account: Address }
+
+    @onlyOwner
+    pub fn pause() {
+        assert(!self.paused, "Already paused")
+        self.paused = true
+        emit Paused { account: msg.sender }
+    }
+
+    @onlyOwner
+    pub fn unpause() {
+        assert(self.paused, "Not paused")
+        self.paused = false
+        emit Unpaused { account: msg.sender }
+    }
+}
+
+// AccessControl — role-based access control (§13)
+//
+// Backs `@onlyRole("ROLE_NAME")` built-in modifier.
+// GOVERNANCE role is required by SAFETY-005 for blacklist operations
+// and SAFETY-007 for upgrades (09-SAFETY_ANALYZER_SPEC §2.1).
+trait AccessControl {
+    state {
+        roles: Map<u128, Set<Address>>
+    }
+
+    event RoleGranted { @indexed role: u128, @indexed account: Address, @indexed sender: Address }
+    event RoleRevoked { @indexed role: u128, @indexed account: Address, @indexed sender: Address }
+
+    fn hasRole(role: u128, account: Address) -> bool {
+        return self.roles.get(role).has(account)
+    }
+
+    @onlyOwner
+    pub fn grantRole(role: u128, account: Address) {
+        self.roles.get(role).add(account)
+        emit RoleGranted { role: role, account: account, sender: msg.sender }
+    }
+
+    @onlyOwner
+    pub fn revokeRole(role: u128, account: Address) {
+        self.roles.get(role).remove(account)
+        emit RoleRevoked { role: role, account: account, sender: msg.sender }
+    }
+}
