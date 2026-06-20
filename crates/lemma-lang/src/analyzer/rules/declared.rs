@@ -24,7 +24,7 @@
 //!
 //! Spec §3-010 also requires state-field-gated transfer reverts to map to a
 //! declared restriction key (`pausable`, `blacklistGovernance`, `maxWallet`,
-//! `fees`/`fairLaunch`).  In Lemma's model that clause is **largely already
+//! `fees`).  In Lemma's model that clause is **largely already
 //! enforced** by the sibling rules:
 //! - an owner-only blacklist field ⇒ SAFETY-005,
 //! - a one-way trading gate ⇒ SAFETY-009,

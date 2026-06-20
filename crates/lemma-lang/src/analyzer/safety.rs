@@ -46,7 +46,7 @@ use super::rules;
 /// **Batch 2 (4e)**: SAFETY-002 (reworked to DB-A41 in 4f-tax), SAFETY-003, SAFETY-006 — active.
 /// **Batch 3 (4f)**: SAFETY-007, SAFETY-009, SAFETY-005, SAFETY-001, SAFETY-010 — active.
 /// **Batch 3 (4f-tax)**: SAFETY-020, SAFETY-021, SAFETY-022 (TaxToken fee-model) — active.
-/// **Batch 3 (4f-launch)**: SAFETY-023, SAFETY-024 (launch/holding-control) + P3-own-3 (a)(c) — active.
+/// **Batch 3 (4f-launch)**: SAFETY-023 (maxWallet) + P3-own-3 (a)(c) — active. SAFETY-024 RETIRED (DB-A57).
 /// **Batch 4 (4g)**: SAFETY-025 (sell-path external-call revert veto) — active.
 /// SAFETY-013 retired per decision DB-A48 (auto-injected by codegen).
 ///

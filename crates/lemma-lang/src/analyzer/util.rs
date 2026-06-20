@@ -34,7 +34,7 @@ pub(crate) fn block_contains_revert(stmts: &[Stmt]) -> bool {
 /// - `transferFrom` — the delegated transfer function.
 /// - Any function annotated `#[onTransfer]` — a transfer hook.
 ///
-/// Used by SAFETY-010, SAFETY-020, SAFETY-023, SAFETY-024, SAFETY-025 and
+/// Used by SAFETY-010, SAFETY-020, SAFETY-023, SAFETY-025 and
 /// `dataflow` to identify the root of the transfer call graph.
 ///
 /// Canonical form (AGENTS §2.4 — shared utilities live in `lemma-core`/`util`).
