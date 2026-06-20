@@ -22,6 +22,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::type_checker::types::SymbolKind;
+
 /// Embedded source for `@std/access` — Ownable, Pausable, AccessControl traits.
 const ACCESS_SRC: &str = include_str!("access.lem");
 
@@ -71,6 +73,50 @@ impl StdLibRegistry {
     /// List all available module names (for error messages / suggestions).
     pub fn available_modules(&self) -> Vec<&'static str> {
         self.modules.keys().copied().collect()
+    }
+
+    /// Symbol kind for a name exported by an `@std` module.
+    ///
+    /// Returns the [`SymbolKind`] that should be used when registering the
+    /// imported name in the resolver's scope.  Returns `None` if the name is
+    /// not exported by the module.
+    ///
+    /// This is a hardcoded export map — the `.lem` files remain as
+    /// documentation; the compiler uses this map for symbol resolution.
+    /// Full re-entrant parse+check of `.lem` files is deferred to a future step.
+    pub fn symbol_kind(&self, module: &str, name: &str) -> Option<SymbolKind> {
+        match (module, name) {
+            // @std/token exports
+            ("token", "Token") => Some(SymbolKind::Contract),
+            ("token", "TaxToken") => Some(SymbolKind::Contract),
+
+            // @std/interfaces exports
+            ("interfaces", "IToken") => Some(SymbolKind::Interface),
+            ("interfaces", "INFT") => Some(SymbolKind::Interface),
+            ("interfaces", "IMultiToken") => Some(SymbolKind::Interface),
+            ("interfaces", "IVault") => Some(SymbolKind::Interface),
+            ("interfaces", "ApprovalOpts") => Some(SymbolKind::Struct),
+            ("interfaces", "Allowance") => Some(SymbolKind::Struct),
+
+            // @std/access exports
+            ("access", "Ownable") => Some(SymbolKind::Trait),
+            ("access", "Pausable") => Some(SymbolKind::Trait),
+            ("access", "AccessControl") => Some(SymbolKind::Trait),
+
+            _ => None,
+        }
+    }
+
+    /// Check if a module path is a known `@std` module.
+    pub fn is_std_module(path: &str) -> bool {
+        path.starts_with("@std/")
+    }
+
+    /// Extract the module name from a full `@std` path.
+    ///
+    /// `"@std/token"` → `Some("token")`, `"./local"` → `None`.
+    pub fn module_name(path: &str) -> Option<&str> {
+        path.strip_prefix("@std/")
     }
 }
 

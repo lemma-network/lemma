@@ -23,9 +23,9 @@
 //!
 //! ## Imports
 //!
-//! Imported names are registered as [`SymbolKind::Imported`] (opaque) in
-//! both namespaces so downstream uses don't false-error.  Actual contents
-//! are resolved when the standard library is available (P3·Step 8).
+//! `@std/*` imports are resolved to concrete [`SymbolKind`] entries using the
+//! [`StdLibRegistry`] export map (P3·Step 8).  Non-@std imports remain as
+//! [`SymbolKind::Imported`] (opaque) for future user-module resolution.
 //!
 //! ## Deferred
 //!
@@ -41,6 +41,7 @@ use crate::parser::ast::{
     Ast, ContractMember, Expr, ForIter, Function, GenericParam, Item, LambdaBody, MatchArm,
     MatchBody, Pattern, Stmt, StructMember, TemplateExprSegment, Type,
 };
+use crate::stdlib::StdLibRegistry;
 
 use super::error::{TypeError, TypeErrorKind};
 use super::types::{
@@ -674,15 +675,30 @@ impl Resolver {
             crate::parser::ast::ImportNames::Named(v) => v.iter().map(String::as_str).collect(),
             crate::parser::ast::ImportNames::Star(alias) => vec![alias.as_str()],
         };
+
+        // Check if this is an @std import — resolve to real symbol kinds.
+        let std_module = StdLibRegistry::module_name(&import.from);
+
         for name in names {
-            // Register as opaque Imported symbols in BOTH namespaces so that
-            // any use of an imported name doesn't false-error in 3b.
-            // Real resolution happens at P3·Step 8 (stdlib).
-            let id_val = self.alloc(name, import.span, SymbolKind::Imported);
+            let kind = if let Some(module) = std_module {
+                // @std import: look up the real symbol kind from the stdlib
+                // export map.  Falls back to opaque Imported for unknown names.
+                let registry = StdLibRegistry::new();
+                registry
+                    .symbol_kind(module, name)
+                    .unwrap_or(SymbolKind::Imported)
+            } else {
+                // Non-@std import: register as opaque (future: user-module resolution).
+                SymbolKind::Imported
+            };
+
+            // Register in both value and type namespaces so that any use of
+            // an imported name doesn't false-error in 3b.
+            let id_val = self.alloc(name, import.span, kind.clone());
             // Ignore duplicates here — the same name might be imported by
             // multiple `import` statements; first wins.
             let _ = self.define_value(name, id_val);
-            let id_ty = self.alloc(name, import.span, SymbolKind::Imported);
+            let id_ty = self.alloc(name, import.span, kind);
             let _ = self.define_type(name, id_ty);
         }
         Ok(())

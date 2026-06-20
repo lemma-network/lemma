@@ -60,3 +60,102 @@ fn available_modules_sorted() {
     sorted.sort();
     assert_eq!(modules, sorted);
 }
+
+// ── symbol_kind export map ────────────────────────────────────────────────────
+
+#[test]
+fn symbol_kind_returns_contract_for_token() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(
+        reg.symbol_kind("token", "Token"),
+        Some(SymbolKind::Contract),
+    );
+}
+
+#[test]
+fn symbol_kind_returns_contract_for_tax_token() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(
+        reg.symbol_kind("token", "TaxToken"),
+        Some(SymbolKind::Contract),
+    );
+}
+
+#[test]
+fn symbol_kind_returns_interface_for_itoken() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(
+        reg.symbol_kind("interfaces", "IToken"),
+        Some(SymbolKind::Interface),
+    );
+}
+
+#[test]
+fn symbol_kind_returns_trait_for_ownable() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(
+        reg.symbol_kind("access", "Ownable"),
+        Some(SymbolKind::Trait),
+    );
+}
+
+#[test]
+fn symbol_kind_returns_struct_for_approval_opts() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(
+        reg.symbol_kind("interfaces", "ApprovalOpts"),
+        Some(SymbolKind::Struct),
+    );
+}
+
+#[test]
+fn symbol_kind_returns_none_for_unknown_name() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(reg.symbol_kind("token", "Nonexistent"), None);
+}
+
+#[test]
+fn symbol_kind_returns_none_for_unknown_module() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(reg.symbol_kind("nonexistent", "Token"), None);
+}
+
+// ── module_name / is_std_module ───────────────────────────────────────────────
+
+#[test]
+fn module_name_extracts_from_std_path() {
+    assert_eq!(StdLibRegistry::module_name("@std/token"), Some("token"));
+}
+
+#[test]
+fn module_name_extracts_nested_path() {
+    assert_eq!(
+        StdLibRegistry::module_name("@std/interfaces"),
+        Some("interfaces"),
+    );
+}
+
+#[test]
+fn module_name_returns_none_for_non_std() {
+    assert_eq!(StdLibRegistry::module_name("./local"), None);
+}
+
+#[test]
+fn module_name_returns_none_for_bare_name() {
+    assert_eq!(StdLibRegistry::module_name("token"), None);
+}
+
+#[test]
+fn is_std_module_true_for_std_path() {
+    assert!(StdLibRegistry::is_std_module("@std/token"));
+}
+
+#[test]
+fn is_std_module_false_for_relative_path() {
+    assert!(!StdLibRegistry::is_std_module("./local"));
+}
+
+#[test]
+fn is_std_module_false_for_bare_name() {
+    assert!(!StdLibRegistry::is_std_module("token"));
+}

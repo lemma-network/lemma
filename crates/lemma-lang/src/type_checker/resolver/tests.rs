@@ -763,6 +763,122 @@ pub fn touch() { self.lastTs = block.timestamp }
     );
 }
 
+// ── @std import resolution (P3·Step 8) ────────────────────────────────────────
+
+#[test]
+fn import_std_token_resolves_to_contract_kind() {
+    // `import { Token } from "@std/token"` should register Token as
+    // SymbolKind::Contract, not opaque Imported.
+    let typed = check_src(
+        r#"import { Token } from "@std/token"
+fn f(t: Token) {}"#,
+    )
+    .expect("@std/token import should resolve");
+    use crate::type_checker::types::SymbolKind;
+    let token_sym = typed
+        .symbols
+        .iter()
+        .find(|s| s.name == "Token")
+        .expect("Token should be in symbols");
+    assert_eq!(
+        token_sym.kind,
+        SymbolKind::Contract,
+        "Token from @std/token should be Contract, got {:?}",
+        token_sym.kind
+    );
+}
+
+#[test]
+fn import_std_access_resolves_to_trait_kind() {
+    // `import { Ownable } from "@std/access"` should register Ownable as
+    // SymbolKind::Trait.
+    let typed = check_src(
+        r#"import { Ownable } from "@std/access"
+fn f(o: Ownable) {}"#,
+    )
+    .expect("@std/access import should resolve");
+    use crate::type_checker::types::SymbolKind;
+    let ownable_sym = typed
+        .symbols
+        .iter()
+        .find(|s| s.name == "Ownable")
+        .expect("Ownable should be in symbols");
+    assert_eq!(
+        ownable_sym.kind,
+        SymbolKind::Trait,
+        "Ownable from @std/access should be Trait, got {:?}",
+        ownable_sym.kind
+    );
+}
+
+#[test]
+fn import_std_interfaces_resolves_to_interface_kind() {
+    // `import { IToken } from "@std/interfaces"` should register IToken as
+    // SymbolKind::Interface.
+    let typed = check_src(
+        r#"import { IToken } from "@std/interfaces"
+fn f(i: IToken) {}"#,
+    )
+    .expect("@std/interfaces import should resolve");
+    use crate::type_checker::types::SymbolKind;
+    let itoken_sym = typed
+        .symbols
+        .iter()
+        .find(|s| s.name == "IToken")
+        .expect("IToken should be in symbols");
+    assert_eq!(
+        itoken_sym.kind,
+        SymbolKind::Interface,
+        "IToken from @std/interfaces should be Interface, got {:?}",
+        itoken_sym.kind
+    );
+}
+
+#[test]
+fn import_unknown_std_name_falls_back_to_imported() {
+    // `import { Foo } from "@std/token"` — Foo is not a known export of
+    // @std/token, so it should fall back to SymbolKind::Imported.
+    let typed = check_src(
+        r#"import { Foo } from "@std/token"
+fn f(x: Foo) {}"#,
+    )
+    .expect("unknown @std name should still register as Imported");
+    use crate::type_checker::types::SymbolKind;
+    let foo_sym = typed
+        .symbols
+        .iter()
+        .find(|s| s.name == "Foo")
+        .expect("Foo should be in symbols");
+    assert_eq!(
+        foo_sym.kind,
+        SymbolKind::Imported,
+        "unknown Foo from @std/token should be Imported, got {:?}",
+        foo_sym.kind
+    );
+}
+
+#[test]
+fn import_non_std_stays_opaque() {
+    // `import { Bar } from "./local"` — non-@std imports remain opaque.
+    let typed = check_src(
+        r#"import { Bar } from "./local"
+fn f(b: Bar) {}"#,
+    )
+    .expect("non-@std import should register as Imported");
+    use crate::type_checker::types::SymbolKind;
+    let bar_sym = typed
+        .symbols
+        .iter()
+        .find(|s| s.name == "Bar")
+        .expect("Bar should be in symbols");
+    assert_eq!(
+        bar_sym.kind,
+        SymbolKind::Imported,
+        "Bar from ./local should be Imported, got {:?}",
+        bar_sym.kind
+    );
+}
+
 // ── QoL: Expr::New span improvement ───────────────────────────────────────────
 
 #[test]
