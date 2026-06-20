@@ -1,15 +1,18 @@
-//! Tests for SAFETY-023, SAFETY-024, and P3-own-3 (a)(c) — launch/holding rules.
+//! Tests for SAFETY-023 and P3-own-3 (a)(c) — launch/holding rules.
 //!
 //! ## Test layout (AGENTS §11.2)
 //!
 //! - **Positive**: valid contract → zero violations.
 //! - **Negative per rule**: each attack variant produces the exact `SafetyError` variant.
 //! - **Boundary**: no-feature declared → zero violations (conditional rules).
-//! - **Token AND TaxToken**: both supported for SAFETY-023/024.
+//! - **Token AND TaxToken**: both supported for SAFETY-023.
+//!
+//! ## RETIRED
+//!
+//! SAFETY-024 tests removed — rule retired per decision DB-A57.
 //!
 //! ## WF-014 constraints in tests
 //!
-//! All fairLaunch configs include the mandatory `duration` key (WF-014 fix).
 //! All Token/TaxToken configs include the mandatory keys per WF-014.
 //! Map fields do not use `= {}` default (Lem syntax: no map literal default).
 //! Address fields are initialized in `init()`.
@@ -251,30 +254,13 @@ pub fn transferFrom(from: Address, to: Address, amount: u128) {}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SAFETY-024.1 — anti-snipe = fee not block
+// BUG-M2 — SAFETY-023 multi-path check
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── Positive tests ─────────────────────────────────────────────────────────────
-
 #[test]
-fn safety_024_1_token_without_fair_launch_triggers_no_violations() {
-    // (boundary) Token without fairLaunch → zero SAFETY-024 violations.
-    let ast = typed_ast(minimal_token_src());
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    let safety_024: Vec<_> = violations
-        .iter()
-        .filter(|v| matches!(v, SafetyError::AntiSnipeIsBlock { .. }))
-        .collect();
-    assert!(
-        safety_024.is_empty(),
-        "Token without fairLaunch must trigger zero SAFETY-024.1 violations; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_024_1_token_with_fair_launch_fee_canonical_passes() {
-    // (pos) Token with fairLaunch + anti-snipe fee (no revert) → clean.
+fn safety_023_transfer_consults_but_transferfrom_does_not_fails() {
+    // (neg) M2: transfer consults isWalletExempt but transferFrom does not → MaxWalletNoExempt.
+    // BUG-M2 fix: ALL transfer-path entries must consult exempt, not just the first.
     let ast = typed_ast(
         r#"token T extends Token {
 config {
@@ -282,39 +268,32 @@ name: "T"
 symbol: "T"
 decimals: 18
 maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
+maxWallet: 500
 }
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 extraFee: u128 = 0 }
+state { totalSupply: u128 = 0 walletExempt: Map<Address, bool> }
 init() {}
+view fn isWalletExempt(addr: Address) -> bool { return self.walletExempt.get(addr) }
 pub fn transfer(to: Address, amount: u128) {
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    let dur = self.duration
-    self.extraFee = 5000
+    let exempt = self.isWalletExempt(to)
 }
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
+pub fn transferFrom(from: Address, to: Address, amount: u128) {
+    let x = amount
+}
 }"#,
     );
     let contracts = ast.contracts();
     let violations = launch_check(&contracts[0]);
-    let safety_024_1: Vec<_> = violations
-        .iter()
-        .filter(|v| matches!(v, SafetyError::AntiSnipeIsBlock { .. }))
-        .collect();
     assert!(
-        safety_024_1.is_empty(),
-        "Token with canonical anti-snipe fee must pass SAFETY-024.1; got {violations:?}"
+        violations.iter().any(
+            |v| matches!(v, SafetyError::MaxWalletNoExempt { func } if func == "transferFrom")
+        ),
+        "transferFrom without exempt consultation must fail SAFETY-023; got {violations:?}"
     );
 }
 
-// ── Negative tests ─────────────────────────────────────────────────────────────
-
 #[test]
-fn safety_024_1_token_with_fair_launch_anti_snipe_revert_fails() {
-    // (neg) Token with fairLaunch + anti-snipe revert → AntiSnipeIsBlock.
+fn safety_023_both_paths_consult_exempt_passes() {
+    // (pos) M2: both transfer AND transferFrom consult isWalletExempt → clean.
     let ast = typed_ast(
         r#"token T extends Token {
 config {
@@ -322,298 +301,28 @@ name: "T"
 symbol: "T"
 decimals: 18
 maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
+maxWallet: 500
 }
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 }
+state { totalSupply: u128 = 0 walletExempt: Map<Address, bool> }
 init() {}
+view fn isWalletExempt(addr: Address) -> bool { return self.walletExempt.get(addr) }
 pub fn transfer(to: Address, amount: u128) {
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    if (inSnipeWindow) {
-        revert "sniper blocked"
-    }
+    let exempt = self.isWalletExempt(to)
 }
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
+pub fn transferFrom(from: Address, to: Address, amount: u128) {
+    let exempt = self.isWalletExempt(to)
+}
 }"#,
     );
     let contracts = ast.contracts();
     let violations = launch_check(&contracts[0]);
-    assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::AntiSnipeIsBlock { .. })),
-        "Token with anti-snipe revert must fail SAFETY-024.1; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_024_1_taxtoken_with_fair_launch_anti_snipe_revert_fails() {
-    // (neg) TaxToken with fairLaunch + anti-snipe revert → AntiSnipeIsBlock.
-    let ast = typed_ast(
-        r#"token T extends TaxToken {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-maxFeePercent: 2500
-fees: { burn: 500 holders: 0 others: 0 }
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    if (inSnipeWindow) {
-        revert "sniper blocked"
-    }
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::AntiSnipeIsBlock { .. })),
-        "TaxToken with anti-snipe revert must fail SAFETY-024.1; got {violations:?}"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SAFETY-024.2 — has duration (auto-expiry)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// ── Positive tests ─────────────────────────────────────────────────────────────
-
-#[test]
-fn safety_024_2_token_without_fair_launch_triggers_no_violations() {
-    // (boundary) Token without fairLaunch → zero SAFETY-024.2 violations.
-    let ast = typed_ast(minimal_token_src());
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    let safety_024_2: Vec<_> = violations
+    let safety_023: Vec<_> = violations
         .iter()
-        .filter(|v| matches!(v, SafetyError::LaunchControlNotExpiring { .. }))
+        .filter(|v| matches!(v, SafetyError::MaxWalletNoExempt { .. }))
         .collect();
     assert!(
-        safety_024_2.is_empty(),
-        "Token without fairLaunch must trigger zero SAFETY-024.2 violations; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_024_2_token_with_fair_launch_duration_consulted_passes() {
-    // (pos) Token with fairLaunch + duration read in enforcement → clean.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    let inWindow = self.antiSnipeBlocks > 0
-    let dur = self.duration
-    let extraFee = 5000
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    let safety_024_2: Vec<_> = violations
-        .iter()
-        .filter(|v| matches!(v, SafetyError::LaunchControlNotExpiring { .. }))
-        .collect();
-    assert!(
-        safety_024_2.is_empty(),
-        "Token with duration consulted must pass SAFETY-024.2; got {violations:?}"
-    );
-}
-
-// ── Negative tests ─────────────────────────────────────────────────────────────
-
-#[test]
-fn safety_024_2_token_with_fair_launch_duration_not_read_fails() {
-    // (neg) Token with fairLaunch + duration NOT read in enforcement → LaunchControlNotExpiring.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    let inWindow = self.antiSnipeBlocks > 0
-    let extraFee = 5000
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::LaunchControlNotExpiring { .. })),
-        "Token with fairLaunch but duration not read must fail SAFETY-024.2; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_024_2_taxtoken_with_fair_launch_duration_not_read_fails() {
-    // (neg) TaxToken with fairLaunch + duration NOT read → LaunchControlNotExpiring.
-    let ast = typed_ast(
-        r#"token T extends TaxToken {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-maxFeePercent: 2500
-fees: { burn: 500 holders: 0 others: 0 }
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    let inWindow = self.antiSnipeBlocks > 0
-    let extraFee = 5000
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::LaunchControlNotExpiring { .. })),
-        "TaxToken with fairLaunch but duration not read must fail SAFETY-024.2; got {violations:?}"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SAFETY-024.3 — no sniper field gates disposal
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// ── Positive tests ─────────────────────────────────────────────────────────────
-
-#[test]
-fn safety_024_3_token_without_fair_launch_triggers_no_violations() {
-    // (boundary) Token without fairLaunch → zero SAFETY-024.3 violations.
-    let ast = typed_ast(minimal_token_src());
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    let safety_024_3: Vec<_> = violations
-        .iter()
-        .filter(|v| matches!(v, SafetyError::AntiSnipeIsBlock { func } if func.contains("sniper")))
-        .collect();
-    assert!(
-        safety_024_3.is_empty(),
-        "Token without fairLaunch must trigger zero SAFETY-024.3 violations; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_024_3_token_with_sniper_field_not_on_transfer_path_passes() {
-    // (pos) Token with fairLaunch + sniper field NOT on transfer denial path → clean.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 sniperList: Map<Address, bool> }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    let dur = self.duration
-    let extraFee = 5000
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    let safety_024_3: Vec<_> = violations
-        .iter()
-        .filter(|v| matches!(v, SafetyError::AntiSnipeIsBlock { func } if func.contains("sniper")))
-        .collect();
-    assert!(
-        safety_024_3.is_empty(),
-        "Token with sniper field not on transfer denial path must pass SAFETY-024.3; got {violations:?}"
-    );
-}
-
-// ── Negative tests ─────────────────────────────────────────────────────────────
-
-#[test]
-fn safety_024_3_token_with_sniper_field_gates_sell_fails() {
-    // (neg) Token with fairLaunch + sniper field gates transfer via assert → AntiSnipeIsBlock.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 sniperList: Map<Address, bool> }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    assert (!self.sniperList.get(to))
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::AntiSnipeIsBlock { .. })),
-        "Token with sniper field gating transfer must fail SAFETY-024.3; got {violations:?}"
+        safety_023.is_empty(),
+        "Both transfer paths consulting exempt must pass SAFETY-023; got {violations:?}"
     );
 }
 
@@ -841,251 +550,6 @@ pub fn setX(val: u128) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// BUG-C1 — SAFETY-024.1 fee cap enforcement
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn safety_024_1_fee_exceeds_cap_rejected() {
-    // (neg) C1: literal fee > MAX_ANTISNIPE_TAX (9000 bps) in snipe window → AntiSnipeIsBlock.
-    // `self.extraFee = 9001` exceeds the 9000 bps cap — effectively a block.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 extraFee: u128 = 0 }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    if (inSnipeWindow) {
-        self.extraFee = 9001
-    }
-    let dur = self.duration
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::AntiSnipeIsBlock { func } if func == "transfer")),
-        "Fee > MAX_ANTISNIPE_TAX (9001 > 9000) must fail SAFETY-024.1; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_024_1_fee_at_cap_passes() {
-    // (boundary) C1: literal fee == MAX_ANTISNIPE_TAX (9000 bps) → clean (at cap, not over).
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 extraFee: u128 = 0 }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    if (inSnipeWindow) {
-        self.extraFee = 9000
-    }
-    let dur = self.duration
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    let anti_snipe_block: Vec<_> = violations
-        .iter()
-        .filter(|v| matches!(v, SafetyError::AntiSnipeIsBlock { .. }))
-        .collect();
-    assert!(
-        anti_snipe_block.is_empty(),
-        "Fee == MAX_ANTISNIPE_TAX (9000) must pass SAFETY-024.1 fee cap; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_024_1_fee_non_literal_inconclusive() {
-    // (neg) C1: non-literal fee write in snipe window → Inconclusive (cannot prove bounded).
-    // `self.extraFee = self.snipeFee` — cannot statically prove ≤ MAX_ANTISNIPE_TAX.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 extraFee: u128 = 0 snipeFee: u128 = 5000 }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    if (inSnipeWindow) {
-        self.extraFee = self.snipeFee
-    }
-    let dur = self.duration
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations.iter().any(|v| matches!(
-            v,
-            SafetyError::Inconclusive {
-                rule: "SAFETY-024",
-                ..
-            }
-        )),
-        "Non-literal fee write in snipe window must produce Inconclusive; got {violations:?}"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// BUG-M2 — SAFETY-023 multi-path check
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn safety_023_transfer_consults_but_transferfrom_does_not_fails() {
-    // (neg) M2: transfer consults isWalletExempt but transferFrom does not → MaxWalletNoExempt.
-    // BUG-M2 fix: ALL transfer-path entries must consult exempt, not just the first.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-maxWallet: 500
-}
-state { totalSupply: u128 = 0 walletExempt: Map<Address, bool> }
-init() {}
-view fn isWalletExempt(addr: Address) -> bool { return self.walletExempt.get(addr) }
-pub fn transfer(to: Address, amount: u128) {
-    let exempt = self.isWalletExempt(to)
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {
-    let x = amount
-}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations.iter().any(
-            |v| matches!(v, SafetyError::MaxWalletNoExempt { func } if func == "transferFrom")
-        ),
-        "transferFrom without exempt consultation must fail SAFETY-023; got {violations:?}"
-    );
-}
-
-#[test]
-fn safety_023_both_paths_consult_exempt_passes() {
-    // (pos) M2: both transfer AND transferFrom consult isWalletExempt → clean.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-maxWallet: 500
-}
-state { totalSupply: u128 = 0 walletExempt: Map<Address, bool> }
-init() {}
-view fn isWalletExempt(addr: Address) -> bool { return self.walletExempt.get(addr) }
-pub fn transfer(to: Address, amount: u128) {
-    let exempt = self.isWalletExempt(to)
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {
-    let exempt = self.isWalletExempt(to)
-}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    let safety_023: Vec<_> = violations
-        .iter()
-        .filter(|v| matches!(v, SafetyError::MaxWalletNoExempt { .. }))
-        .collect();
-    assert!(
-        safety_023.is_empty(),
-        "Both transfer paths consulting exempt must pass SAFETY-023; got {violations:?}"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// BUG-M1 — SAFETY-024.1 scoped revert detection
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn safety_024_1_unrelated_revert_outside_snipe_window_does_not_flag() {
-    // (pos) M1: revert for `assert(amount > 0)` outside snipe-window branch must NOT flag.
-    // BUG-M1 fix: revert detection is scoped to snipe-window conditional branch only.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 extraFee: u128 = 0 }
-init() {}
-pub fn transfer(to: Address, amount: u128) {
-    assert (amount > 0)
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    if (inSnipeWindow) {
-        self.extraFee = 5000
-    }
-    let dur = self.duration
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    let anti_snipe_block: Vec<_> = violations
-        .iter()
-        .filter(|v| matches!(v, SafetyError::AntiSnipeIsBlock { .. }))
-        .collect();
-    assert!(
-        anti_snipe_block.is_empty(),
-        "Unrelated revert outside snipe-window branch must NOT flag SAFETY-024.1; got {violations:?}"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // BUG-C2 — spec §2.1: renounce-aware does NOT skip SAFETY-005/009
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1161,66 +625,4 @@ pub fn setX(val: u128) {
     // Document: no-op write is currently treated as renounce-aware (Step 6 deferred).
     // The important thing is SAFETY-005/009 do NOT use this to skip violations.
     let _ = is_aware; // behavior documented above; not asserting true/false here
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Cross-rule interaction tests (M4)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn cross_rule_maxwallet_fairlaunch_plain_token_clean() {
-    // (pos) M4: Token with maxWallet + fairLaunch both correctly implemented → zero violations.
-    let ast = typed_ast(
-        r#"token T extends Token {
-config {
-name: "T"
-symbol: "T"
-decimals: 18
-maxSupply: 1000000
-maxWallet: 500
-fairLaunch: {
-    cooldownBetweenBuys: 30
-    antiSnipeBlocks: 3
-    duration: 100
-}
-}
-state { totalSupply: u128 = 0 launchBlock: u128 = 0 extraFee: u128 = 0 walletExempt: Map<Address, bool> }
-init() {}
-view fn isWalletExempt(addr: Address) -> bool { return self.walletExempt.get(addr) }
-pub fn transfer(to: Address, amount: u128) {
-    let exempt = self.isWalletExempt(to)
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    if (inSnipeWindow) {
-        self.extraFee = 5000
-    }
-    let dur = self.duration
-}
-pub fn transferFrom(from: Address, to: Address, amount: u128) {
-    let exempt = self.isWalletExempt(to)
-    let inSnipeWindow = self.antiSnipeBlocks > 0
-    if (inSnipeWindow) {
-        self.extraFee = 5000
-    }
-    let dur = self.duration
-}
-}"#,
-    );
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations.is_empty(),
-        "Token with maxWallet + fairLaunch both correctly implemented must have zero violations; got {violations:?}"
-    );
-}
-
-#[test]
-fn cross_rule_token_without_maxwallet_and_without_fairlaunch_clean() {
-    // (boundary) M4: Token without maxWallet AND without fairLaunch → zero violations (base case).
-    let ast = typed_ast(minimal_token_src());
-    let contracts = ast.contracts();
-    let violations = launch_check(&contracts[0]);
-    assert!(
-        violations.is_empty(),
-        "Token without maxWallet and without fairLaunch must have zero violations; got {violations:?}"
-    );
 }

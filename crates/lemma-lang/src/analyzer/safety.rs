@@ -82,10 +82,10 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
 
     // Batch 3 (4f-launch): launch/holding-control rules + P3-own-3 (a)(c).
     // SAFETY-023: maxWallet exempt interface consultation.
-    // SAFETY-024: anti-snipe bounded fee (not block), self-expiring, no sniper-field disposal.
+    // SAFETY-024: RETIRED (DB-A57) — all checks deleted.
     // P3-own-3 (a): @onlyOwner requires owner state field.
     // P3-own-3 (c): renounced-owner treatment (via is_renounce_aware in blacklist/one_way_gate).
-    violations.extend(rules::launch::check(contract)); // SAFETY-023/024 + P3-own-3(a)(c)
+    violations.extend(rules::launch::check(contract)); // SAFETY-023 + P3-own-3(a)(c)
 
     // Batch 4 (4g): sell-path external-call revert veto.
     // SAFETY-025: any external call on the transfer path must be try-wrapped.

@@ -1,4 +1,4 @@
-//! `"lemma.meta"` WASM custom-section builder (P3·Step 6i, Step 18).
+//! `"lemma.meta"` WASM custom-section builder (P3·Step 6i, Step 18, Step 19).
 //!
 //! Builds the metadata payload embedded by `emit_module` as the
 //! `"lemma.meta"` custom section (last in the WASM binary per §5.5.2).
@@ -10,6 +10,7 @@
 //! {
 //!   "contract": "TokenX",
 //!   "compiler": "lemma-lang/0.1.0",
+//!   "safety_ruleset": "1.0.0",
 //!   "functions": [
 //!     {
 //!       "name": "transfer",
@@ -50,6 +51,20 @@ use crate::type_checker::typed_contract::TypedContract;
 /// Lets the VM and tooling detect incompatible metadata formats across
 /// compiler versions. Format: `"lemma-lang/{CARGO_PKG_VERSION}"`.
 const COMPILER_VERSION: &str = concat!("lemma-lang/", env!("CARGO_PKG_VERSION"));
+
+/// Safety-ruleset version embedded in every `"lemma.meta"` section (DB-A58 L1).
+///
+/// Identifies the safety ruleset that verified the contract. Tokens verified
+/// under an older/weaker ruleset are visibly older → feeds Tier-2 safety score.
+/// See `docs/17-VERSIONING_SPEC.md` §2.
+///
+/// Versioning scheme (semver):
+/// - MAJOR: rule weakened/removed (guarantee shrinks)
+/// - MINOR: rule added/strengthened (guarantee grows)
+/// - PATCH: implementation fix (no guarantee change)
+///
+/// `1.0.0` = post-DB-A57 de-LARP (22 active rules: 001-012, 014-023, 025).
+const SAFETY_RULESET_VERSION: &str = "1.0.0";
 
 // ── Serializable structures ───────────────────────────────────────────────────
 
@@ -123,6 +138,8 @@ struct ContractMetadata<'a> {
     contract: &'a str,
     /// Compiler version that produced this artifact (e.g. `"lemma-lang/0.1.0"`).
     compiler: &'static str,
+    /// Safety-ruleset semver that verified this contract (DB-A58 L1).
+    safety_ruleset: &'static str,
     /// Per-function state-access hints — one entry per public function.
     functions: Vec<FnMeta>,
     /// Safety constraints for the VM runtime honeypot invariant (DB-A51).
@@ -235,6 +252,7 @@ pub(crate) fn build_metadata(contract: &TypedContract<'_>) -> Vec<u8> {
     let meta = ContractMetadata {
         contract: contract.name(),
         compiler: COMPILER_VERSION,
+        safety_ruleset: SAFETY_RULESET_VERSION,
         functions,
         safety_constraints,
     };

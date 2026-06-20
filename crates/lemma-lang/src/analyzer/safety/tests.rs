@@ -60,6 +60,7 @@ return self.balance
 fn minimal_token_passes() {
     // A minimal token must pass analyze_safety.
     // SAFETY-003 (4e) requires a cap assert before totalSupply writes when maxSupply is set.
+    // SAFETY-001 (unconditional, DB-A57) requires a public `transfer` function.
     // Uses a complete Token config (name, symbol, decimals, maxSupply) per WF-014.
     let ast = typed_ast(
         r#"token MinimalToken extends Token {
@@ -71,6 +72,7 @@ maxSupply: 1000000
 }
 state { totalSupply: u128 = 0 }
 init() {}
+pub fn transfer(to: Address, amount: u128) {}
 }"#,
     );
     let contracts = ast.contracts();

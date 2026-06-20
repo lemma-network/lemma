@@ -55,6 +55,7 @@ fn typed_contract_name_matches_ast() {
 #[test]
 fn typed_contract_is_token_correct() {
     // Uses a complete Token config (name, symbol, decimals, maxSupply) per WF-014.
+    // SAFETY-001 (unconditional, DB-A57) requires a public `transfer` function.
     let typed = check_src(
         r#"
         contract Plain {}
@@ -66,6 +67,7 @@ fn typed_contract_is_token_correct() {
                 maxSupply: 1000000
             }
             init() {}
+            pub fn transfer(to: Address, amount: u128) {}
         }
         "#,
     );
@@ -172,6 +174,7 @@ fn typed_contract_delegates_type_of_to_typed_ast() {
 fn typed_contract_config_some_for_token() {
     // token contracts expose config() as Some (P3-checker-1 coverage).
     // Uses a complete Token config (name, symbol, decimals, maxSupply) per WF-014.
+    // SAFETY-001 (unconditional, DB-A57) requires a public `transfer` function.
     let typed = check_src(
         r#"
         token MyToken extends Token {
@@ -182,6 +185,7 @@ fn typed_contract_config_some_for_token() {
                 maxSupply: 1000000
             }
             init() {}
+            pub fn transfer(to: Address, amount: u128) {}
         }
         "#,
     );

@@ -1,7 +1,9 @@
-//! SAFETY-001 — Anti-Honeypot Symmetry.
+//! SAFETY-001 — Anti-Honeypot (disposal-path existence).
 //!
 //! Prevents buyable-but-not-sellable tokens (the classic honeypot).  Lemma's
-//! headline anti-scam guarantee.
+//! headline anti-scam guarantee.  **Fires unconditionally for all token
+//! contracts** — anti-honeypot is a protocol invariant, not an opt-in flag
+//! (DB-A57).
 //!
 //! ## True property (UNDECIDABLE)
 //!
@@ -14,15 +16,15 @@
 //! `transfer` / `transferFrom` handles both (buy vs sell is `isPair(from)||isPair(
 //! to)` — a transfer to/from a registered LP pair, §24.1).  The anti-honeypot
 //! property is therefore enforced as **disposal-path accessibility symmetry**:
-//! when `config.antiHoneypot == true`, the disposal path (`transfer` /
-//! `transferFrom`) must be **access-unrestricted** (anyone who holds can sell) and
-//! no balance-decreasing public entry may be access-restricted while a
+//! for every token contract, the disposal path (`transfer` / `transferFrom`) must
+//! be **access-unrestricted** (anyone who holds can sell) and no
+//! balance-decreasing public entry may be access-restricted while a
 //! balance-mutating entry is public.
 //!
-//! ## Enforced (decidable over-approximation, option B — §24.1 realization)
+//! ## Enforced (decidable over-approximation — §24.1 realization)
 //!
-//! When `config.antiHoneypot == true`, the **disposal path must exist and be
-//! public**: `transfer` (and `transferFrom` if present) must be declared and
+//! For all token contracts, the **disposal path must exist and be public**:
+//! `transfer` (and `transferFrom` if present) must be declared and
 //! access-unrestricted (`Auth` has no `@onlyOwner` / `@onlyRole`).  A missing or
 //! owner/role-gated `transfer` ⇒ `Honeypot` (holders cannot freely sell).  In the
 //! §24.1 single-transfer model this *is* the decidable honeypot surface: the one
@@ -39,7 +41,7 @@
 //! restricted acquisition lever (`mint`, fine) from a restricted disposal lever
 //! (a separate `@onlyOwner sell()`, a honeypot) requires **balance-direction
 //! `EffAuth` analysis** (the literal §3-001 step-3 form, option A).  That is
-//! deliberately **out of option-B scope** and is Tier-2 residue here — a separate
+//! deliberately **out of scope** and is Tier-2 residue here — a separate
 //! hand-written `@onlyOwner sell()` function (non-canonical in the §24.1 model)
 //! slips to the runtime sell-success-rate score + SAFETY-010, rather than being
 //! flagged by an unsound direction-blind heuristic.
@@ -50,9 +52,9 @@
 //! - **Owner-only blacklist** blocking a sell ⇒ caught by SAFETY-005.
 //! - **Sell fee ≥ 100%** ⇒ caught by SAFETY-002.
 //!
-//! Under `antiHoneypot`, those rules' violations already reject the contract; this
-//! rule adds the disposal-path existence + guard-symmetry check that is its unique
-//! contribution (spec §3-001 step 3 "ties to SAFETY-009").
+//! Those rules' violations already reject the contract; this rule adds the
+//! disposal-path existence + access check that is its unique contribution
+//! (spec §3-001 step 3 "ties to SAFETY-009").
 //!
 //! ## Tier-2 residue (per spec §3-001)
 //!
@@ -66,22 +68,23 @@
 //! See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-001`, `03-LANGUAGE_SPEC §24.1`.
 
 use crate::analyzer::authset::{auth_set, is_access_unrestricted};
-use crate::parser::ConfigValue;
 use crate::type_checker::typed_contract::TypedContract;
 
 use crate::analyzer::error::SafetyError;
 
 /// Check a contract for SAFETY-001 anti-honeypot violations.
 ///
-/// Fires only when `config.antiHoneypot == true`.  Returns
-/// [`SafetyError::Honeypot`] for a missing/restricted disposal path or an
-/// asymmetric balance-mutator guard.  Returns an empty `Vec` when safe (or when
-/// `antiHoneypot` is not enabled).
+/// Anti-honeypot is a protocol invariant — fires unconditionally for all token
+/// contracts (DB-A57).  Returns [`SafetyError::Honeypot`] for a missing or
+/// restricted disposal path.  Returns an empty `Vec` when safe or when the
+/// contract is not a token.
 #[must_use]
 pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     let mut violations = Vec::new();
 
-    if !anti_honeypot_enabled(contract) {
+    // Anti-honeypot is a protocol invariant — fires unconditionally for all
+    // token contracts (DB-A57). No opt-in flag.
+    if !contract.is_token() {
         return violations;
     }
 
@@ -92,16 +95,16 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     match transfer {
         None => {
             violations.push(SafetyError::Honeypot {
-                reason: "antiHoneypot is set but the token has no `transfer` \
-                         function — holders have no way to dispose of the token"
+                reason: "token has no `transfer` function — holders have no \
+                         disposal path (SAFETY-001)"
                     .to_owned(),
             });
         }
         Some(f) => {
             if !is_access_unrestricted(&auth_set(f)) {
                 violations.push(SafetyError::Honeypot {
-                    reason: "`transfer` is access-restricted (@onlyOwner / @onlyRole) \
-                             while antiHoneypot is set — holders cannot freely sell"
+                    reason: "`transfer` is access-restricted — holders cannot \
+                             freely dispose (SAFETY-001)"
                         .to_owned(),
                 });
             }
@@ -111,25 +114,14 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     if let Some(f) = functions.iter().find(|f| f.name == "transferFrom") {
         if !is_access_unrestricted(&auth_set(f)) {
             violations.push(SafetyError::Honeypot {
-                reason: "`transferFrom` is access-restricted while antiHoneypot is \
-                         set — the delegated disposal path is gated"
+                reason: "`transferFrom` is access-restricted — delegated \
+                         disposal path is gated (SAFETY-001)"
                     .to_owned(),
             });
         }
     }
 
     violations
-}
-
-/// Returns `true` if `config.antiHoneypot == true`.
-fn anti_honeypot_enabled(contract: &TypedContract<'_>) -> bool {
-    let Some(config) = contract.config() else {
-        return false;
-    };
-    config
-        .iter()
-        .find(|e| e.key == "antiHoneypot")
-        .is_some_and(|e| matches!(e.value, ConfigValue::Bool(true)))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

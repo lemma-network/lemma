@@ -23,9 +23,10 @@ use crate::lexer::token::Span;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SafetyError {
-    // ── SAFETY-001 — Anti-Honeypot Symmetry ──────────────────────────────────
-    /// A token with `antiHoneypot: true` has no sell path symmetric to its
-    /// buy path, or the sell path is guarded more strictly than the buy path.
+    // ── SAFETY-001 — Anti-Honeypot (disposal-path existence) ────────────────
+    /// A token contract has no disposal path (missing `transfer`) or the
+    /// disposal path is access-restricted.  Fires unconditionally for all
+    /// token contracts — anti-honeypot is a protocol invariant (DB-A57).
     ///
     /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-001`.
     #[error(
@@ -282,31 +283,9 @@ pub enum SafetyError {
         func: String,
     },
 
-    // ── SAFETY-024 — Fair Launch Anti-Snipe ──────────────────────────────────
-    /// Anti-snipe logic blocks/reverts a transfer instead of applying a bounded
-    /// fee, or a sniper-tracking field gates the sell path.
-    ///
-    /// See `09-SAFETY_ANALYZER_SPEC §3-quater SAFETY-024`.
-    #[error(
-        "SAFETY-024 anti-snipe block: `{func}` blocks transfers on the snipe path \
-         instead of applying a bounded fee — anti-snipe must be a fee, never a sell-block"
-    )]
-    AntiSnipeIsBlock {
-        /// The function that blocks transfers on the snipe path.
-        func: String,
-    },
-
-    /// Launch-control logic has no expiry or can be re-armed, making it permanent.
-    ///
-    /// See `09-SAFETY_ANALYZER_SPEC §3-quater SAFETY-024`.
-    #[error(
-        "SAFETY-024 non-expiring launch: `{func}` applies launch controls without \
-         consulting the duration expiry — launch controls must be self-expiring"
-    )]
-    LaunchControlNotExpiring {
-        /// The function that applies launch controls without consulting duration.
-        func: String,
-    },
+    // ── SAFETY-024 — RETIRED (DB-A57) ──────────────────────────────────────
+    // AntiSnipeIsBlock and LaunchControlNotExpiring removed.
+    // Number 024 is retired and not reused (same pattern as SAFETY-013).
 
     // ── P3-own-3 — Missing Required Trait ────────────────────────────────────
     /// A function uses an annotation that requires a trait the contract does not declare.

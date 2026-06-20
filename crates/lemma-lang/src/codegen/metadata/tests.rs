@@ -1,4 +1,4 @@
-//! Tests for `codegen::metadata` (P3·Step 6i, Step 18).
+//! Tests for `codegen::metadata` (P3·Step 6i, Step 18, Step 19).
 //!
 //! Follows AGENTS §11.2: tests in a separate submodule file.
 //! Test naming: `{action}_{outcome}` (AGENTS §11.3).
@@ -84,6 +84,24 @@ fn build_metadata_is_deterministic() {
     let first = build_metadata(&contracts[0]);
     let second = build_metadata(&contracts[0]);
     assert_eq!(first, second, "build_metadata must be deterministic");
+}
+
+// ─── build_metadata — safety_ruleset version (P3·Step 19, DB-A58 L1) ─────────
+
+#[test]
+fn build_metadata_includes_safety_ruleset_version() {
+    // "safety_ruleset" field must be present and equal the compile-time constant.
+    let typed = typed_ast_for("contract C {}");
+    let contracts = typed.contracts();
+    let bytes = build_metadata(&contracts[0]);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    let ruleset = json["safety_ruleset"]
+        .as_str()
+        .expect("safety_ruleset must be a string");
+    assert_eq!(
+        ruleset, "1.0.0",
+        "safety_ruleset must equal SAFETY_RULESET_VERSION constant"
+    );
 }
 
 // ─── extract_safety_constraints — unit tests (P3·Step 18) ────────────────────

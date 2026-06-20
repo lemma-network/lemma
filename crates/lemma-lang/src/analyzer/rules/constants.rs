@@ -15,16 +15,4 @@ pub(crate) const PROTOCOL_MAX_FEE_BPS: u16 = 2500;
 /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-022`.
 pub(crate) const FEE_INCREASE_DELAY: u64 = 7200; // ≈ 24 h at 12 s/block
 
-/// Protocol ceiling for anti-snipe tax (SAFETY-024).
-///
-/// The launch-window anti-snipe penalty is a **capped extra fee** — never a
-/// sell-block.  `MAX_ANTISNIPE_TAX` is its upper bound.  Well below 100% so
-/// snipe-window sells are always possible (the fee is punishing, not blocking).
-///
-/// Value: 9000 bps = 90%.  Policy decision — can be lowered by governance.
-///
-/// See `09-SAFETY_ANALYZER_SPEC §3-quater SAFETY-024`.
-///
-/// Consumer: `check_024_antsnipe_fee_not_block` in `rules/launch.rs` (SAFETY-024.1
-/// fee-cap enforcement — literal fee assignments in snipe-window branch).
-pub(crate) const MAX_ANTISNIPE_TAX: u16 = 9000;
+// MAX_ANTISNIPE_TAX removed — SAFETY-024 retired per decision DB-A57.

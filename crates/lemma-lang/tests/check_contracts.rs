@@ -64,6 +64,7 @@ decimals: 18
 maxSupply: 1000000
 }
 init() {}
+pub fn transfer(to: Address, amount: u128) {}
 }"#,
     );
     assert!(
@@ -91,6 +92,7 @@ state {
 snapshots: Map<Address, u128>
 }
 init() {}
+pub fn transfer(to: Address, amount: u128) {}
 pub view fn getSnapshot(holder: Address) -> u128 {
 return self.snapshots[holder]
 }
@@ -207,10 +209,12 @@ return self.stakes[staker]
 #[test]
 fn typed_contract_name_and_is_token_flags_correct() {
     // Token contract — is_token must be true; symbol_id must round-trip
+    // SAFETY-001 (unconditional, DB-A57) requires a public `transfer` function.
     let typed = pipeline(
         r#"token MyToken extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
 init() {}
+pub fn transfer(to: Address, amount: u128) {}
 }"#,
     )
     .expect("pipeline failed");
@@ -312,10 +316,12 @@ self.owner = owner
 #[test]
 fn typed_contract_config_present_for_token_absent_for_contract() {
     // Token — config must be Some with entries
+    // SAFETY-001 (unconditional, DB-A57) requires a public `transfer` function.
     let typed = pipeline(
         r#"token Tk extends Token {
 config { name: "T" symbol: "T" decimals: 18 maxSupply: 1 }
 init() {}
+pub fn transfer(to: Address, amount: u128) {}
 }"#,
     )
     .expect("pipeline failed");
