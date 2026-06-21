@@ -37,6 +37,12 @@ const INVALID_LEX_SOURCE: &str = "contract @Bad {}";
 /// Lem source with two contracts — used to verify multi-contract output.
 const TWO_CONTRACTS: &str = "contract Alpha {}\ncontract Beta {}";
 
+/// Lem source containing only a struct definition (no contracts).
+///
+/// `compile_contract` should return an empty vec and exit cleanly — struct-only
+/// files are valid Lem source but produce no deployable artifacts.
+const STRUCT_ONLY_SOURCE: &str = "struct Point { x: u32, y: u32 }";
+
 // ── Helper ────────────────────────────────────────────────────────────────────
 
 /// Write `source` to a temp file and return (temp_dir, source_path).
@@ -175,6 +181,21 @@ fn compile_produces_one_output_per_contract() {
         .collect();
     assert!(names.contains(&"Alpha".to_owned()));
     assert!(names.contains(&"Beta".to_owned()));
+}
+
+#[test]
+fn compile_source_with_no_contracts_produces_empty_output() {
+    // Struct-only source is valid Lem but yields no deployable artifacts.
+    // compile_contract must return Ok([]) — not an error, not a panic.
+    let (dir, src) = write_temp_source(STRUCT_ONLY_SOURCE);
+    let out = dir.path().join("out");
+
+    let outputs = compile_contract(&src, &out).expect("compile failed");
+    assert!(
+        outputs.is_empty(),
+        "expected empty output for struct-only source, got {} artifact(s)",
+        outputs.len()
+    );
 }
 
 #[test]

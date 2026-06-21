@@ -111,6 +111,11 @@ fn compile_one(
 ) -> Result<CompileOutput, LemmaCliError> {
     // Emit WASM — includes "lemma.abi" and "lemma.meta" as custom sections.
     let wasm = lemma_lang::compile(contract)?;
+
+    // Output file names are derived from the contract name. Duplicate
+    // top-level names are already rejected by `lemma_lang::check`
+    // (type_checker/mod.rs `check_no_duplicate_top_level_names`), so
+    // `name` is guaranteed unique within this source file — no clobber risk.
     let name = contract.name().to_owned();
 
     // Extract JSON payloads from the embedded WASM custom sections.
@@ -147,6 +152,11 @@ fn write_artifact(path: &Path, contents: &[u8]) -> Result<(), LemmaCliError> {
 /// Uses `wasmparser` (workspace dep, `=0.251.0`) to scan the WASM binary for a
 /// custom section matching `section_name`. Returns `None` if absent or malformed.
 ///
+/// Both `"lemma.abi"` and `"lemma.meta"` are always emitted by the Lem compiler
+/// (`codegen/wasm.rs`), so `None` on a compiler-produced binary signals a format
+/// regression — the caller falls back to `[]`/`{}` but a warning is emitted so
+/// the regression is visible rather than silent.
+///
 /// Same scanning pattern as `lemma-vm/parallel/hints.rs::find_lemma_meta_section`.
 fn extract_custom_section(wasm: &[u8], section_name: &str) -> Option<Vec<u8>> {
     for payload in Parser::new(0).parse_all(wasm) {
@@ -155,7 +165,17 @@ fn extract_custom_section(wasm: &[u8], section_name: &str) -> Option<Vec<u8>> {
                 return Some(reader.data().to_vec());
             }
             Ok(_) => {}
-            Err(_) => return None,
+            Err(e) => {
+                // Malformed WASM bytes from the compiler would indicate a codegen
+                // bug. Warn visibly rather than silently falling back to empty JSON,
+                // so format regressions surface immediately (mirrors hints.rs warn!).
+                eprintln!(
+                    "warning: WASM parse error scanning for '{}' section — \
+                     falling back to empty default: {}",
+                    section_name, e
+                );
+                return None;
+            }
         }
     }
     None
