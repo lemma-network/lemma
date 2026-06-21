@@ -386,15 +386,23 @@ pub trait HostFunctions {
 
     /// Call another contract (63/64 gas forwarding + depth + reentrancy).
     ///
-    /// B3 stub: reentrancy and gas checks are enforced; actual execution is
-    /// wired in B4. Returns `Err(VmError::InvalidParameter)` after checks pass.
+    /// # Production call path
+    ///
+    /// **Only reachable from unit tests.** The production call path is:
+    /// `linker.rs dispatch_call(CallMode::Normal)` — the linker closure (index 14)
+    /// has access to the full wasmtime execution context and performs the actual
+    /// WASM execution. This trait method handles only the pre-execution checks
+    /// (reentrancy + gas) for unit-test coverage of those checks.
+    ///
+    /// Returns `Ok(vec![])` after checks pass (not `Err(InvalidParameter)` as the
+    /// stale B3 comment said — the B4 linker path is now wired and this method
+    /// is only called directly in host/tests.rs unit tests).
     ///
     /// # Errors
     ///
     /// - [`VmError::OutOfGas`] — gas exhausted before forwarding.
     /// - [`VmError::CallDepthExceeded`] — depth limit reached.
     /// - [`VmError::Reentrancy`] — `addr` already has a live frame.
-    /// - [`VmError::InvalidParameter`] — B4 executor not yet wired.
     fn call_contract(&mut self, addr: Address, data: &[u8], gas: Gas) -> Result<Vec<u8>, VmError>;
 
     /// Return the remaining gas budget.
@@ -594,12 +602,19 @@ impl<S: ContractStateView> HostFunctions for HostState<S> {
             return Err(e);
         }
 
-        // B4 will wire in real execution. Exit cleanly so B4 can take over.
+        // Gas/reentrancy checks passed. The actual WASM execution is performed
+        // by the linker's call_contract closure (index 14 in linker.rs), which
+        // has access to the full wasmtime execution context. This trait method
+        // handles the pre-execution checks; the linker handles execution.
+        //
+        // Only reachable from unit tests (host/tests.rs). Production call path:
+        // linker.rs dispatch_call(CallMode::Normal). The linker closure overrides
+        // this return value with real return data from the callee's value_return().
         self.call_ctx.exit_call(&addr);
 
-        Err(VmError::InvalidParameter {
-            reason: "call_contract: not implemented (P3·Step 21 subtask_02)".into(),
-        })
+        // Return empty data — only reached in unit tests that call the trait method
+        // directly (to test reentrancy/gas checks without a full WASM execution).
+        Ok(vec![])
     }
 
     fn gas_remaining(&mut self) -> Result<Gas, VmError> {

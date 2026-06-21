@@ -699,7 +699,7 @@ impl Executor {
     /// # Errors
     ///
     /// Maps wasmtime traps to [`VmError`] variants.
-    fn run_wasm<S: ContractStateView + 'static>(
+    fn run_wasm<S: ContractStateView + Clone + 'static>(
         &self,
         module: &wasmtime::Module,
         host: HostState<S>,
@@ -759,7 +759,7 @@ impl Executor {
     /// - [`VmError::OutOfGas`] — init exhausted the gas budget.
     /// - [`VmError::StackOverflow`] — native WASM stack exceeded during init.
     /// - [`VmError::TrapUnknown`] — any other WASM trap during init.
-    fn run_wasm_with_entry<S: ContractStateView + 'static>(
+    fn run_wasm_with_entry<S: ContractStateView + Clone + 'static>(
         &self,
         module: &wasmtime::Module,
         host: HostState<S>,
@@ -1375,6 +1375,13 @@ impl<S: ContractStateView> ContractStateView for ScratchState<'_, S> {
 /// Implementations must be `'static` so that `ScratchSnapshot` (which holds a
 /// `Box<dyn CanonicalStateRead + 'static>`) satisfies the wasmtime linker's
 /// `'static` bound on `HostState<ScratchSnapshot>`.
+///
+/// # `clone_box` requirement
+///
+/// Required by `ScratchSnapshot::clone()` so that the boxed canonical reader
+/// can be duplicated when the snapshot is cloned for a callee's `HostState`
+/// in cross-contract calls (P3·Step 21 subtask_02). The blanket impl below
+/// provides this automatically for all `Clone + ContractStateView + 'static`.
 pub(crate) trait CanonicalStateRead: 'static {
     /// Read a storage slot from canonical state.
     fn canonical_read(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>>;
@@ -1384,6 +1391,18 @@ pub(crate) trait CanonicalStateRead: 'static {
 
     /// Read the native LEM balance of an account from canonical state.
     fn canonical_balance(&self, addr: &Address) -> Amount;
+
+    /// Read deployed bytecode for a contract address from canonical state.
+    ///
+    /// Used by `ScratchSnapshot::code()` to fall through to committed state
+    /// for contracts deployed in prior transactions (P3·Step 21 subtask_02).
+    fn canonical_code(&self, addr: &Address) -> Option<Vec<u8>>;
+
+    /// Clone this reader into a new `Box<dyn CanonicalStateRead + 'static>`.
+    ///
+    /// Required by `ScratchSnapshot::clone()` — `Box<dyn Trait>` is not
+    /// `Clone` by default; this method provides the escape hatch.
+    fn clone_box(&self) -> Box<dyn CanonicalStateRead + 'static>;
 }
 
 /// Blanket implementation: any `ContractStateView + Clone + 'static` can serve
@@ -1401,6 +1420,84 @@ impl<S: ContractStateView + Clone + 'static> CanonicalStateRead for S {
     fn canonical_balance(&self, addr: &Address) -> Amount {
         self.balance(addr)
     }
+
+    fn canonical_code(&self, addr: &Address) -> Option<Vec<u8>> {
+        self.code(addr)
+    }
+
+    fn clone_box(&self) -> Box<dyn CanonicalStateRead + 'static> {
+        Box::new(self.clone())
+    }
+}
+
+// ── run_wasm_call ─────────────────────────────────────────────────────────────
+
+/// Run a compiled WASM module to completion for a cross-contract call.
+///
+/// This is the free-function equivalent of [`Executor::run_wasm`], used by
+/// the `call_contract` host function (P3·Step 21 subtask_02) to execute a
+/// callee contract from inside a host callback.
+///
+/// ## Why a free function?
+///
+/// `Executor::run_wasm` is a method on `Executor` and requires `&self` for the
+/// engine reference. Inside a host callback, we have the engine via
+/// `HostState::engine` (an `Arc`-backed `LemmaEngine` clone). A free function
+/// avoids the need to construct a full `Executor` for the recursive call.
+///
+/// ## Fuel sync
+///
+/// Same pattern as `Executor::run_wasm`: initial fuel from host meter,
+/// consumed = initial − remaining after execution.
+///
+/// # Type parameter
+///
+/// `S` must be `ContractStateView + Clone + 'static`. In production, `S` is
+/// always `ScratchSnapshot`. In tests, `S` may be `InMemoryStateView`.
+///
+/// # Errors
+///
+/// Maps wasmtime traps to [`VmError`] variants.
+pub(crate) fn run_wasm_call<S: ContractStateView + Clone + 'static>(
+    engine: &LemmaEngine,
+    module: &wasmtime::Module,
+    host: HostState<S>,
+) -> Result<(Gas, HostState<S>), VmError> {
+    let initial_fuel = host.meter.remaining();
+
+    let mut store = wasmtime::Store::new(engine.inner(), host);
+
+    // Set wasmtime fuel from the meter's remaining budget.
+    store
+        .set_fuel(initial_fuel.as_u64())
+        .map_err(|e| VmError::InvalidParameter {
+            reason: format!("run_wasm_call: set_fuel failed: {e}"),
+        })?;
+
+    // Build linker and instantiate.
+    let linker = linker::build_linker::<S>(engine)?;
+    let instance =
+        linker
+            .instantiate(&mut store, module)
+            .map_err(|e| VmError::InstantiationFailed {
+                reason: e.to_string(),
+            })?;
+
+    // Get the typed entry-point function.
+    let func = instance
+        .get_typed_func::<(), ()>(&mut store, ENTRY_POINT)
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // Call the entry point — map traps to VmError.
+    func.call(&mut store, ()).map_err(map_trap_to_vm_error)?;
+
+    // Compute WASM instruction fuel consumed.
+    let fuel_remaining = store.get_fuel().unwrap_or(0);
+    let wasm_consumed = Gas(initial_fuel.as_u64().saturating_sub(fuel_remaining));
+
+    Ok((wasm_consumed, store.into_data()))
 }
 
 // ── ScratchSnapshot ───────────────────────────────────────────────────────────
@@ -1447,6 +1544,26 @@ pub(crate) struct ScratchSnapshot {
     /// M4 fix: closes the gap where WASM `storage_read` returned `None` for
     /// keys written by prior committed transactions.
     canonical: Box<dyn CanonicalStateRead + 'static>,
+}
+
+impl Clone for ScratchSnapshot {
+    /// Clone this snapshot for use as a callee's state in cross-contract calls.
+    ///
+    /// The `canonical` field is a `Box<dyn CanonicalStateRead>` — not `Clone`
+    /// by default. We use `clone_box()` (P3·Step 21 subtask_02) to duplicate it.
+    /// All other fields are standard `BTreeMap`/`BTreeSet` clones.
+    fn clone(&self) -> Self {
+        Self {
+            storage: self.storage.clone(),
+            storage_deletes: self.storage_deletes.clone(),
+            balances: self.balances.clone(),
+            nonces: self.nonces.clone(),
+            code: self.code.clone(),
+            code_hashes: self.code_hashes.clone(),
+            code_store: self.code_store.clone(),
+            canonical: self.canonical.clone_box(),
+        }
+    }
 }
 
 impl ContractStateView for ScratchSnapshot {
@@ -1525,8 +1642,17 @@ impl ContractStateView for ScratchSnapshot {
                 return Some(bytes.clone());
             }
         }
-        // Fall back to legacy code map (backward compat).
-        self.code.get(addr).cloned()
+        // Fall back to legacy code map (backward compat — current-tx writes).
+        if let Some(bytes) = self.code.get(addr) {
+            return Some(bytes.clone());
+        }
+        // Fall through to canonical state (M4 fix for code reads).
+        //
+        // Contracts deployed in prior committed transactions have their bytecode
+        // in the canonical state, not in the current-tx scratch maps. Without
+        // this fall-through, `call_contract` cannot load callee bytecode for
+        // contracts deployed before the current transaction (P3·Step 21 subtask_02).
+        self.canonical.canonical_code(addr)
     }
 
     fn set_code(&mut self, addr: &Address, code: Vec<u8>) {
@@ -1539,6 +1665,63 @@ impl ContractStateView for ScratchSnapshot {
         // NOTE: has_code_hash on ScratchSnapshot only sees writes from the current tx.
         // This is acceptable: ScratchSnapshot is only used by execute_call (WASM host),
         // not by execute_deploy (which uses ScratchState directly).
+    }
+
+    /// Merge writes from this snapshot into `target` (P3·Step 21 subtask_02).
+    ///
+    /// Delegates to [`ScratchSnapshot::merge_into`] which applies storage writes,
+    /// deletes, balance writes, nonce writes, and code writes to `target`.
+    fn merge_writes_into<T: ContractStateView>(&self, target: &mut T) {
+        self.merge_into(target);
+    }
+}
+
+impl ScratchSnapshot {
+    /// Merge this snapshot's writes into a target `ContractStateView`.
+    ///
+    /// Used by the `call_contract` linker closure (P3·Step 21 subtask_02) to
+    /// propagate callee state writes back into the caller's state after a
+    /// successful cross-contract call.
+    ///
+    /// Applies in order: storage writes, storage deletes (tombstones), balance
+    /// writes, nonce writes, code writes. The `canonical` field is read-only
+    /// and is NOT merged (it represents committed state, not new writes).
+    pub(crate) fn merge_into<S: ContractStateView>(&self, target: &mut S) {
+        // Storage writes (highest priority — overwrite any existing value).
+        for ((contract, key), value) in &self.storage {
+            target.write(contract, key, value.clone());
+        }
+        // Storage deletes (tombstones — remove from target).
+        for (contract, key) in &self.storage_deletes {
+            target.delete(contract, key);
+        }
+        // Balance writes.
+        for (addr, amount) in &self.balances {
+            target.set_balance(addr, *amount);
+        }
+        // Nonce writes.
+        //
+        // NOTE: Nonce merge is intentional but scoped. No WASM-reachable host fn mutates
+        // nonces today (nonces are tx-level, incremented by executor.rs settle(), not by
+        // host fns). When nested-deploy / CREATE2 host fn ships, revisit whether callee
+        // nonce changes should propagate. Tracked: living-notes Technical Debt VM-merge-nonce-1.
+        for (addr, nonce) in &self.nonces {
+            target.set_nonce(addr, *nonce);
+        }
+        // Code writes (legacy path).
+        for (addr, code) in &self.code {
+            target.set_code(addr, code.clone());
+        }
+        // Thin-pointer + content-addressed code writes (DB-A22/A23).
+        // set_code handles both the address pointer and the content store.
+        // For the thin-pointer path, we write via set_code (which stores by address).
+        // The code_hashes and code_store maps are internal to ScratchSnapshot;
+        // the target receives the resolved bytecode via set_code.
+        for (addr, hash) in &self.code_hashes {
+            if let Some(bytes) = self.code_store.get(hash) {
+                target.set_code(addr, bytes.clone());
+            }
+        }
     }
 }
 

@@ -160,6 +160,26 @@ pub trait ContractStateView {
     /// `true` if bytecode with this hash is already stored (in committed state
     /// or in the current transaction's scratch), `false` otherwise.
     fn has_code_hash(&self, hash: &Hash) -> bool;
+
+    /// Merge writes from this state view into `target`.
+    ///
+    /// Used by the `call_contract` host function (P3·Step 21 subtask_02) to
+    /// propagate callee state writes back into the caller's state after a
+    /// successful cross-contract call.
+    ///
+    /// ## Default implementation
+    ///
+    /// The default impl is a no-op — suitable for state views that do not
+    /// track writes separately (e.g. [`InMemoryStateView`] in unit tests).
+    /// [`crate::executor::ScratchSnapshot`] overrides this to apply its
+    /// write/delete/balance/nonce/code maps to `target`.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` — the state view to merge writes into.
+    fn merge_writes_into<T: ContractStateView>(&self, _target: &mut T) {
+        // Default: no-op. Override in ScratchSnapshot for production merge.
+    }
 }
 
 // ── InMemoryStateView ─────────────────────────────────────────────────────────

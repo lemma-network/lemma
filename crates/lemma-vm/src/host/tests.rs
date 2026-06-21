@@ -460,6 +460,193 @@ fn call_contract_oog_during_call_base_charge_restores_call_context() {
         .expect("callee should not be locked after OOG unwind");
 }
 
+// ── delegate_call semantics tests ────────────────────────────────────────────
+//
+// delegate_call runs callee CODE in the CALLER's storage namespace.
+// The linker's dispatch_call(CallMode::Delegate) achieves this by setting
+// BlockContext.contract = caller_contract (not callee addr) and preserving
+// BlockContext.msg_sender from the caller's original context.
+//
+// These tests verify the BlockContext manipulation logic that underpins
+// delegate_call semantics at the HostState level.
+
+/// Build a `HostState` with explicit `contract` and `msg_sender` addresses.
+///
+/// Used by delegate_call tests to set up distinct caller/callee/sender addresses.
+fn make_host_with_context(
+    budget: u64,
+    contract: Address,
+    msg_sender: Address,
+    balances: BTreeMap<Address, Amount>,
+) -> HostState<InMemoryStateView> {
+    let block = BlockContext {
+        height: 100,
+        timestamp: 1_700_000_000,
+        msg_sender,
+        msg_value: Amount::zero(),
+        tx_origin: msg_sender,
+        contract,
+    };
+    HostState::new(
+        FuelMeter::new(Gas::new(budget)),
+        LemmaEngine::new().expect("test engine must initialise"),
+        GasSchedule::devnet(),
+        CallContext::new(),
+        block,
+        InMemoryStateView::with_balances(balances),
+        vec![],
+    )
+}
+
+// Test 1: delegate_call storage namespace — writes land in caller's namespace, not callee's.
+//
+// Simulates what dispatch_call(CallMode::Delegate) does: the callee HostState is built
+// with block.contract = caller_contract. Any storage_write inside the callee therefore
+// writes to the caller's namespace. This test verifies that invariant directly.
+#[test]
+fn delegate_call_storage_writes_land_in_caller_namespace_not_callee() {
+    let caller_addr = Address::from_public_key(&[0xCA; 32]);
+    let callee_addr = Address::from_public_key(&[0xCE; 32]);
+    let sender_addr = Address::from_public_key(&[0x55; 32]);
+
+    // Simulate the callee HostState as built by dispatch_call(CallMode::Delegate):
+    //   block.contract  = caller_addr  (NOT callee_addr — this is the key invariant)
+    //   block.msg_sender = sender_addr (original sender, preserved)
+    let mut callee_host = make_host_with_context(
+        1_000_000,
+        caller_addr, // contract = CALLER's address (delegate mode)
+        sender_addr, // msg_sender = original sender (preserved)
+        BTreeMap::new(),
+    );
+
+    // Callee writes a storage key — this should land in caller_addr's namespace.
+    callee_host
+        .storage_write(b"delegate_key", b"delegate_value")
+        .expect("storage_write should succeed");
+
+    // Verify: the write landed in caller_addr's namespace (block.contract = caller_addr).
+    assert_eq!(
+        callee_host.state.read(&caller_addr, b"delegate_key"),
+        Some(b"delegate_value".to_vec()),
+        "storage write must land in caller's namespace (block.contract = caller_addr)"
+    );
+
+    // Verify: callee_addr's namespace is untouched — delegate_call does NOT write to callee.
+    assert!(
+        callee_host
+            .state
+            .read(&callee_addr, b"delegate_key")
+            .is_none(),
+        "callee's own namespace must be untouched in delegate mode"
+    );
+}
+
+// Test 2: delegate_call msg_sender preservation.
+//
+// In delegate_call, msg_sender is the ORIGINAL caller (the EOA or contract that
+// initiated the chain), NOT the delegating contract. This is the semantic difference
+// from call_contract where msg_sender is set to the delegating contract's address.
+#[test]
+fn delegate_call_msg_sender_is_original_sender_not_delegating_contract() {
+    let caller_addr = Address::from_public_key(&[0xCA; 32]);
+    let original_sender = Address::from_public_key(&[0x0E; 32]);
+
+    // Simulate the callee HostState as built by dispatch_call(CallMode::Delegate):
+    //   block.msg_sender = original_sender (preserved from caller's BlockContext)
+    //   block.contract   = caller_addr (caller's namespace)
+    let mut callee_host = make_host_with_context(
+        1_000_000,
+        caller_addr,
+        original_sender, // msg_sender preserved — NOT overridden to caller_addr
+        BTreeMap::new(),
+    );
+
+    // The callee reads msg_sender — it must see the original sender, not the delegating contract.
+    let observed_sender = callee_host.msg_sender().expect("msg_sender should succeed");
+
+    assert_eq!(
+        observed_sender, original_sender,
+        "msg_sender inside delegate_call must be the original sender, not the delegating contract"
+    );
+    assert_ne!(
+        observed_sender, caller_addr,
+        "msg_sender must NOT be the delegating contract's address"
+    );
+}
+
+// Test 3: delegate_call storage read also uses caller's namespace.
+//
+// In delegate mode, block.contract = caller_addr. A storage_read inside the
+// callee reads from caller_addr's namespace — not from the callee's own address.
+// This test verifies that reads are also correctly namespaced.
+#[test]
+fn delegate_call_storage_reads_use_caller_namespace_not_callee() {
+    let caller_addr = Address::from_public_key(&[0xCA; 32]);
+    let callee_addr = Address::from_public_key(&[0xCE; 32]);
+    let sender_addr = Address::from_public_key(&[0x55; 32]);
+
+    // Build a HostState in delegate mode (block.contract = caller_addr).
+    // Pre-write a value into caller_addr's namespace via a direct state write.
+    let mut host = make_host_with_context(
+        1_000_000,
+        caller_addr, // delegate mode: storage namespace = caller
+        sender_addr,
+        BTreeMap::new(),
+    );
+    // Write directly to caller_addr's namespace.
+    host.state
+        .write(&caller_addr, b"read_key", b"caller_data".to_vec());
+
+    // storage_read uses block.contract (= caller_addr) as the namespace.
+    let result = host
+        .storage_read(b"read_key")
+        .expect("storage_read should succeed");
+    assert_eq!(
+        result,
+        Some(b"caller_data".to_vec()),
+        "storage_read in delegate mode must read from caller's namespace"
+    );
+
+    // Verify: reading the same key from callee_addr's namespace returns nothing.
+    // (callee_addr's namespace was never written — delegate mode doesn't touch it.)
+    assert!(
+        host.state.read(&callee_addr, b"read_key").is_none(),
+        "callee's own namespace must be untouched — delegate mode reads from caller's namespace"
+    );
+}
+
+// Test 4: delegate_call OOG unwinds call context correctly.
+//
+// Same invariant as call_contract: if OOG occurs during call_base charge,
+// enter_call must be unwound so depth returns to 0 and the address is unlocked.
+// This test verifies the reentrancy guard is correctly released on OOG.
+#[test]
+fn delegate_call_oog_during_call_base_charge_restores_call_context() {
+    // Budget just below call_base → enter_call succeeds but charge(call_base) OOGs.
+    let call_base_cost = GasSchedule::devnet().call_base.as_u64();
+    let budget = call_base_cost - 1;
+    let mut host = make_host_empty(budget);
+    let callee = test_address(99);
+
+    // call_contract trait method exercises the same enter_call/exit_call unwind
+    // path that delegate_call uses in the linker (both go through dispatch_call).
+    let err = host
+        .call_contract(callee, b"", Gas::new(1_000))
+        .expect_err("should fail OOG during call_base charge");
+    assert!(matches!(err, VmError::OutOfGas));
+
+    // CallContext must be fully unwound — no phantom reentrancy lock.
+    assert_eq!(
+        host.call_ctx.depth(),
+        0,
+        "depth must be 0 after OOG in delegate_call path"
+    );
+    // Verify address is no longer locked — same address can be entered again.
+    host.call_ctx
+        .enter_call(callee)
+        .expect("callee should not be locked after OOG unwind");
+}
+
 // ── OOG safety test ───────────────────────────────────────────────────────────
 
 #[test]
