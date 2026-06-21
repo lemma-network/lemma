@@ -2,7 +2,7 @@
 name = "lemma-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Lemma CLI: wallet keygen, balance queries, and devnet tooling"
+description = "Lemma CLI: wallet keygen, balance queries, and smart-contract compilation"
 
 [[bin]]
 name = "lemma"
@@ -15,8 +15,10 @@ tracing    = { workspace = true }
 clap       = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
+wasmparser    = { workspace = true }
 lemma-core    = { path = "../lemma-core" }
 lemma-crypto  = { path = "../lemma-crypto" }
+lemma-lang    = { path = "../lemma-lang" }
 lemma-storage = { path = "../lemma-storage" }
 
 [dev-dependencies]

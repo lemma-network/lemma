@@ -1,16 +1,21 @@
+// `LemmaCliError` contains a `LangError` variant (144 bytes). The CLI is not a
+// hot path and the ergonomics of a flat enum outweigh the stack-size concern —
+// same rationale as `lemma-lang/src/lib.rs`. Suppressed crate-wide.
+#![allow(clippy::result_large_err)]
 //! `lemma` — Lemma blockchain CLI.
 //!
-//! ## Phase 1 subcommands
+//! ## Subcommands
 //!
 //! | Command | Description |
 //! |---------|-------------|
-//! | `lemma wallet new [--out FILE] [--network NET]` | Generate a new hybrid keypair and save to a keystore file |
+//! | `lemma compile <file.lem> [--output-dir DIR]` | Compile a Lem contract → .wasm + .abi.json + .meta.json |
+//! | `lemma wallet new [--out-dir DIR] [--network NET]` | Generate a new hybrid keypair and save to a keystore file |
 //! | `lemma wallet address --keystore FILE [--network NET]` | Print the bech32m address of an existing keystore |
 //! | `lemma balance <address> [--data-dir PATH]` | Query account balance from the local chain DB |
 //!
 //! ## Future subcommands (later phases)
 //!
-//! `compile` / `deploy` / `call` — Lem smart-contract tooling (Phase 3).
+//! `deploy` / `call` — on-chain contract interaction (Phase 4 / RPC).
 //! `devnet` — single-command local devnet (Phase 4 / tooling).
 //! `faucet` — request testnet tokens (Phase 4).
 //!
@@ -22,6 +27,7 @@
 //! - `dlem1q...` (devnet — default for Phase 1)
 
 mod balance;
+mod compile;
 mod error;
 mod wallet;
 
@@ -48,6 +54,31 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Compile a Lem smart contract to WASM, ABI, and metadata.
+    ///
+    /// Runs the full Lem compiler pipeline on the input `.lem` file:
+    ///   tokenize → parse → type-check → well-formedness → safety analysis → codegen
+    ///
+    /// Three output files are written per contract in the source:
+    ///   {name}.wasm      — WASM binary (deploy this to LemmaVM)
+    ///   {name}.abi.json  — ABI descriptor (function selectors + types)
+    ///   {name}.meta.json — contract metadata (compiler version, safety ruleset,
+    ///                      per-function state-access hints, runtime constraints)
+    #[command(name = "compile")]
+    Compile {
+        /// Path to the `.lem` source file to compile.
+        file: PathBuf,
+
+        /// Directory to write output files into.
+        ///
+        /// Three files are written per contract: `{name}.wasm`,
+        /// `{name}.abi.json`, `{name}.meta.json`. The directory is
+        /// created if it does not exist. Defaults to the directory
+        /// containing the input file.
+        #[arg(long, short = 'o')]
+        output_dir: Option<PathBuf>,
+    },
+
     /// Wallet management: create and inspect keypairs.
     Wallet {
         #[command(subcommand)]
@@ -118,9 +149,35 @@ fn main() -> anyhow::Result<()> {
 
 fn run(cli: Cli) -> Result<(), error::LemmaCliError> {
     match cli.command {
+        Command::Compile { file, output_dir } => dispatch_compile(&file, output_dir.as_deref()),
         Command::Wallet { action } => dispatch_wallet(action),
         Command::Balance { address, data_dir } => dispatch_balance(&address, &data_dir),
     }
+}
+
+// ── Compile dispatch ──────────────────────────────────────────────────────────
+
+fn dispatch_compile(
+    source_path: &std::path::Path,
+    output_dir: Option<&std::path::Path>,
+) -> Result<(), error::LemmaCliError> {
+    // Default output dir: same directory as the input file; fall back to ".".
+    let dir = output_dir
+        .map(std::path::Path::to_owned)
+        .or_else(|| source_path.parent().map(std::path::Path::to_owned))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let outputs = compile::compile_contract(source_path, &dir)?;
+
+    if outputs.is_empty() {
+        eprintln!("warning: no contracts found in '{}'", source_path.display());
+    }
+    for out in &outputs {
+        println!("{}", out.wasm.display());
+        println!("{}", out.abi_json.display());
+        println!("{}", out.meta_json.display());
+    }
+    Ok(())
 }
 
 // ── Wallet dispatch ───────────────────────────────────────────────────────────
