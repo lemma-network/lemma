@@ -1,8 +1,12 @@
-//! Tests for SAFETY-010 — Declared Restrictions (option A: external-call clause).
+//! Tests for SAFETY-010 — Declared Restrictions.
 //!
-//! An external call on the transfer path (`transfer`/`transferFrom`/`#[onTransfer]`)
-//! requires `externalChecker: "<addr>"` declared in `config {}`. Undeclared ⇒
-//! `UndeclaredRestriction`.
+//! **Clause A**: An external call on the transfer path
+//! (`transfer`/`transferFrom`/`#[onTransfer]`) requires `externalChecker: "<addr>"`
+//! declared in `config {}`. Undeclared ⇒ `UndeclaredRestriction`.
+//!
+//! **Clause B**: A `self.paused`/`self.frozen` read in a revert-condition on the
+//! transfer path requires `pausable: true`/`freezable: true` in `config {}`.
+//! Undeclared ⇒ `UndeclaredRestriction`.
 
 use crate::analyzer::error::SafetyError;
 use crate::{parse, tokenize};
@@ -196,5 +200,148 @@ self.balances[to] = amount
         violations.len(),
         1,
         "empty externalChecker must not count as declared; got {violations:?}"
+    );
+}
+
+// ─── Clause B — state-field→config-key mapping ───────────────────────────────
+
+#[test]
+fn declared_paused_field_in_transfer_revert_requires_pausable_config() {
+    // `assert(!self.paused, ...)` in transfer but NO `pausable: true` in config
+    // → UndeclaredRestriction.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { paused: bool }
+init() { self.paused = false }
+pub fn transfer(to: Address, amount: u128) {
+assert(!self.paused, "paused")
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = declared_check(&contracts[0]);
+    assert!(
+        violations.iter().any(|v| matches!(
+            v,
+            SafetyError::UndeclaredRestriction { func }
+                if func.contains("paused") && func.contains("pausable")
+        )),
+        "self.paused in transfer revert without pausable config must be rejected; got {violations:?}"
+    );
+}
+
+#[test]
+fn declared_paused_field_with_pausable_config_passes() {
+    // `assert(!self.paused, ...)` in transfer WITH `pausable: true` → no violation.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 pausable: true }
+state { balances: Map<Address, u128> }
+state { paused: bool }
+init() { self.paused = false }
+pub fn transfer(to: Address, amount: u128) {
+assert(!self.paused, "paused")
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = declared_check(&contracts[0]);
+    // Filter to clause-B violations only (clause A may or may not fire depending
+    // on whether there are external calls — there are none here).
+    let clause_b: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::UndeclaredRestriction { func } if func.contains("pausable")))
+        .collect();
+    assert!(
+        clause_b.is_empty(),
+        "pausable: true in config must satisfy clause B; got {clause_b:?}"
+    );
+}
+
+#[test]
+fn declared_no_paused_field_in_transfer_passes() {
+    // transfer does NOT read `self.paused` → no clause-B violation regardless of
+    // config.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { paused: bool }
+init() { self.paused = false }
+pub fn transfer(to: Address, amount: u128) {
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = declared_check(&contracts[0]);
+    let clause_b: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::UndeclaredRestriction { func } if func.contains("pausable")))
+        .collect();
+    assert!(
+        clause_b.is_empty(),
+        "no self.paused read in transfer → no clause-B violation; got {clause_b:?}"
+    );
+}
+
+#[test]
+fn declared_paused_field_in_non_transfer_function_not_flagged() {
+    // `self.paused` read in a non-transfer function → no clause-B violation.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { paused: bool }
+init() { self.paused = false }
+pub fn transfer(to: Address, amount: u128) {
+self.balances[to] = amount
+}
+pub fn adminCheck() {
+assert(!self.paused, "paused")
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = declared_check(&contracts[0]);
+    let clause_b: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::UndeclaredRestriction { func } if func.contains("pausable")))
+        .collect();
+    assert!(
+        clause_b.is_empty(),
+        "self.paused in non-transfer function must not trigger clause B; got {clause_b:?}"
+    );
+}
+
+#[test]
+fn declared_paused_field_in_if_revert_requires_pausable_config() {
+    // `if (self.paused) { revert("paused") }` in transfer without `pausable: true`
+    // → UndeclaredRestriction.
+    let ast = typed_ast(
+        r#"token T extends Token {
+config { name: "T" symbol: "T" decimals: 18 maxSupply: 1000000 }
+state { balances: Map<Address, u128> }
+state { paused: bool }
+init() { self.paused = false }
+pub fn transfer(to: Address, amount: u128) {
+if (self.paused) { revert("paused") }
+self.balances[to] = amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = declared_check(&contracts[0]);
+    assert!(
+        violations.iter().any(|v| matches!(
+            v,
+            SafetyError::UndeclaredRestriction { func }
+                if func.contains("paused") && func.contains("pausable")
+        )),
+        "self.paused in if→revert without pausable config must be rejected; got {violations:?}"
     );
 }

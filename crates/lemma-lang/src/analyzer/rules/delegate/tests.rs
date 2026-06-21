@@ -2,9 +2,9 @@
 //!
 //! ## Inconclusive coverage (spec §5.2)
 //!
-//! SAFETY-011 is **decidable-exact** (sound over-approximation for the
-//! `@std` allow-list). The `self.<field>.<method>()` pattern is either present
-//! or absent. There is no `Inconclusive` path. No `Inconclusive→reject` needed.
+//! SAFETY-011 is **decidable-exact**. The `self.<field>.<method>()` pattern is
+//! either present or absent, and known collection methods are whitelisted.
+//! There is no `Inconclusive` path. No `Inconclusive→reject` needed.
 //!
 //! ## Cross-rule interaction tests (P3·Step 4g)
 //!
@@ -158,6 +158,113 @@ fn delegate_empty_contract_passes() {
     assert!(
         violations.is_empty(),
         "empty contract must pass SAFETY-011; got {violations:?}"
+    );
+}
+
+// ─── Collection method allow-list tests (P3-rule-2) ───────────────────────────
+
+#[test]
+fn collection_get_on_state_field_is_not_delegate() {
+    // self.balances.get(addr) — Map read, not a delegate call.
+    let ast = typed_ast(
+        r#"contract C {
+state { balances: Map<Address, u128> }
+pub view fn balance(addr: Address) -> u128 {
+let b = self.balances.get(addr)
+return b
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "self.balances.get() is a collection read, not a delegate; got {violations:?}"
+    );
+}
+
+#[test]
+fn collection_set_on_state_field_is_not_delegate() {
+    // self.balances.set(addr, val) — Map write, not a delegate call.
+    let ast = typed_ast(
+        r#"contract C {
+state { balances: Map<Address, u128> }
+pub fn deposit(addr: Address, amount: u128) {
+self.balances.set(addr, amount)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "self.balances.set() is a collection write, not a delegate; got {violations:?}"
+    );
+}
+
+#[test]
+fn collection_add_on_state_field_is_not_delegate() {
+    // self.walletExempt.add(addr) — Set add, not a delegate call.
+    let ast = typed_ast(
+        r#"contract C {
+state { walletExempt: Set<Address> }
+pub fn exempt(addr: Address) {
+self.walletExempt.add(addr)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "self.walletExempt.add() is a Set operation, not a delegate; got {violations:?}"
+    );
+}
+
+#[test]
+fn collection_has_on_state_field_is_not_delegate() {
+    // self.pairs.has(addr) — Set membership check, not a delegate call.
+    let ast = typed_ast(
+        r#"contract C {
+state { pairs: Set<Address> }
+pub view fn isPair(addr: Address) -> bool {
+return self.pairs.has(addr)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "self.pairs.has() is a Set membership check, not a delegate; got {violations:?}"
+    );
+}
+
+#[test]
+fn non_collection_method_on_state_field_is_delegate() {
+    // self.externalContract.execute() — NOT a collection method, IS a delegate.
+    let ast = typed_ast(
+        r#"contract C {
+state { externalContract: Address }
+init(externalContract: Address) {
+self.externalContract = externalContract
+}
+pub fn run(data: u128) {
+let _ = self.externalContract.execute(data)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        !violations.is_empty(),
+        "self.externalContract.execute() is a delegate call; got {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .all(|v| matches!(v, SafetyError::UnsafeDelegate { .. })),
+        "all violations must be UnsafeDelegate; got {violations:?}"
     );
 }
 
