@@ -1,6 +1,6 @@
 //! Tests for [`CallContext`], [`HostState`], and [`HostFunctions`].
 //!
-//! Coverage: all 18 host functions + CallContext enter/exit + OOG safety.
+//! Coverage: all 16 host functions in the HostFunctions trait + CallContext enter/exit + OOG safety.
 
 use std::collections::BTreeMap;
 
@@ -10,7 +10,7 @@ use lemma_crypto::KeyPair;
 use crate::{
     gas::{FuelMeter, Gas, GasMeter, GasSchedule},
     host::{BlockContext, CallContext, HostFunctions, HostState},
-    runtime::MAX_CALL_DEPTH,
+    runtime::{LemmaEngine, MAX_CALL_DEPTH},
     state::{ContractStateView, InMemoryStateView},
     VmError,
 };
@@ -42,12 +42,13 @@ fn test_block(sender: Address) -> BlockContext {
 fn make_host(budget: u64, balances: BTreeMap<Address, Amount>) -> HostState<InMemoryStateView> {
     let sender = test_address(1);
     let meter = FuelMeter::new(Gas::new(budget));
+    let engine = LemmaEngine::new().expect("test engine must initialise");
     let schedule = GasSchedule::devnet();
     let call_ctx = CallContext::new();
     let block = test_block(sender);
     let state = InMemoryStateView::with_balances(balances);
     // Pass empty calldata — host tests don't exercise the input() host function.
-    HostState::new(meter, schedule, call_ctx, block, state, vec![])
+    HostState::new(meter, engine, schedule, call_ctx, block, state, vec![])
 }
 
 /// Build a `HostState` with no pre-seeded balances.
@@ -393,6 +394,7 @@ fn emit_event_log_address_is_executing_contract_not_caller() {
     block.contract = contract;
     let mut host = HostState::new(
         FuelMeter::new(Gas::new(1_000_000)),
+        LemmaEngine::new().expect("test engine must initialise"),
         GasSchedule::devnet(),
         CallContext::new(),
         block,

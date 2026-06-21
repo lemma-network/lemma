@@ -8,22 +8,25 @@
 //!
 //! ## Host import signatures (from abi.rs HOST_SIGS)
 //!
-//! | # | Name             | WASM type               |
-//! |---|------------------|-------------------------|
-//! | 0 | block_height     | () → i64                |
-//! | 1 | block_timestamp  | () → i64                |
-//! | 2 | gas_remaining    | () → i64                |
-//! | 3 | msg_value        | () → i64                |
-//! | 4 | msg_sender       | (i32) → ()              |
-//! | 5 | input            | (i32) → ()              |
-//! | 6 | register_len     | (i32) → i64             |
-//! | 7 | read_register    | (i32 i32) → ()          |
-//! | 8 | storage_read     | (i32 i32 i32) → i32     |
-//! | 9 | storage_write    | (i32 i32 i32 i32) → ()  |
-//! |10 | storage_delete   | (i32 i32) → ()          |
-//! |11 | emit_event       | (i32 i32 i32 i32) → i32 |
-//! |12 | transfer         | (i32 i32 i64) → i32     |
-//! |13 | value_return     | (i32 i32) → ()          |
+//! | # | Name             | WASM type                                    |
+//! |---|------------------|----------------------------------------------|
+//! | 0 | block_height     | () → i64                                     |
+//! | 1 | block_timestamp  | () → i64                                     |
+//! | 2 | gas_remaining    | () → i64                                     |
+//! | 3 | msg_value        | () → i64                                     |
+//! | 4 | msg_sender       | (i32) → ()                                   |
+//! | 5 | input            | (i32) → ()                                   |
+//! | 6 | register_len     | (i32) → i64                                  |
+//! | 7 | read_register    | (i32 i32) → ()                               |
+//! | 8 | storage_read     | (i32 i32 i32) → i32                          |
+//! | 9 | storage_write    | (i32 i32 i32 i32) → ()                       |
+//! |10 | storage_delete   | (i32 i32) → ()                               |
+//! |11 | emit_event       | (i32 i32 i32 i32) → i32                      |
+//! |12 | transfer         | (i32 i32 i64) → i32                          |
+//! |13 | value_return     | (i32 i32) → ()                               |
+//! |14 | call_contract    | (i32 i32 i32 i64 i64) → i32 (stub, P3·S21)  |
+//! |15 | static_call      | (i32 i32 i32 i64) → i32 (stub, P3·S21)      |
+//! |16 | delegate_call    | (i32 i32 i32 i64) → i32 (stub, P3·S21)      |
 
 #![allow(clippy::result_large_err)]
 
@@ -40,7 +43,7 @@ use lemma_vm::{
 
 /// Minimal no-op contract: empty `"call"` export, no `"init"`.
 ///
-/// The WASM linker in lemma-vm registers all 14 imports as no-op stubs, so a
+/// The WASM linker in lemma-vm registers all 17 imports (14 active + 3 stubs), so a
 /// module with no explicit imports is valid and instantiates successfully.
 /// This mirrors the existing unit-test pattern in executor/tests.rs.
 const NOOP_WAT: &[u8] = b"(module (func (export \"call\")))";

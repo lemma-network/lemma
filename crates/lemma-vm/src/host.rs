@@ -10,7 +10,7 @@
 //! | [`BlockContext`] | Deterministic per-call context from consensus |
 //! | [`CallContext`]  | Reentrancy guard + call depth tracker (§2.3) |
 //! | [`HostState`]    | Bundles meter, schedule, context, state, events |
-//! | [`HostFunctions`]| Trait: all 18 host functions (§4) |
+//! | [`HostFunctions`]| Trait: all 16 host functions (§4) |
 //!
 //! ## Determinism contract
 //!
@@ -24,14 +24,13 @@
 //! Every host function returns `Result` — never panics (AGENTS.md §7.2,
 //! §9.3). OOG, reentrancy, and insufficient funds all produce typed errors.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use lemma_core::{address::Address, amount::Amount, hash::Hash, transaction::Log};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     error::VmError,
     gas::{FuelMeter, Gas, GasMeter, GasSchedule},
-    runtime::MAX_CALL_DEPTH,
+    runtime::{LemmaEngine, MAX_CALL_DEPTH},
     state::ContractStateView,
 };
 
@@ -152,6 +151,14 @@ impl Default for CallContext {
 pub struct HostState<S: ContractStateView> {
     /// Gas meter — charges are applied before side effects.
     pub meter: FuelMeter,
+    /// WASM engine for compiling + running callee contracts in cross-contract calls.
+    ///
+    /// `LemmaEngine` is already an `Arc<wasmtime::Engine>` newtype — cloning it is O(1)
+    /// (atomic refcount increment, no bytecode recompilation). Required by
+    /// `call_contract`/`static_call`/`delegate_call` host functions which must
+    /// compile+run the callee's WASM from inside a host callback. No outer `Arc`
+    /// needed — double-wrapping would add a redundant allocation per subtask spawn.
+    pub engine: LemmaEngine,
     /// Named gas cost constants for all operation categories.
     pub schedule: GasSchedule,
     /// Reentrancy guard and call depth tracker.
@@ -186,6 +193,7 @@ impl<S: ContractStateView> HostState<S> {
     /// # Arguments
     ///
     /// * `meter` — pre-funded gas meter for this transaction.
+    /// * `engine` — WASM engine for cross-contract call compilation.
     /// * `schedule` — gas cost constants.
     /// * `call_ctx` — reentrancy / depth tracker (typically `CallContext::new()`).
     /// * `block` — deterministic context from consensus.
@@ -193,6 +201,7 @@ impl<S: ContractStateView> HostState<S> {
     /// * `calldata` — transaction calldata for the `input()` host function (6b-vm-2).
     pub fn new(
         meter: FuelMeter,
+        engine: LemmaEngine,
         schedule: GasSchedule,
         call_ctx: CallContext,
         block: BlockContext,
@@ -201,6 +210,7 @@ impl<S: ContractStateView> HostState<S> {
     ) -> Self {
         Self {
             meter,
+            engine,
             schedule,
             call_ctx,
             block,
@@ -226,7 +236,12 @@ impl<S: ContractStateView> HostState<S> {
 
 // ── HostFunctions trait ───────────────────────────────────────────────────────
 
-/// All 18 host functions exposed to WASM contracts (08-EXECUTION_SPEC §4).
+/// All 16 host functions exposed to WASM contracts via the `HostFunctions` trait (08-EXECUTION_SPEC §4).
+///
+/// Note: the ABI `IMPORT_ORDER` (lemma-lang `codegen/abi.rs`) has 17 entries — the
+/// two sets differ because the trait includes `tx_origin`, `balance_of`, and crypto
+/// helpers not in the ABI import table, while `static_call`/`delegate_call` are
+/// registered in the linker but not yet in this trait (added in P3·Step 21 subtasks 03-04).
 ///
 /// ## Contract
 ///
@@ -583,7 +598,7 @@ impl<S: ContractStateView> HostFunctions for HostState<S> {
         self.call_ctx.exit_call(&addr);
 
         Err(VmError::InvalidParameter {
-            reason: "call_contract: executor not wired (B4)".into(),
+            reason: "call_contract: not implemented (P3·Step 21 subtask_02)".into(),
         })
     }
 

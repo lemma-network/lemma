@@ -1,6 +1,6 @@
 //! # Linker — wasmtime host-function registration (6b-vm-2)
 //!
-//! Builds a [`wasmtime::Linker`] with all 14 LemmaVM host functions registered
+//! Builds a [`wasmtime::Linker`] with all 17 LemmaVM host functions registered
 //! under the `"lemma"` import module.
 //!
 //! ## Import convention
@@ -10,24 +10,30 @@
 //! pointer/length ABI (`i32` ptr + `i32` len). The canonical import order
 //! matches `lemma-lang/src/codegen/abi.rs::IMPORT_ORDER` (DB-A53 §4.5).
 //!
-//! ## 14 host functions (canonical order)
+//! ## 17 host functions (canonical order)
 //!
-//! | Index | Name            | Signature                                          |
-//! |-------|-----------------|----------------------------------------------------|
-//! |  0    | block_height    | `() -> i64`                                        |
-//! |  1    | block_timestamp | `() -> i64`                                        |
-//! |  2    | gas_remaining   | `() -> i64`                                        |
-//! |  3    | msg_value       | `() -> i64`                                        |
-//! |  4    | msg_sender      | `(register_id: i32)`                               |
-//! |  5    | input           | `(register_id: i32)`                                |
-//! |  6    | register_len    | `(register_id: i32) -> i64`                        |
-//! |  7    | read_register   | `(register_id: i32, ptr: i32)`                     |
-//! |  8    | storage_read    | `(key_ptr: i32, key_len: i32, reg: i32) -> i32`    |
-//! |  9    | storage_write   | `(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32)` |
-//! | 10    | storage_delete  | `(key_ptr: i32, key_len: i32)`                     |
-//! | 11    | emit_event      | `(topics_ptr: i32, topics_len: i32, data_ptr: i32, data_len: i32)` |
-//! | 12    | transfer        | `(to_ptr: i32, to_len: i32, amount: i64) -> i32`   |
-//! | 13    | value_return    | `(ptr: i32, len: i32)`                             |
+//! | Index | Name            | Signature                                                                    |
+//! |-------|-----------------|------------------------------------------------------------------------------|
+//! |  0    | block_height    | `() -> i64`                                                                  |
+//! |  1    | block_timestamp | `() -> i64`                                                                  |
+//! |  2    | gas_remaining   | `() -> i64`                                                                  |
+//! |  3    | msg_value       | `() -> i64`                                                                  |
+//! |  4    | msg_sender      | `(register_id: i32)`                                                         |
+//! |  5    | input           | `(register_id: i32)`                                                         |
+//! |  6    | register_len    | `(register_id: i32) -> i64`                                                  |
+//! |  7    | read_register   | `(register_id: i32, ptr: i32)`                                               |
+//! |  8    | storage_read    | `(key_ptr: i32, key_len: i32, reg: i32) -> i32`                              |
+//! |  9    | storage_write   | `(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32)`                   |
+//! | 10    | storage_delete  | `(key_ptr: i32, key_len: i32)`                                               |
+//! | 11    | emit_event      | `(topics_ptr: i32, topics_len: i32, data_ptr: i32, data_len: i32)`           |
+//! | 12    | transfer        | `(to_ptr: i32, to_len: i32, amount: i64) -> i32`                             |
+//! | 13    | value_return    | `(ptr: i32, len: i32)`                                                       |
+//! | 14    | call_contract   | `(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64, value: i64) -> i32` |
+//! | 15    | static_call     | `(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64) -> i32`             |
+//! | 16    | delegate_call   | `(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64) -> i32`             |
+//!
+//! Indices 14–16 are registered as stubs that trap with `"not implemented"`.
+//! Full implementations land in P3·Step 21 subtasks 02–04.
 //!
 //! ## Gas model
 //!
@@ -127,7 +133,7 @@ fn write_guest_bytes<S: ContractStateView + 'static>(
 
 // ── Linker builder ────────────────────────────────────────────────────────────
 
-/// Build a [`wasmtime::Linker`] with all 14 host functions registered.
+/// Build a [`wasmtime::Linker`] with all 17 host functions registered.
 ///
 /// All host imports are registered under the `"lemma"` module name.
 /// Registration order matches the canonical import order from
@@ -518,6 +524,76 @@ pub fn build_linker<S: ContractStateView + 'static>(
                 let data = read_guest_bytes(&mut caller, &mem, ptr, len)?;
                 caller.data_mut().return_data = data;
                 Ok(())
+            },
+        )
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // ── Index 14: call_contract(addr_ptr, addr_len, data_reg, gas, value) -> i32
+    // Stub — full implementation in P3·Step 21 subtask_02.
+    // Registered here so WASM modules with 17 imports can be instantiated.
+    // Traps if called — contracts must not invoke cross-contract calls until
+    // the full implementation lands.
+
+    linker
+        .func_wrap(
+            "lemma",
+            "call_contract",
+            |_caller: Caller<'_, HostState<S>>,
+             _addr_ptr: i32,
+             _addr_len: i32,
+             _data_reg: i32,
+             _gas: i64,
+             _value: i64|
+             -> Result<i32, wasmtime::Error> {
+                Err(wasmtime::Error::msg(
+                    "call_contract: not implemented (P3·Step 21 subtask_02)",
+                ))
+            },
+        )
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // ── Index 15: static_call(addr_ptr, addr_len, data_reg, gas) -> i32
+    // Stub — full implementation in P3·Step 21 subtask_03.
+
+    linker
+        .func_wrap(
+            "lemma",
+            "static_call",
+            |_caller: Caller<'_, HostState<S>>,
+             _addr_ptr: i32,
+             _addr_len: i32,
+             _data_reg: i32,
+             _gas: i64|
+             -> Result<i32, wasmtime::Error> {
+                Err(wasmtime::Error::msg(
+                    "static_call: not implemented (P3·Step 21 subtask_03)",
+                ))
+            },
+        )
+        .map_err(|e| VmError::InstantiationFailed {
+            reason: e.to_string(),
+        })?;
+
+    // ── Index 16: delegate_call(addr_ptr, addr_len, data_reg, gas) -> i32
+    // Stub — full implementation in P3·Step 21 subtask_04.
+
+    linker
+        .func_wrap(
+            "lemma",
+            "delegate_call",
+            |_caller: Caller<'_, HostState<S>>,
+             _addr_ptr: i32,
+             _addr_len: i32,
+             _data_reg: i32,
+             _gas: i64|
+             -> Result<i32, wasmtime::Error> {
+                Err(wasmtime::Error::msg(
+                    "delegate_call: not implemented (P3·Step 21 subtask_04)",
+                ))
             },
         )
         .map_err(|e| VmError::InstantiationFailed {

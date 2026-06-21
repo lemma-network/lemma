@@ -185,6 +185,29 @@ pub(crate) mod host_fn {
     /// the bytes immediately (before the WASM stack unwinds). The guest must not
     /// reuse `ptr` before `value_return` returns.
     pub(crate) const VALUE_RETURN: &str = "value_return";
+
+    /// `call_contract(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64, value: i64) -> i32`
+    ///
+    /// Executes the contract at address `addr` with `calldata` from register `data_reg`,
+    /// forwarding `gas` (capped at 63/64 of remaining) and `value` Drop.
+    /// Returns result register ID on success, or a negative error sentinel on failure.
+    /// Callee state writes are merged into caller state on success, discarded on revert.
+    /// Uses 63/64 gas forwarding rule (08-EXECUTION_SPEC §2.4).
+    pub(crate) const CALL_CONTRACT: &str = "call_contract";
+
+    /// `static_call(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64) -> i32`
+    ///
+    /// Same as `call_contract` but ALL callee state writes are discarded — only return
+    /// data flows back. Read-only enforced at the host level.
+    /// No value parameter (static calls cannot transfer value).
+    pub(crate) const STATIC_CALL: &str = "static_call";
+
+    /// `delegate_call(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64) -> i32`
+    ///
+    /// Runs callee's WASM code with CALLER's storage namespace and msg.sender context.
+    /// Storage reads/writes land in caller's address space, not callee's.
+    /// Requires `#[allowDelegate]` annotation at call site (SAFETY-011).
+    pub(crate) const DELEGATE_CALL: &str = "delegate_call";
 }
 
 // ── Canonical import order ────────────────────────────────────────────────────
@@ -213,6 +236,9 @@ pub(crate) const IMPORT_ORDER: &[&str] = &[
     host_fn::EMIT_EVENT,      // index 11
     host_fn::TRANSFER,        // index 12
     host_fn::VALUE_RETURN,    // index 13
+    host_fn::CALL_CONTRACT,   // index 14
+    host_fn::STATIC_CALL,     // index 15
+    host_fn::DELEGATE_CALL,   // index 16
 ];
 
 /// Number of host imports.

@@ -195,6 +195,27 @@ pub(crate) const HOST_SIGS: &[(&[ValType], &[ValType])] = &[
     (&[ValType::I32, ValType::I32, ValType::I64], &[ValType::I32]),
     // 13: value_return(ptr: i32, len: i32)
     (&[ValType::I32, ValType::I32], &[]),
+    // 14: call_contract(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64, value: i64) -> i32
+    (
+        &[
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I64,
+            ValType::I64,
+        ],
+        &[ValType::I32],
+    ),
+    // 15: static_call(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64) -> i32
+    (
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+        &[ValType::I32],
+    ),
+    // 16: delegate_call(addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64) -> i32
+    (
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+        &[ValType::I32],
+    ),
 ];
 
 // ─── Function selector + storage key computation ─────────────────────────────
@@ -413,10 +434,10 @@ pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangE
     let fn_base = HOST_IMPORT_COUNT + 2;
 
     // ── 1. Type section ───────────────────────────────────────────────────
-    // Types 0..13: host function signatures
-    // Type 14: call entry point [] -> []
-    // Type 15: alloc (i32) -> (i32)
-    // Types 16..N: one per contract function (params → [])
+    // Types 0..16: host function signatures (HOST_SIGS, auto-sized)
+    // Type 17: call entry point [] -> []
+    // Type 18: alloc (i32) -> (i32)
+    // Types 19..N: one per contract function (params → [])
     let mut types = TypeSection::new();
     for (params, results) in HOST_SIGS {
         types

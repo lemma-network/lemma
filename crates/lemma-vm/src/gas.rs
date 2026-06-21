@@ -128,6 +128,10 @@ pub struct GasSchedule {
 
     // ── Contract calls ────────────────────────────────────────────────────────
     /// Base cost for a cross-contract call (EIP-2929: 2 100 cold call base).
+    ///
+    /// Applies to all 3 cross-contract host functions:
+    /// `call_contract` (host fn index 14), `static_call` (15), `delegate_call` (16).
+    /// Charged BEFORE execution per AGENTS §7.5. See 08-EXECUTION_SPEC §3.2.
     pub call_base: Gas,
     /// Additional surcharge when the call transfers value > 0 (EVM: 9 000).
     pub call_value_transfer: Gas,

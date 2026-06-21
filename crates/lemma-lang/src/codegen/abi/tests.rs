@@ -118,6 +118,9 @@ fn all_host_fn_names_are_nonempty() {
         host_fn::EMIT_EVENT,
         host_fn::TRANSFER,
         host_fn::VALUE_RETURN,
+        host_fn::CALL_CONTRACT,
+        host_fn::STATIC_CALL,
+        host_fn::DELEGATE_CALL,
     ];
     for name in &names {
         assert!(!name.is_empty(), "host_fn name must not be empty: {name:?}");
@@ -126,8 +129,8 @@ fn all_host_fn_names_are_nonempty() {
 
 #[test]
 fn all_host_fn_names_are_unique() {
-    // Collect all 14 host_fn constants into a BTreeSet (deterministic — AGENTS §7.1).
-    // If any two constants share the same string, the set will be smaller than 14.
+    // Collect all 17 host_fn constants into a BTreeSet (deterministic — AGENTS §7.1).
+    // If any two constants share the same string, the set will be smaller than 17.
     let names: BTreeSet<&str> = [
         host_fn::BLOCK_HEIGHT,
         host_fn::BLOCK_TIMESTAMP,
@@ -143,14 +146,17 @@ fn all_host_fn_names_are_unique() {
         host_fn::EMIT_EVENT,
         host_fn::TRANSFER,
         host_fn::VALUE_RETURN,
+        host_fn::CALL_CONTRACT,
+        host_fn::STATIC_CALL,
+        host_fn::DELEGATE_CALL,
     ]
     .into_iter()
     .collect();
 
     assert_eq!(
         names.len(),
-        14,
-        "all 14 host_fn names must be unique; found {} distinct names",
+        17,
+        "all 17 host_fn names must be unique; found {} distinct names",
         names.len()
     );
 }
@@ -158,11 +164,11 @@ fn all_host_fn_names_are_unique() {
 // ─── IMPORT_ORDER integrity ───────────────────────────────────────────────────
 
 #[test]
-fn import_order_length_is_fourteen() {
+fn import_order_length_is_seventeen() {
     assert_eq!(
         IMPORT_ORDER.len(),
-        14,
-        "IMPORT_ORDER must contain exactly 14 entries (DB-A53 §4.5)"
+        17,
+        "IMPORT_ORDER must contain exactly 17 entries (DB-A53 §4.5, P3·Step 21)"
     );
 }
 
@@ -198,6 +204,9 @@ fn import_order_contains_all_host_fn_names() {
         host_fn::EMIT_EVENT,
         host_fn::TRANSFER,
         host_fn::VALUE_RETURN,
+        host_fn::CALL_CONTRACT,
+        host_fn::STATIC_CALL,
+        host_fn::DELEGATE_CALL,
     ];
     for name in &all_names {
         assert!(
@@ -218,12 +227,34 @@ fn import_order_first_is_block_height() {
 }
 
 #[test]
-fn import_order_last_is_value_return() {
-    // Index 13 is the ABI-stable last import. New imports are appended at index 14+.
+fn import_order_index_13_is_value_return() {
+    // Index 13 is the ABI-stable pre-cross-contract-call boundary.
+    // New cross-contract call imports are appended at indices 14–16.
     assert_eq!(
         IMPORT_ORDER[13],
         host_fn::VALUE_RETURN,
         "IMPORT_ORDER[13] must be VALUE_RETURN (ABI invariant)"
+    );
+}
+
+#[test]
+fn import_order_cross_contract_calls_at_indices_14_15_16() {
+    // Indices 14–16 are the cross-contract call host functions (P3·Step 21).
+    // These are appended after the original 14 — ABI invariant preserved.
+    assert_eq!(
+        IMPORT_ORDER[14],
+        host_fn::CALL_CONTRACT,
+        "IMPORT_ORDER[14] must be CALL_CONTRACT"
+    );
+    assert_eq!(
+        IMPORT_ORDER[15],
+        host_fn::STATIC_CALL,
+        "IMPORT_ORDER[15] must be STATIC_CALL"
+    );
+    assert_eq!(
+        IMPORT_ORDER[16],
+        host_fn::DELEGATE_CALL,
+        "IMPORT_ORDER[16] must be DELEGATE_CALL"
     );
 }
 
@@ -242,8 +273,8 @@ fn host_import_count_matches_import_order_len() {
 
 #[test]
 fn adding_to_end_of_import_order_would_not_shift_existing_indices() {
-    // Verify that the existing 14 entries are at stable indices 0..13.
-    // A new import at index 14 would not shift any of these.
+    // Verify that the original 14 entries remain at stable indices 0..13.
+    // The 3 cross-contract call imports at 14–16 did not shift any of these.
     // This test documents the ABI invariant: existing indices are frozen.
     assert_eq!(
         IMPORT_ORDER[0],

@@ -430,6 +430,7 @@ impl Executor {
         let snapshot = scratch.snapshot();
         let init_host = HostState::new(
             FuelMeter::new(meter.remaining()),
+            self.engine.clone(), // engine for cross-contract calls (LemmaEngine = Arc<wasmtime::Engine> newtype)
             self.schedule,
             CallContext::new(),
             init_block_ctx,
@@ -627,6 +628,7 @@ impl Executor {
         // See 08-EXECUTION_SPEC §4.5 and DB-A53. M3 closed.
         let host = HostState::new(
             FuelMeter::new(meter.remaining()),
+            self.engine.clone(), // engine for cross-contract calls (LemmaEngine = Arc<wasmtime::Engine> newtype)
             self.schedule,
             CallContext::new(),
             BlockContext {
