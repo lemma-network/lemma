@@ -1,9 +1,11 @@
-//! Tests for SAFETY-015 and SAFETY-016 — Agent-safety rules (Batch 1).
+//! Tests for SAFETY-014..017 — Agent-safety rules (Batch 1 + Batch 2).
 //!
 //! ## Coverage
 //!
+//! - SAFETY-014: @agentCallable functions must declare maxValueOut; no loop-driven transfers.
 //! - SAFETY-015: policy-mutation functions must be @onlyOwner-gated.
 //! - SAFETY-016: @agentCallable functions must not call grant functions.
+//! - SAFETY-017: functions accessing agent-policy state must carry @agentCallable.
 //!
 //! ## Test helper
 //!
@@ -300,9 +302,9 @@ let _ = self.doGrant(agent)
     let contracts = ast.contracts();
     let violations = agent_check(&contracts[0]);
     assert!(
-        violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::AgentReGrant { caller, .. } if caller == "agentEntry")),
+        violations.iter().any(
+            |v| matches!(v, SafetyError::AgentReGrant { caller, .. } if caller == "agentEntry")
+        ),
         "transitive re-grant via helper must emit AgentReGrant; got {violations:?}"
     );
 }
@@ -334,5 +336,261 @@ let _ = grantAgent(agent)
             .any(|v| matches!(v, SafetyError::AgentReGrant { caller, callee }
                 if caller == "agentEntry" && callee == "grantAgent")),
         "bare grantAgent(agent) call (Ident arm) must emit AgentReGrant; got {violations:?}"
+    );
+}
+
+// ─── SAFETY-014 tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn safety014_agent_callable_without_transfer_is_clean() {
+    // @agentCallable(maxValueOut: 1000) with no transfer calls — must pass SAFETY-014.
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 = 0 }
+@agentCallable(maxValueOut: 1000)
+pub fn deposit(amount: u128) {
+self.bal = self.bal + amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    let outflow_violations: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::AgentOutflowUnbounded { .. }))
+        .collect();
+    assert!(
+        outflow_violations.is_empty(),
+        "@agentCallable with maxValueOut and no transfer must pass SAFETY-014; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety014_missing_max_value_out_emits_unbounded() {
+    // @agentCallable without maxValueOut argument — must emit AgentOutflowUnbounded.
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 = 0 }
+@agentCallable
+pub fn withdraw(amount: u128) {
+self.bal = self.bal - amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations.iter().any(
+            |v| matches!(v, SafetyError::AgentOutflowUnbounded { func, reason }
+                if func == "withdraw" && reason.contains("missing maxValueOut"))
+        ),
+        "@agentCallable without maxValueOut must emit AgentOutflowUnbounded; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety014_transfer_in_loop_emits_unbounded() {
+    // @agentCallable(maxValueOut: 500) with a transfer call inside a while loop
+    // — must emit AgentOutflowUnbounded (loop-driven payout is unbounded).
+    // `transfer` is defined as a contract function so the type-checker accepts it.
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 = 0, count: u128 = 0 }
+pub fn transfer(to: Address, amount: u128) {
+self.bal = self.bal - amount
+}
+@agentCallable(maxValueOut: 500)
+pub fn batchPay(n: u128, to: Address) {
+while (self.count < n) {
+let _ = self.transfer(to, 100)
+self.count = self.count + 1
+}
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations.iter().any(
+            |v| matches!(v, SafetyError::AgentOutflowUnbounded { func, reason }
+                if func == "batchPay" && reason.contains("loop"))
+        ),
+        "transfer inside while loop must emit AgentOutflowUnbounded; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety014_transfer_outside_loop_with_cap_is_clean() {
+    // @agentCallable(maxValueOut: 500) with a single transfer call (not in a loop)
+    // — must pass SAFETY-014 (declaration-forcing: cap declared, single call accepted).
+    // `transfer` is defined as a contract function so the type-checker accepts it.
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 = 0 }
+pub fn transfer(to: Address, amount: u128) {
+self.bal = self.bal - amount
+}
+@agentCallable(maxValueOut: 500)
+pub fn pay(to: Address, amount: u128) {
+let _ = self.transfer(to, amount)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    let outflow_violations: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::AgentOutflowUnbounded { .. }))
+        .collect();
+    assert!(
+        outflow_violations.is_empty(),
+        "single transfer with maxValueOut cap must pass SAFETY-014; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety014_non_literal_max_value_out_emits_unbounded() {
+    // @agentCallable(maxValueOut: "big") — string literal is not a numeric literal.
+    // Must emit AgentOutflowUnbounded (maxValueOut must be a numeric literal).
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 = 0 }
+@agentCallable(maxValueOut: "big")
+pub fn withdraw(amount: u128) {
+self.bal = self.bal - amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations.iter().any(
+            |v| matches!(v, SafetyError::AgentOutflowUnbounded { func, reason }
+                if func == "withdraw" && reason.contains("numeric literal"))
+        ),
+        "non-numeric maxValueOut must emit AgentOutflowUnbounded; got {violations:?}"
+    );
+}
+
+// ─── SAFETY-017 tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn safety017_agent_callable_accessing_policy_state_is_clean() {
+    // @agentCallable function that reads self.agentPolicies — must pass SAFETY-017
+    // (it IS annotated, so it routes through the Warden gate).
+    let ast = typed_ast(
+        r#"contract C {
+state { agentPolicies: u128 = 0 }
+@agentCallable(maxValueOut: 0)
+pub fn checkPolicy() -> u128 {
+return self.agentPolicies
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    let gate_violations: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::AgentGateBypassed { .. }))
+        .collect();
+    assert!(
+        gate_violations.is_empty(),
+        "@agentCallable fn accessing agentPolicies must pass SAFETY-017; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety017_ungated_fn_reading_agent_policies_is_flagged() {
+    // A public function (no @agentCallable, no @onlyOwner) that reads self.agentPolicies
+    // — must emit AgentGateBypassed (hand-rolled agent entry bypasses Warden gate).
+    let ast = typed_ast(
+        r#"contract C {
+state { agentPolicies: u128 = 0 }
+pub fn getPolicy() -> u128 {
+return self.agentPolicies
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::AgentGateBypassed { func } if func == "getPolicy")),
+        "ungated fn reading agentPolicies must emit AgentGateBypassed; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety017_owner_gated_fn_reading_agent_state_is_clean() {
+    // @onlyOwner function that reads self.agents_paused — must pass SAFETY-017.
+    // Owner-only admin functions are legitimate managers of agent state.
+    let ast = typed_ast(
+        r#"contract C {
+state { owner: Address, agents_paused: bool = false }
+init(owner: Address) {
+self.owner = owner
+}
+@onlyOwner
+pub fn pauseAgents() {
+self.agents_paused = true
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    let gate_violations: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::AgentGateBypassed { .. }))
+        .collect();
+    assert!(
+        gate_violations.is_empty(),
+        "@onlyOwner fn accessing agents_paused must pass SAFETY-017; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety017_fn_without_agent_state_access_is_clean() {
+    // A regular public function that does NOT access any agent-policy state field
+    // — must pass SAFETY-017 (no agent-state access, no bypass).
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 = 0 }
+pub fn deposit(amount: u128) {
+self.bal = self.bal + amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    let gate_violations: Vec<_> = violations
+        .iter()
+        .filter(|v| matches!(v, SafetyError::AgentGateBypassed { .. }))
+        .collect();
+    assert!(
+        gate_violations.is_empty(),
+        "fn without agent-state access must pass SAFETY-017; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety017_fn_reading_agents_paused_without_annotation_is_flagged() {
+    // A public function (no @agentCallable, no @onlyOwner) that reads self.agents_paused
+    // — must emit AgentGateBypassed.
+    let ast = typed_ast(
+        r#"contract C {
+state { agents_paused: bool = false }
+pub fn isPaused() -> bool {
+return self.agents_paused
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::AgentGateBypassed { func } if func == "isPaused")),
+        "ungated fn reading agents_paused must emit AgentGateBypassed; got {violations:?}"
     );
 }

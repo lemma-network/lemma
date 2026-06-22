@@ -4,14 +4,14 @@
 //! Warden which makes *accounts* safe at runtime.
 //! See `docs/09-SAFETY_ANALYZER_SPEC §3-bis` for full definitions.
 //!
-//! ## Rule status (Batch 1 — P3·Step 11)
+//! ## Rule status (Batch 2 — P3·Step 11)
 //!
 //! | Rule | Status |
 //! |------|--------|
-//! | SAFETY-014 | ⬜ Stub — Batch 2 |
-//! | SAFETY-015 | 🔨 Reachability check via call graph |
-//! | SAFETY-016 | 🔨 Reachability check via call graph |
-//! | SAFETY-017 | ⬜ Stub — Batch 2 |
+//! | SAFETY-014 | ✅ Declaration-forcing: maxValueOut required; loop-transfer rejected |
+//! | SAFETY-015 | ✅ Reachability check via call graph |
+//! | SAFETY-016 | ✅ Reachability check via call graph |
+//! | SAFETY-017 | ✅ Declaration-forcing: agent-state access without @agentCallable rejected |
 //! | SAFETY-018 | ⬜ Stub — Batch 3 |
 //! | SAFETY-019 | ⬜ Stub — Batch 3 |
 //!
@@ -31,7 +31,9 @@ use std::collections::BTreeSet;
 use crate::analyzer::authset::{auth_set, requires_owner_only};
 use crate::analyzer::cfg::build_call_graph;
 use crate::analyzer::error::SafetyError;
+use crate::parser::AnnotationArg;
 use crate::parser::Expr;
+use crate::parser::Literal;
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_expr, Visitor};
 
@@ -81,6 +83,51 @@ const POLICY_MUTATION_NAMES: &[&str] = &[
 // (i.e. increase authority, not merely adjust or revoke).
 const GRANT_CALL_NAMES: &[&str] = &["grantAgent", "grantAgentPolicy", "extendAgentPolicy"];
 
+// ── Transfer call name patterns (for SAFETY-014) ─────────────────────────────
+//
+// A call is a "transfer call" if the callee name matches one of these patterns.
+// These are the canonical value-outflow operations in Lem contracts.
+// Completeness verified against 14-AGENT_LAYER §4.1 and 03-LANGUAGE_SPEC §26:
+//   transfer / transferFrom — LToken standard (IToken)
+//   send / sendValue        — native LEM transfer helpers
+//   call                    — raw call with value (rawCall with value field)
+//
+// Honest limit: non-canonical transfer wrappers escape static analysis.
+// Warden runtime provides defence-in-depth for missed names.
+const TRANSFER_CALL_NAMES: &[&str] = &[
+    "transfer",
+    "transferFrom",
+    "send",
+    "sendValue",
+    "call", // rawCall with value
+];
+
+// ── Agent-policy state field names (for SAFETY-017) ──────────────────────────
+//
+// A function accesses "agent-policy state" if it reads or writes a `self.field`
+// where `field` matches one of these names. These are the canonical Warden-managed
+// state fields defined in 14-AGENT_LAYER §2 and §2.4.
+//
+// A function that accesses these fields WITHOUT `@agentCallable` is a hand-rolled
+// agent entry that bypasses the compiler-emitted Warden gate → `AgentGateBypassed`.
+//
+// Honest limit: non-canonical field names escape static analysis.
+// Warden runtime provides defence-in-depth for missed names.
+const AGENT_STATE_FIELDS: &[&str] = &[
+    // Core policy storage (§2.1)
+    "agentPolicies",
+    "agentPolicy",
+    // Kill-switch state (§2.4)
+    "agents_paused",
+    "agentsPaused",
+    // Budget tracking (§2.2)
+    "agentBudgets",
+    "agentBudget",
+    // Session key registry (§2)
+    "sessionKeys",
+    "sessionKey",
+];
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /// Check a contract for SAFETY-014..019 agent-safety violations.
@@ -91,8 +138,8 @@ const GRANT_CALL_NAMES: &[&str] = &["grantAgent", "grantAgentPolicy", "extendAge
 pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     let mut violations: Vec<SafetyError> = Vec::new();
 
-    // SAFETY-014 — agent-callable bounded effects (Batch 2).
-    // violations.extend(check_014_agent_callable_bounded_effects(contract));
+    // SAFETY-014 — agent-callable bounded effects.
+    violations.extend(check_014_agent_callable_bounded_effects(contract));
 
     // SAFETY-015 — policy-mutation owner-gating.
     violations.extend(check_015_policy_mutation_owner_gating(contract));
@@ -100,8 +147,8 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     // SAFETY-016 — no agent re-grant.
     violations.extend(check_016_no_agent_re_grant(contract));
 
-    // SAFETY-017 — kill-switch honored (Batch 2).
-    // violations.extend(check_017_kill_switch_honored(contract));
+    // SAFETY-017 — kill-switch honored.
+    violations.extend(check_017_kill_switch_honored(contract));
 
     // SAFETY-018 — co-sign threshold integrity (Batch 3).
     // violations.extend(check_018_cosign_threshold_integrity(contract));
@@ -110,6 +157,179 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     // violations.extend(check_019_deterministic_anomaly_inputs(contract));
 
     violations
+}
+
+// ─── SAFETY-014 — Agent-callable bounded effects ──────────────────────────────
+
+/// Check that every `@agentCallable` function has a statically bounded value outflow.
+///
+/// Spec requirement (09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-014):
+/// > "a function annotated `@agentCallable(maxValueOut: <cap>)` must have value
+/// > outflow the analyzer can prove ≤ the declared cap — no unbounded transfer,
+/// > no loop-driven payout without a declared bound. Unprovable ⇒ reject."
+///
+/// ## Detection strategy (declaration-forcing, MVP)
+///
+/// Step 1 — Annotation check: does `@agentCallable` carry a `maxValueOut` named arg?
+/// - Missing `maxValueOut` → `AgentOutflowUnbounded { reason: "missing maxValueOut argument" }`
+/// - `maxValueOut` is not a numeric literal → `AgentOutflowUnbounded { reason: "maxValueOut must be a numeric literal" }`
+///
+/// Step 2 — Transfer-in-loop check: does the function body contain a transfer call
+/// inside a `while`, `for`, or `loop` body?
+/// - Transfer call inside loop → `AgentOutflowUnbounded { reason: "transfer call inside loop" }`
+///
+/// Step 3 — Transfer calls outside loops with a valid `maxValueOut` cap → clean.
+/// The Warden runtime enforces the declared cap at execution time.
+///
+/// ## Honest limit
+///
+/// Declaration-forcing: the analyzer trusts the declared `maxValueOut` cap for
+/// single-call patterns. Multi-hop outflow through external contracts is not
+/// statically bounded here — that slips to Tier 2 (runtime-scored via Warden).
+fn check_014_agent_callable_bounded_effects(contract: &TypedContract<'_>) -> Vec<SafetyError> {
+    let mut violations = Vec::new();
+
+    for func in contract
+        .functions()
+        .into_iter()
+        .filter(|f| is_agent_callable(f))
+    {
+        // Step 1: verify @agentCallable carries a valid maxValueOut numeric literal.
+        match extract_max_value_out(func.annotations) {
+            MaxValueOutResult::Missing => {
+                violations.push(SafetyError::AgentOutflowUnbounded {
+                    func: func.name.to_owned(),
+                    reason: "missing maxValueOut argument — @agentCallable requires \
+                             maxValueOut: <cap>"
+                        .to_owned(),
+                });
+                // No point checking the body if the annotation is already invalid.
+                continue;
+            }
+            MaxValueOutResult::NotNumericLiteral => {
+                violations.push(SafetyError::AgentOutflowUnbounded {
+                    func: func.name.to_owned(),
+                    reason: "maxValueOut must be a numeric literal for static verification"
+                        .to_owned(),
+                });
+                // Still check the body for loop-transfer violations.
+            }
+            MaxValueOutResult::Valid => {
+                // Annotation is well-formed — proceed to body check.
+            }
+        }
+
+        // Step 2: scan the function body for transfer calls inside loops.
+        if let Some(body) = func.body {
+            let mut visitor = OutflowVisitor {
+                func: func.name.to_owned(),
+                violations: Vec::new(),
+                in_loop: false,
+            };
+            visitor.visit_stmts(body);
+            violations.extend(visitor.violations);
+        }
+    }
+
+    violations
+}
+
+/// Result of extracting the `maxValueOut` argument from `@agentCallable`.
+enum MaxValueOutResult {
+    /// `@agentCallable` has no `maxValueOut` named argument.
+    Missing,
+    /// `maxValueOut` is present but is not a numeric literal.
+    NotNumericLiteral,
+    /// `maxValueOut` is a valid numeric literal.
+    Valid,
+}
+
+/// Extract and validate the `maxValueOut` named argument from `@agentCallable`.
+///
+/// Returns `Missing` if the annotation has no `maxValueOut` arg,
+/// `NotNumericLiteral` if the arg is present but not an integer literal,
+/// and `Valid` if the arg is a well-formed numeric literal.
+fn extract_max_value_out(annotations: &[crate::parser::Annotation]) -> MaxValueOutResult {
+    let Some(ann) = annotations.iter().find(|ann| ann.name == "agentCallable") else {
+        // Caller guarantees @agentCallable is present; this branch is unreachable.
+        return MaxValueOutResult::Missing;
+    };
+
+    // Look for a Named("maxValueOut", expr) argument.
+    let max_value_arg = ann.args.iter().find_map(|arg| {
+        if let AnnotationArg::Named(key, expr) = arg {
+            if key == "maxValueOut" {
+                return Some(expr);
+            }
+        }
+        None
+    });
+
+    let Some(expr) = max_value_arg else {
+        return MaxValueOutResult::Missing;
+    };
+
+    // The value must be a numeric literal: Int, IntTyped, or Hex.
+    // Float, Bool, Str, etc. are not valid caps.
+    match expr {
+        Expr::Literal(Literal::Int(_), _)
+        | Expr::Literal(Literal::IntTyped { .. }, _)
+        | Expr::Literal(Literal::Hex(_), _) => MaxValueOutResult::Valid,
+        _ => MaxValueOutResult::NotNumericLiteral,
+    }
+}
+
+// ─── SAFETY-017 — Kill-switch honored ─────────────────────────────────────────
+
+/// Check that no function accesses agent-policy state without the `@agentCallable`
+/// annotation (which is the compiler-emitted Warden gate).
+///
+/// Spec requirement (09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-017):
+/// > "every `@agentCallable` entry must be dominated by the Warden gate (the
+/// > compiler emits the gate; a contract cannot define an agent-reachable path
+/// > that skips it). A hand-rolled agent entry that does not route through
+/// > Warden ⇒ reject (`AgentGateBypassed`)."
+///
+/// ## Detection strategy (declaration-forcing, MVP)
+///
+/// A function that reads or writes agent-policy state fields (e.g. `self.agentPolicies`,
+/// `self.agents_paused`, `self.sessionKeys`) is an agent-entry candidate. If it does
+/// NOT carry `@agentCallable`, it is a hand-rolled entry that bypasses the Warden gate.
+///
+/// Exclusion: functions gated by `@onlyOwner` are legitimate admin functions that
+/// manage agent state (e.g. `pauseAgents`, `grantAgent`). These are not flagged —
+/// they are owner-only and cannot be reached by session keys.
+///
+/// ## Honest limit
+///
+/// Name-based field detection covers the canonical agent-policy state surface
+/// defined in `AGENT_STATE_FIELDS`. Non-canonical field names escape static
+/// analysis — Warden runtime is the backstop.
+fn check_017_kill_switch_honored(contract: &TypedContract<'_>) -> Vec<SafetyError> {
+    contract
+        .functions()
+        .into_iter()
+        // Not already annotated as @agentCallable (those are the correct entries).
+        .filter(|func| !is_agent_callable(func))
+        // Not owner-only admin functions (legitimate managers of agent state).
+        .filter(|func| !requires_owner_only(&auth_set(func)))
+        // Accesses agent-policy state fields — a hand-rolled agent entry.
+        .filter(|func| accesses_agent_state(func))
+        .map(|func| SafetyError::AgentGateBypassed {
+            func: func.name.to_owned(),
+        })
+        .collect()
+}
+
+/// Returns `true` if the function body reads or writes any agent-policy state field
+/// via `self.<field>` where `<field>` is in `AGENT_STATE_FIELDS`.
+fn accesses_agent_state(func: &ContractFunction<'_>) -> bool {
+    let Some(body) = func.body else {
+        return false;
+    };
+    let mut visitor = AgentStateVisitor { found: false };
+    visitor.visit_stmts(body);
+    visitor.found
 }
 
 // ─── SAFETY-015 — Policy-mutation owner-gating ────────────────────────────────
@@ -159,7 +379,11 @@ fn check_015_policy_mutation_owner_gating(contract: &TypedContract<'_>) -> Vec<S
     // For each @agentCallable entry, check if any ungated policy-mutation
     // function is transitively reachable.
     let mut violations = Vec::new();
-    for entry in contract.functions().into_iter().filter(|f| is_agent_callable(f)) {
+    for entry in contract
+        .functions()
+        .into_iter()
+        .filter(|f| is_agent_callable(f))
+    {
         let reachable = transitive_callees(entry.name, &call_graph);
         for ungated in &ungated_policy_fns {
             if reachable.contains(ungated.as_str()) {
@@ -174,10 +398,9 @@ fn check_015_policy_mutation_owner_gating(contract: &TypedContract<'_>) -> Vec<S
     // itself dangerous even without a known @agentCallable entry leading to it
     // (another entry may be added later, and the function is already a liability).
     for ungated in &ungated_policy_fns {
-        if !violations
-            .iter()
-            .any(|v| matches!(v, SafetyError::AgentPolicySelfEscalation { func } if func == ungated))
-        {
+        if !violations.iter().any(
+            |v| matches!(v, SafetyError::AgentPolicySelfEscalation { func } if func == ungated),
+        ) {
             violations.push(SafetyError::AgentPolicySelfEscalation {
                 func: ungated.clone(),
             });
@@ -227,7 +450,11 @@ fn check_016_no_agent_re_grant(contract: &TypedContract<'_>) -> Vec<SafetyError>
 
     let mut violations = Vec::new();
 
-    for entry in contract.functions().into_iter().filter(|f| is_agent_callable(f)) {
+    for entry in contract
+        .functions()
+        .into_iter()
+        .filter(|f| is_agent_callable(f))
+    {
         // Include the entry itself + all transitively reachable functions.
         let mut to_check: BTreeSet<String> = transitive_callees(entry.name, &call_graph);
         to_check.insert(entry.name.to_owned());
@@ -268,13 +495,12 @@ fn is_agent_callable(func: &ContractFunction<'_>) -> bool {
 ///
 /// O(V + E) where V = number of functions, E = number of call edges.
 /// For contracts (typically < 50 functions) this is negligible.
-fn transitive_callees<'g>(
+fn transitive_callees(
     start: &str,
-    call_graph: &'g crate::analyzer::cfg::CallGraph,
+    call_graph: &crate::analyzer::cfg::CallGraph,
 ) -> BTreeSet<String> {
     let mut visited: BTreeSet<String> = BTreeSet::new();
-    let mut worklist: std::collections::VecDeque<String> =
-        std::collections::VecDeque::new();
+    let mut worklist: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     // Seed with direct callees of start.
     if let Some(direct) = call_graph.get(start) {
@@ -343,6 +569,111 @@ fn extract_call_name(callee: &Expr) -> Option<String> {
         Expr::Ident(name, _) => Some(name.clone()),
         Expr::Member(_, method, _) => Some(method.clone()),
         _ => None,
+    }
+}
+
+/// AST visitor that detects transfer calls inside loop bodies (SAFETY-014).
+///
+/// Tracks loop nesting depth via `in_loop`. When a transfer call is found
+/// inside a loop, it pushes an `AgentOutflowUnbounded` violation.
+///
+/// ## Loop detection
+///
+/// The canonical `walk_stmt` already descends into loop bodies via
+/// `visit_stmts`. To track loop context, we override `visit_stmt` to set
+/// `in_loop = true` before recursing into `While`, `For`, and `Loop` bodies,
+/// then restore the previous value after (handles nested loops correctly).
+struct OutflowVisitor {
+    /// Name of the enclosing `@agentCallable` function.
+    func: String,
+    /// Accumulated violations.
+    violations: Vec<SafetyError>,
+    /// Whether the current traversal position is inside a loop body.
+    in_loop: bool,
+}
+
+impl Visitor for OutflowVisitor {
+    fn visit_stmt(&mut self, stmt: &crate::parser::Stmt) {
+        // For loop-introducing statements, set in_loop before recursing into
+        // the body, then restore. This correctly handles nested loops.
+        match stmt {
+            crate::parser::Stmt::While { cond, body, .. } => {
+                // Visit the condition outside the loop context (it's not the body).
+                self.visit_expr(cond);
+                let prev = self.in_loop;
+                self.in_loop = true;
+                self.visit_stmts(body);
+                self.in_loop = prev;
+            }
+            crate::parser::Stmt::For { iter, body, .. } => {
+                // Visit the iterator expression outside the loop context.
+                match iter {
+                    crate::parser::ForIter::Of(e) => self.visit_expr(e),
+                    crate::parser::ForIter::In(start, _, end, _) => {
+                        self.visit_expr(start);
+                        self.visit_expr(end);
+                    }
+                }
+                let prev = self.in_loop;
+                self.in_loop = true;
+                self.visit_stmts(body);
+                self.in_loop = prev;
+            }
+            crate::parser::Stmt::Loop { body, .. } => {
+                let prev = self.in_loop;
+                self.in_loop = true;
+                self.visit_stmts(body);
+                self.in_loop = prev;
+            }
+            // All other statements: use the canonical walk_stmt traversal.
+            other => crate::visit::walk_stmt(self, other),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        // Detect transfer calls. Only flag them when inside a loop body —
+        // a single transfer call with a declared maxValueOut cap is accepted.
+        if let Expr::Call { callee, .. } = expr {
+            if let Some(name) = extract_call_name(callee) {
+                if self.in_loop && TRANSFER_CALL_NAMES.contains(&name.as_str()) {
+                    self.violations.push(SafetyError::AgentOutflowUnbounded {
+                        func: self.func.clone(),
+                        reason: "transfer call inside loop — outflow is potentially unbounded"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+        walk_expr(self, expr);
+    }
+}
+
+/// AST visitor that detects `self.<agent_state_field>` member accesses (SAFETY-017).
+///
+/// Flags any read or write of a canonical agent-policy state field via `self`.
+/// Short-circuits on first match to avoid redundant work.
+struct AgentStateVisitor {
+    /// Whether any agent-policy state field access was found.
+    found: bool,
+}
+
+impl Visitor for AgentStateVisitor {
+    fn visit_expr(&mut self, expr: &Expr) {
+        // Short-circuit: once found, no need to continue traversal.
+        if self.found {
+            return;
+        }
+        // Detect `self.<field>` where field is in AGENT_STATE_FIELDS.
+        // In the Lem AST: `Expr::Member(box Expr::Ident("self", _), field, _)`.
+        if let Expr::Member(base, field, _) = expr {
+            if let Expr::Ident(name, _) = base.as_ref() {
+                if name == "self" && AGENT_STATE_FIELDS.contains(&field.as_str()) {
+                    self.found = true;
+                    return;
+                }
+            }
+        }
+        walk_expr(self, expr);
     }
 }
 
