@@ -594,3 +594,111 @@ return self.agents_paused
         "ungated fn reading agents_paused must emit AgentGateBypassed; got {violations:?}"
     );
 }
+
+// ─── CR Gate 2 MF-1/MF-2/MF-3/TG tests ──────────────────────────────────────
+
+#[test]
+fn safety014_transitive_loop_transfer_is_flagged() {
+    // TG-1 / MF-1: @agentCallable → helper() → loop with transfer.
+    // The transitive loop+transfer must be detected.
+    let ast = typed_ast(
+        r#"contract C {
+state { balances: Map<Address, u128> }
+fn drain(to: Address) {
+for i in 0..10 {
+let _ = self.transfer(to, 1)
+let _ = i
+}
+}
+@agentCallable(maxValueOut: 100)
+pub fn pay(to: Address) {
+let _ = self.drain(to)
+}
+pub fn transfer(to: Address, amount: u128) -> bool {
+let _ = to
+let _ = amount
+return true
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations.iter().any(|v| matches!(v, SafetyError::AgentOutflowUnbounded { func, .. } if func == "pay")),
+        "transitive loop+transfer via helper must emit AgentOutflowUnbounded; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety014_positional_arg_rejects_with_missing_named_arg() {
+    // TG-2 / SF-1: @agentCallable(1000) — positional arg, not named maxValueOut.
+    // Must emit AgentOutflowUnbounded (named form required).
+    let ast = typed_ast(
+        r#"contract C {
+state { bal: u128 = 0 }
+@agentCallable(1000)
+pub fn withdraw(amount: u128) {
+self.bal = self.bal - amount
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations.iter().any(|v| matches!(v, SafetyError::AgentOutflowUnbounded { func, .. } if func == "withdraw")),
+        "positional @agentCallable arg must emit AgentOutflowUnbounded (named form required); got {violations:?}"
+    );
+}
+
+#[test]
+fn safety014_zero_cap_with_transfer_is_flagged() {
+    // TG-3 / MF-2: maxValueOut: 0 + transfer call — contradictory (0 cap but performs outflow).
+    let ast = typed_ast(
+        r#"contract C {
+state { balances: Map<Address, u128> }
+@agentCallable(maxValueOut: 0)
+pub fn pay(to: Address, amount: u128) {
+let _ = self.transfer(to, amount)
+}
+pub fn transfer(to: Address, amount: u128) -> bool {
+let _ = to
+let _ = amount
+return true
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations.iter().any(|v| matches!(v, SafetyError::AgentOutflowUnbounded { func, reason }
+            if func == "pay" && reason.contains("0 cap"))),
+        "maxValueOut: 0 with transfer must emit AgentOutflowUnbounded; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety014_for_loop_with_transfer_is_flagged() {
+    // TG-4 / SF-3: for loop (Stmt::For) with transfer — must be flagged.
+    let ast = typed_ast(
+        r#"contract C {
+state { balances: Map<Address, u128> }
+@agentCallable(maxValueOut: 100)
+pub fn payMany(to: Address) {
+for i in 0..10 {
+let _ = self.transfer(to, 1)
+}
+}
+pub fn transfer(to: Address, amount: u128) -> bool {
+let _ = to
+let _ = amount
+return true
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations.iter().any(|v| matches!(v, SafetyError::AgentOutflowUnbounded { func, .. } if func == "payMany")),
+        "for-loop with transfer must emit AgentOutflowUnbounded; got {violations:?}"
+    );
+}

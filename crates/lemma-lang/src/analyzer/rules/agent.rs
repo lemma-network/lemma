@@ -113,17 +113,26 @@ const TRANSFER_CALL_NAMES: &[&str] = &[
 //
 // Honest limit: non-canonical field names escape static analysis.
 // Warden runtime provides defence-in-depth for missed names.
+// Canonical contract-storage field names for agent-policy state.
+// Naming convention pinned here (not in 14-AGENT_LAYER §2 which defines the
+// *policy value* struct, not the contract storage identifiers).
+// TODO(spec): add a decisions-log entry declaring these as the canonical names.
 const AGENT_STATE_FIELDS: &[&str] = &[
-    // Core policy storage (§2.1)
+    // Core policy storage (14-AGENT_LAYER §2.1)
     "agentPolicies",
     "agentPolicy",
-    // Kill-switch state (§2.4)
+    // Kill-switch state (14-AGENT_LAYER §2.4)
     "agents_paused",
     "agentsPaused",
-    // Budget tracking (§2.2)
+    // Budget tracking (14-AGENT_LAYER §2.2) — mutable counters Warden writes.
+    // Mutating these directly bypasses the Warden accounting gate.
     "agentBudgets",
     "agentBudget",
-    // Session key registry (§2)
+    "spentTotal",
+    "spent_total",
+    "spentThisEpoch",
+    "spent_this_epoch",
+    // Session key registry (14-AGENT_LAYER §2)
     "sessionKeys",
     "sessionKey",
 ];
@@ -170,23 +179,41 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
 ///
 /// ## Detection strategy (declaration-forcing, MVP)
 ///
-/// Step 1 — Annotation check: does `@agentCallable` carry a `maxValueOut` named arg?
+/// Step 1 — Annotation check: does `@agentCallable` carry a valid `maxValueOut` named arg?
 /// - Missing `maxValueOut` → `AgentOutflowUnbounded { reason: "missing maxValueOut argument" }`
-/// - `maxValueOut` is not a numeric literal → `AgentOutflowUnbounded { reason: "maxValueOut must be a numeric literal" }`
+/// - `maxValueOut` is not a numeric literal → `AgentOutflowUnbounded`
+/// - `maxValueOut: 0` with any transfer in the body → `AgentOutflowUnbounded`
+///   (a 0 cap with outflow is internally contradictory — spec §214)
 ///
-/// Step 2 — Transfer-in-loop check: does the function body contain a transfer call
-/// inside a `while`, `for`, or `loop` body?
-/// - Transfer call inside loop → `AgentOutflowUnbounded { reason: "transfer call inside loop" }`
+/// Step 2 — Transfer-in-loop check: does the function body (or any transitive
+/// callee) contain a transfer call inside a `while`, `for`, or `loop` body?
+/// - Transfer in a loop → `AgentOutflowUnbounded { reason: "transfer call inside loop" }`
 ///
-/// Step 3 — Transfer calls outside loops with a valid `maxValueOut` cap → clean.
+/// Step 3 — Transfer calls outside loops with a valid positive `maxValueOut` cap → clean.
 /// The Warden runtime enforces the declared cap at execution time.
+///
+/// ## Transitive check
+///
+/// The check runs `OutflowVisitor` over the entry's direct body **and** every
+/// transitively reachable function body. This catches the drain-through-helper
+/// pattern: `@agentCallable fn pay() { drain() }` where `drain()` has a loop
+/// with a transfer call.
 ///
 /// ## Honest limit
 ///
 /// Declaration-forcing: the analyzer trusts the declared `maxValueOut` cap for
-/// single-call patterns. Multi-hop outflow through external contracts is not
-/// statically bounded here — that slips to Tier 2 (runtime-scored via Warden).
+/// non-loop transfer patterns. Multi-hop outflow through *external* contracts is
+/// not statically bounded here — that slips to Tier 2 (runtime-scored via Warden).
 fn check_014_agent_callable_bounded_effects(contract: &TypedContract<'_>) -> Vec<SafetyError> {
+    let call_graph = build_call_graph(contract);
+
+    // Build a lookup: function name → ContractFunction (for transitive body walking).
+    let fn_map: std::collections::BTreeMap<&str, _> = contract
+        .functions()
+        .into_iter()
+        .map(|f| (f.name, f))
+        .collect();
+
     let mut violations = Vec::new();
 
     for func in contract
@@ -194,8 +221,13 @@ fn check_014_agent_callable_bounded_effects(contract: &TypedContract<'_>) -> Vec
         .into_iter()
         .filter(|f| is_agent_callable(f))
     {
-        // Step 1: verify @agentCallable carries a valid maxValueOut numeric literal.
-        match extract_max_value_out(func.annotations) {
+        // Find the @agentCallable annotation (guaranteed present by is_agent_callable).
+        let Some(ann) = func.annotations.iter().find(|a| a.name == "agentCallable") else {
+            continue; // is_agent_callable already verified presence — logically unreachable
+        };
+
+        // Step 1: verify @agentCallable carries a valid maxValueOut.
+        let annotation_ok = match extract_max_value_out(ann) {
             MaxValueOutResult::Missing => {
                 violations.push(SafetyError::AgentOutflowUnbounded {
                     func: func.name.to_owned(),
@@ -203,31 +235,48 @@ fn check_014_agent_callable_bounded_effects(contract: &TypedContract<'_>) -> Vec
                              maxValueOut: <cap>"
                         .to_owned(),
                 });
-                // No point checking the body if the annotation is already invalid.
-                continue;
+                false // Still check body for loop-transfer violations.
             }
             MaxValueOutResult::NotNumericLiteral => {
                 violations.push(SafetyError::AgentOutflowUnbounded {
                     func: func.name.to_owned(),
-                    reason: "maxValueOut must be a numeric literal for static verification"
+                    reason: "maxValueOut must be a named numeric literal \
+                             (positional args not accepted)"
                         .to_owned(),
                 });
-                // Still check the body for loop-transfer violations.
+                false
             }
-            MaxValueOutResult::Valid => {
-                // Annotation is well-formed — proceed to body check.
+            MaxValueOutResult::ZeroCap => {
+                // Zero cap is valid syntax but contradictory with any transfer:
+                // Warden will reject every outflow tx at runtime — checked below.
+                true // Mark as "zero cap" — body check will catch it if transfer present.
             }
-        }
+            MaxValueOutResult::Valid => true,
+        };
 
-        // Step 2: scan the function body for transfer calls inside loops.
-        if let Some(body) = func.body {
-            let mut visitor = OutflowVisitor {
-                func: func.name.to_owned(),
-                violations: Vec::new(),
-                in_loop: false,
-            };
-            visitor.visit_stmts(body);
-            violations.extend(visitor.violations);
+        // Step 2: scan the entry body + all transitive callees for loop+transfer violations.
+        // For ZeroCap entries we also flag ANY transfer (loop or not) since the declared cap
+        // is 0 — a transfer with a 0 cap is internally contradictory.
+        let is_zero_cap = matches!(extract_max_value_out(ann), MaxValueOutResult::ZeroCap);
+        let _ = annotation_ok; // Used for early-return logic above; body check always runs.
+
+        // Collect the entry + all transitive callees to walk.
+        let mut to_walk: BTreeSet<String> = transitive_callees(func.name, &call_graph);
+        to_walk.insert(func.name.to_owned());
+
+        for fn_name in &to_walk {
+            if let Some(callee_func) = fn_map.get(fn_name.as_str()) {
+                if let Some(body) = callee_func.body {
+                    let mut visitor = OutflowVisitor {
+                        func: func.name.to_owned(), // Report the entry name, not the callee
+                        violations: Vec::new(),
+                        in_loop: false,
+                        flag_any_transfer: is_zero_cap,
+                    };
+                    visitor.visit_stmts(body);
+                    violations.extend(visitor.violations);
+                }
+            }
         }
     }
 
@@ -236,26 +285,31 @@ fn check_014_agent_callable_bounded_effects(contract: &TypedContract<'_>) -> Vec
 
 /// Result of extracting the `maxValueOut` argument from `@agentCallable`.
 enum MaxValueOutResult {
-    /// `@agentCallable` has no `maxValueOut` named argument.
+    /// `@agentCallable` has no `maxValueOut` named argument (includes positional-only args).
     Missing,
-    /// `maxValueOut` is present but is not a numeric literal.
+    /// `maxValueOut` is present but is not a numeric literal (e.g. an identifier).
     NotNumericLiteral,
-    /// `maxValueOut` is a valid numeric literal.
+    /// `maxValueOut: 0` — declared zero cap. Contradictory if the function performs any
+    /// transfer (flagged by caller as `AgentOutflowUnbounded`).
+    ZeroCap,
+    /// `maxValueOut` is a valid positive numeric literal.
     Valid,
 }
 
-/// Extract and validate the `maxValueOut` named argument from `@agentCallable`.
+/// Extract and validate the `maxValueOut` named argument from an `@agentCallable` annotation.
 ///
-/// Returns `Missing` if the annotation has no `maxValueOut` arg,
-/// `NotNumericLiteral` if the arg is present but not an integer literal,
-/// and `Valid` if the arg is a well-formed numeric literal.
-fn extract_max_value_out(annotations: &[crate::parser::Annotation]) -> MaxValueOutResult {
-    let Some(ann) = annotations.iter().find(|ann| ann.name == "agentCallable") else {
-        // Caller guarantees @agentCallable is present; this branch is unreachable.
-        return MaxValueOutResult::Missing;
-    };
-
+/// Takes the already-found `@agentCallable` `Annotation` directly (DRY: caller
+/// already filtered on `is_agent_callable`, no redundant re-scan of annotations).
+///
+/// Returns:
+/// - `Missing` — no `maxValueOut` named arg (bare `@agentCallable` or positional-only)
+/// - `NotNumericLiteral` — `maxValueOut` present but not an integer literal
+/// - `ZeroCap` — `maxValueOut: 0` (valid syntax, contradictory with outflow — caller handles)
+/// - `Valid` — `maxValueOut` is a positive numeric literal
+fn extract_max_value_out(ann: &crate::parser::Annotation) -> MaxValueOutResult {
     // Look for a Named("maxValueOut", expr) argument.
+    // Positional args (e.g. @agentCallable(1000)) are not accepted — named form is required
+    // (declaration-forcing: forces developers to be explicit about the cap semantics).
     let max_value_arg = ann.args.iter().find_map(|arg| {
         if let AnnotationArg::Named(key, expr) = arg {
             if key == "maxValueOut" {
@@ -270,8 +324,9 @@ fn extract_max_value_out(annotations: &[crate::parser::Annotation]) -> MaxValueO
     };
 
     // The value must be a numeric literal: Int, IntTyped, or Hex.
-    // Float, Bool, Str, etc. are not valid caps.
+    // Float, Bool, Str, Ident, etc. are not valid caps.
     match expr {
+        Expr::Literal(Literal::Int(0), _) => MaxValueOutResult::ZeroCap,
         Expr::Literal(Literal::Int(_), _)
         | Expr::Literal(Literal::IntTyped { .. }, _)
         | Expr::Literal(Literal::Hex(_), _) => MaxValueOutResult::Valid,
@@ -299,6 +354,18 @@ fn extract_max_value_out(annotations: &[crate::parser::Annotation]) -> MaxValueO
 /// Exclusion: functions gated by `@onlyOwner` are legitimate admin functions that
 /// manage agent state (e.g. `pauseAgents`, `grantAgent`). These are not flagged —
 /// they are owner-only and cannot be reached by session keys.
+///
+/// **Read-only accessors**: a `view` function that reads agent state (e.g. `getPolicy()`)
+/// is ALSO flagged. This is intentional: any contract function that touches agent-policy
+/// state — even read-only — must be explicitly gated as either `@agentCallable` (if
+/// session-key-reachable) or `@onlyOwner` (if admin-only). This forces developers to
+/// declare the access level; Warden then enforces it at runtime. Ungated read accessors
+/// are rare in practice and carry low blast radius, but the conservative posture prevents
+/// information-leakage patterns on session-key-accessible paths.
+///
+/// If `ContractFunction::mutability` is exposed in a future version, `view`/`pure`
+/// functions could be exempted from this check — but for now all ungated agent-state
+/// accesses are flagged uniformly.
 ///
 /// ## Honest limit
 ///
@@ -590,6 +657,9 @@ struct OutflowVisitor {
     violations: Vec<SafetyError>,
     /// Whether the current traversal position is inside a loop body.
     in_loop: bool,
+    /// If `true`, flag ANY transfer call (used when `maxValueOut: 0` — zero cap
+    /// is contradictory with any outflow, not just loop-driven outflow).
+    flag_any_transfer: bool,
 }
 
 impl Visitor for OutflowVisitor {
@@ -631,15 +701,26 @@ impl Visitor for OutflowVisitor {
     }
 
     fn visit_expr(&mut self, expr: &Expr) {
-        // Detect transfer calls. Only flag them when inside a loop body —
-        // a single transfer call with a declared maxValueOut cap is accepted.
+        // Detect transfer calls.
+        // Flagging conditions:
+        //   1. Always: when `flag_any_transfer` is set (maxValueOut: 0 is contradictory
+        //      with any transfer — even a single one declared with a 0 cap).
+        //   2. In-loop only: otherwise, only flag transfers inside loops (a single transfer
+        //      with a positive declared cap is accepted; Warden enforces the cap at runtime).
         if let Expr::Call { callee, .. } = expr {
             if let Some(name) = extract_call_name(callee) {
-                if self.in_loop && TRANSFER_CALL_NAMES.contains(&name.as_str()) {
+                if TRANSFER_CALL_NAMES.contains(&name.as_str())
+                    && (self.in_loop || self.flag_any_transfer)
+                {
+                    let reason = if self.flag_any_transfer && !self.in_loop {
+                        "declared maxValueOut: 0 but function performs a transfer — \
+                         0 cap is contradictory with outflow"
+                    } else {
+                        "transfer call inside loop — outflow is potentially unbounded"
+                    };
                     self.violations.push(SafetyError::AgentOutflowUnbounded {
                         func: self.func.clone(),
-                        reason: "transfer call inside loop — outflow is potentially unbounded"
-                            .to_owned(),
+                        reason: reason.to_owned(),
                     });
                 }
             }
