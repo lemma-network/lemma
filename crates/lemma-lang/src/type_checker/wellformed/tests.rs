@@ -1,6 +1,7 @@
 // Well-formedness pass tests — Family A: Storage & Initialization (WF-001..003),
 // Family B: Control-Flow (WF-004..007), Family C: Structural-Completeness
-// (WF-008..011), and Family D: Schema & Effect (WF-012..015).
+// (WF-008..011), Family D: Schema & Effect (WF-012..015), and
+// Family E: Agent Annotation Well-Formedness (WF-016..018).
 //
 // Follows AGENTS §11.2: tests in a separate submodule file (never inline).
 // Naming convention: `check_<rule>_<expected_outcome>`.
@@ -2109,6 +2110,317 @@ fn check_wf015_rejects_view_fn_writing_self_field() {
                 kind,
                 TypeErrorKind::EffectViolation { func, declared, .. }
                     if func == "reset" && declared == "view"
+            )
+        },
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WF-016: @agentCallable annotation validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Positive tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn check_wf016_agent_callable_with_valid_integer_cap_is_clean() {
+    // (pos) @agentCallable(maxValueOut: 100) on a pub fn → passes.
+    assert_passes(
+        r#"
+        contract Agent {
+            state { balance: u128 = 0 }
+            @agentCallable(maxValueOut: 100)
+            pub fn withdraw() {
+                self.balance = 0
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn check_wf016_agent_callable_with_typed_integer_cap_is_clean() {
+    // (pos) @agentCallable(maxValueOut: 500u128) — typed integer literal → passes.
+    assert_passes(
+        r#"
+        contract Agent {
+            state { balance: u128 = 0 }
+            @agentCallable(maxValueOut: 500u128)
+            pub fn withdraw() {
+                self.balance = 0
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn check_wf016_non_agent_callable_fn_not_checked() {
+    // (pos) regular pub fn without @agentCallable → no WF-016 check, passes.
+    assert_passes(
+        r#"
+        contract Agent {
+            state { balance: u128 = 0 }
+            pub fn withdraw() {
+                self.balance = 0
+            }
+        }
+        "#,
+    );
+}
+
+// ── Negative tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn check_wf016_agent_callable_missing_max_value_out_fails() {
+    // (neg) bare @agentCallable with no args → missing maxValueOut → WF-016.
+    assert_wf_error(
+        r#"
+        contract Agent {
+            state { balance: u128 = 0 }
+            @agentCallable
+            pub fn withdraw() {
+                self.balance = 0
+            }
+        }
+        "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidAgentCallableAnnotation { func, reason, .. }
+                    if func == "withdraw" && reason.contains("missing")
+            )
+        },
+    );
+}
+
+#[test]
+fn check_wf016_agent_callable_positional_arg_fails() {
+    // (neg) @agentCallable(100) — positional arg → WF-016.
+    assert_wf_error(
+        r#"
+        contract Agent {
+            state { balance: u128 = 0 }
+            @agentCallable(100)
+            pub fn withdraw() {
+                self.balance = 0
+            }
+        }
+        "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidAgentCallableAnnotation { func, reason, .. }
+                    if func == "withdraw" && reason.contains("positional")
+            )
+        },
+    );
+}
+
+#[test]
+fn check_wf016_agent_callable_non_integer_max_value_out_fails() {
+    // (neg) @agentCallable(maxValueOut: "oops") — string value → WF-016.
+    assert_wf_error(
+        r#"
+        contract Agent {
+            state { balance: u128 = 0 }
+            @agentCallable(maxValueOut: "oops")
+            pub fn withdraw() {
+                self.balance = 0
+            }
+        }
+        "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidAgentCallableAnnotation { func, reason, .. }
+                    if func == "withdraw" && reason.contains("integer")
+            )
+        },
+    );
+}
+
+#[test]
+fn check_wf016_agent_callable_bool_max_value_out_fails() {
+    // (neg) @agentCallable(maxValueOut: true) — bool value → WF-016.
+    assert_wf_error(
+        r#"
+        contract Agent {
+            state { balance: u128 = 0 }
+            @agentCallable(maxValueOut: true)
+            pub fn withdraw() {
+                self.balance = 0
+            }
+        }
+        "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidAgentCallableAnnotation { func, .. }
+                    if func == "withdraw"
+            )
+        },
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WF-017: @cosignRequired placement validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Positive tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn check_wf017_cosign_on_pub_fn_is_clean() {
+    // (pos) @cosignRequired on a pub fn → passes.
+    assert_passes(
+        r#"
+        contract Wallet {
+            state { balance: u128 = 0 }
+            @cosignRequired
+            pub fn transfer() {
+                self.balance = 0
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn check_wf017_no_cosign_annotation_is_clean() {
+    // (pos) fn without @cosignRequired → no WF-017 check, passes.
+    assert_passes(
+        r#"
+        contract Wallet {
+            state { balance: u128 = 0 }
+            pub fn transfer() {
+                self.balance = 0
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn check_wf017_cosign_on_pub_fn_with_other_annotations_is_clean() {
+    // (pos) @cosignRequired alongside other annotations on a pub fn → passes.
+    assert_passes(
+        r#"
+        contract Wallet {
+            state { balance: u128 = 0 }
+            @cosignRequired
+            @agentCallable(maxValueOut: 1000)
+            pub fn transfer() {
+                self.balance = 0
+            }
+        }
+        "#,
+    );
+}
+
+// ── Negative tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn check_wf017_cosign_on_private_fn_fails() {
+    // (neg) @cosignRequired on a private fn → WF-017.
+    assert_wf_error(
+        r#"
+        contract Wallet {
+            state { balance: u128 = 0 }
+            @cosignRequired
+            fn internalTransfer() {
+                self.balance = 0
+            }
+        }
+        "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidCosignPlacement { func, reason, .. }
+                    if func == "internalTransfer" && reason.contains("pub")
+            )
+        },
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WF-018: @anomalyGuard placement validation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Positive tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn check_wf018_anomaly_guard_on_bool_fn_is_clean() {
+    // (pos) @anomalyGuard on a fn returning bool → passes.
+    assert_passes(
+        r#"
+        contract Guard {
+            state { balance: u128 = 0 }
+            @anomalyGuard
+            view fn isAnomalous() -> bool {
+                return self.balance > 1000000u128
+            }
+        }
+        "#,
+    );
+}
+
+#[test]
+fn check_wf018_no_anomaly_guard_fn_not_checked() {
+    // (pos) regular fn without @anomalyGuard → no WF-018 check, passes.
+    assert_passes(
+        r#"
+        contract Guard {
+            state { balance: u128 = 0 }
+            view fn isAnomalous() -> bool {
+                return self.balance > 1000000u128
+            }
+        }
+        "#,
+    );
+}
+
+// ── Negative tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn check_wf018_anomaly_guard_on_void_fn_fails() {
+    // (neg) @anomalyGuard on a void fn → WF-018.
+    assert_wf_error(
+        r#"
+        contract Guard {
+            state { balance: u128 = 0 }
+            @anomalyGuard
+            pub fn doSomething() {
+                self.balance = 0
+            }
+        }
+        "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidAnomalyGuardPlacement { func, reason, .. }
+                    if func == "doSomething" && reason.contains("bool")
+            )
+        },
+    );
+}
+
+#[test]
+fn check_wf018_anomaly_guard_on_u128_fn_fails() {
+    // (neg) @anomalyGuard on a fn returning u128 (not bool) → WF-018.
+    assert_wf_error(
+        r#"
+        contract Guard {
+            state { balance: u128 = 0 }
+            @anomalyGuard
+            view fn getBalance() -> u128 {
+                return self.balance
+            }
+        }
+        "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidAnomalyGuardPlacement { func, .. }
+                    if func == "getBalance"
             )
         },
     );

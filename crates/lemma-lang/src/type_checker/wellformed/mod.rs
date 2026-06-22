@@ -46,6 +46,12 @@
 //! grammar), WF-014 (token `config {}` schema validation — per-standard
 //! hardcoded schema, bps-integer mandate, conditional requirements),
 //! WF-015 (pure/view effect conformance — syntactic gate).
+//!
+//! **Phase 6 (wf-checker subtask 12)**: Family E rules implemented —
+//! WF-016 (`@agentCallable` annotation arg validation — maxValueOut required,
+//! must be integer, no positional args), WF-017 (`@cosignRequired` placement —
+//! must be on `pub`/`external` function), WF-018 (`@anomalyGuard` placement —
+//! must be on a `bool`-returning function).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,6 +92,9 @@ pub fn check(typed_ast: &TypedAst) -> Result<(), Vec<TypeError>> {
 
     // Family D: Schema & Effect (WF-012..015)
     violations.extend(check_family_d(typed_ast));
+
+    // Family E: Agent annotation well-formedness (WF-016..018)
+    violations.extend(check_family_e(typed_ast));
 
     if violations.is_empty() {
         Ok(())
@@ -3755,6 +3764,258 @@ impl Visitor for ViewChecker<'_> {
 /// Used by WF-015 view check to detect state writes of the form `self.field = ...`.
 fn is_self_field_target_any(expr: &Expr) -> bool {
     matches!(expr, Expr::Member(obj, _, _) if is_self_expr(obj))
+}
+
+// ─── Family E: Agent annotation well-formedness (WF-016..018) ────────────────
+
+/// Check all Family E rules (WF-016, WF-017, WF-018) for every contract/token.
+///
+/// Validates agent-layer annotation shapes before the safety analyzer runs.
+/// Collect-all: never returns early.
+fn check_family_e(typed_ast: &TypedAst) -> Vec<TypeError> {
+    let mut violations = Vec::new();
+    for contract in typed_ast.contracts() {
+        violations.extend(check_wf016_agent_callable_annotation(&contract));
+        violations.extend(check_wf017_cosign_required_placement(&contract));
+        violations.extend(check_wf018_anomaly_guard_placement(&contract));
+    }
+    violations
+}
+
+// ─── WF-016: @agentCallable annotation validation ────────────────────────────
+
+/// WF-016 — Validate `@agentCallable(maxValueOut: <int-expr>)` annotations.
+///
+/// Requirements (collect-all per annotation):
+/// 1. No positional args — only named args accepted (forces documentation).
+/// 2. At least one named arg `maxValueOut` must be present.
+/// 3. The `maxValueOut` arg value must be an integer literal (Int, IntTyped, Hex, or Bin).
+///
+/// Note: annotation arg expressions are not fully typed by the inferer in Phase 3
+/// (they are not part of the function body), so we use an AST-level literal check
+/// rather than the type table.  This is the correct approach for annotation args.
+///
+/// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-014`.
+fn check_wf016_agent_callable_annotation(contract: &TypedContract<'_>) -> Vec<TypeError> {
+    use crate::parser::AnnotationArg;
+
+    let mut violations = Vec::new();
+
+    for func in contract.functions() {
+        for ann in func.annotations {
+            if ann.name != "agentCallable" {
+                continue;
+            }
+
+            // Rule 1: no positional args allowed.
+            let has_positional = ann
+                .args
+                .iter()
+                .any(|a| matches!(a, AnnotationArg::Positional(_)));
+            if has_positional {
+                violations.push(TypeError {
+                    kind: TypeErrorKind::InvalidAgentCallableAnnotation {
+                        func: func.name.to_owned(),
+                        reason: "positional arguments not accepted — use named form: \
+                                 @agentCallable(maxValueOut: <cap>)"
+                            .to_owned(),
+                        span: ann.span,
+                    },
+                    span: ann.span,
+                    message: format!(
+                        "WF-016 @agentCallable annotation on `{}`: positional arguments \
+                         not accepted — use named form: @agentCallable(maxValueOut: <cap>)",
+                        func.name
+                    ),
+                });
+                // Still check for maxValueOut below (collect-all).
+            }
+
+            // Rule 2: maxValueOut named arg must be present.
+            let max_value_arg = ann.args.iter().find_map(|arg| {
+                if let AnnotationArg::Named(key, expr) = arg {
+                    if key == "maxValueOut" {
+                        Some(expr)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+
+            let Some(expr) = max_value_arg else {
+                violations.push(TypeError {
+                    kind: TypeErrorKind::InvalidAgentCallableAnnotation {
+                        func: func.name.to_owned(),
+                        reason: "missing required argument `maxValueOut: <integer>` — \
+                                 @agentCallable requires a declared value outflow cap"
+                            .to_owned(),
+                        span: ann.span,
+                    },
+                    span: ann.span,
+                    message: format!(
+                        "WF-016 @agentCallable annotation on `{}`: missing required argument \
+                         `maxValueOut: <integer>` — @agentCallable requires a declared value \
+                         outflow cap",
+                        func.name
+                    ),
+                });
+                continue;
+            };
+
+            // Rule 3: maxValueOut must be an integer literal.
+            if !is_integer_literal(expr) {
+                violations.push(TypeError {
+                    kind: TypeErrorKind::InvalidAgentCallableAnnotation {
+                        func: func.name.to_owned(),
+                        reason: "maxValueOut must be an integer expression \
+                                 (literal or integer constant)"
+                            .to_owned(),
+                        span: ann.span,
+                    },
+                    span: ann.span,
+                    message: format!(
+                        "WF-016 @agentCallable annotation on `{}`: maxValueOut must be an \
+                         integer expression (literal or integer constant)",
+                        func.name
+                    ),
+                });
+            }
+        }
+    }
+
+    violations
+}
+
+// ─── WF-017: @cosignRequired placement validation ────────────────────────────
+
+/// WF-017 — Validate `@cosignRequired` placement.
+///
+/// Requirements:
+/// - Must be on a `pub` or `external` function (session-key-reachable paths).
+/// - `TypedContract::functions()` already excludes `init` (it is a regular
+///   function named "init" but the WF-003 check handles init-specific rules).
+///   We additionally skip `init` here to avoid double-reporting.
+///
+/// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-018` and
+/// `docs/14-AGENT_LAYER §2.3.4`.
+fn check_wf017_cosign_required_placement(contract: &TypedContract<'_>) -> Vec<TypeError> {
+    let mut violations = Vec::new();
+
+    for func in contract.functions() {
+        // Skip init — WF-003 handles init-specific annotation rules.
+        if func.name == "init" {
+            continue;
+        }
+
+        for ann in func.annotations {
+            if ann.name != "cosignRequired" {
+                continue;
+            }
+
+            // @cosignRequired must be on a pub or external function.
+            if !is_public_visibility(func.visibility) {
+                violations.push(TypeError {
+                    kind: TypeErrorKind::InvalidCosignPlacement {
+                        func: func.name.to_owned(),
+                        reason: "@cosignRequired must be on a `pub` function — \
+                                 co-signed actions must be session-key-reachable"
+                            .to_owned(),
+                        span: ann.span,
+                    },
+                    span: ann.span,
+                    message: format!(
+                        "WF-017 @cosignRequired on `{}`: @cosignRequired must be on a `pub` \
+                         function — co-signed actions must be session-key-reachable",
+                        func.name
+                    ),
+                });
+            }
+        }
+    }
+
+    violations
+}
+
+// ─── WF-018: @anomalyGuard placement validation ──────────────────────────────
+
+/// WF-018 — Validate `@anomalyGuard` placement.
+///
+/// Requirements:
+/// - Must be on a function returning `bool` (it is a predicate, not a void action).
+/// - `TypedContract::functions()` excludes `init` — only check return type.
+///
+/// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-019` and
+/// `docs/14-AGENT_LAYER §2.3.5`.
+fn check_wf018_anomaly_guard_placement(contract: &TypedContract<'_>) -> Vec<TypeError> {
+    let mut violations = Vec::new();
+
+    for func in contract.functions() {
+        // Skip init — WF-003 handles init-specific annotation rules.
+        if func.name == "init" {
+            continue;
+        }
+
+        for ann in func.annotations {
+            if ann.name != "anomalyGuard" {
+                continue;
+            }
+
+            // @anomalyGuard must be on a bool-returning function (it's a predicate).
+            let returns_bool = matches!(func.return_type, Some(ResolvedType::Bool));
+            if !returns_bool {
+                violations.push(TypeError {
+                    kind: TypeErrorKind::InvalidAnomalyGuardPlacement {
+                        func: func.name.to_owned(),
+                        reason: "@anomalyGuard must be on a function returning `bool` — \
+                                 anomaly predicates must be pure boolean checks"
+                            .to_owned(),
+                        span: ann.span,
+                    },
+                    span: ann.span,
+                    message: format!(
+                        "WF-018 @anomalyGuard on `{}`: @anomalyGuard must be on a function \
+                         returning `bool` — anomaly predicates must be pure boolean checks",
+                        func.name
+                    ),
+                });
+            }
+        }
+    }
+
+    violations
+}
+
+// ─── Family E helpers ─────────────────────────────────────────────────────────
+
+/// Returns `true` if `expr` is a numeric literal node at the AST level.
+///
+/// Used for WF-016 `maxValueOut` validation: annotation arg expressions are not
+/// fully typed by the inferer in Phase 3 (they are not part of the function body),
+/// so we fall back to an AST-level literal check rather than the type table.
+///
+/// Accepts: `Int`, `IntTyped`, `Hex`, `Bin` literals — all integer forms.
+/// Rejects: `Str`, `Bool`, `Float`, `Char`, `Address`, `Unit`, and all non-literal exprs.
+fn is_integer_literal(expr: &Expr) -> bool {
+    use crate::parser::Literal;
+    matches!(
+        expr,
+        Expr::Literal(Literal::Int(_), _)
+            | Expr::Literal(Literal::IntTyped { .. }, _)
+            | Expr::Literal(Literal::Hex(_), _)
+            | Expr::Literal(Literal::Bin(_), _)
+    )
+}
+
+/// Returns `true` if `visibility` is `Pub` or `External` (session-key-reachable).
+///
+/// Used by WF-017 to check that `@cosignRequired` is only on publicly callable functions.
+fn is_public_visibility(vis: &crate::parser::Visibility) -> bool {
+    matches!(
+        vis,
+        crate::parser::Visibility::Pub | crate::parser::Visibility::External
+    )
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

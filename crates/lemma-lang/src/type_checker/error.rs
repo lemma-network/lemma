@@ -412,6 +412,55 @@ pub enum TypeErrorKind {
         /// Source location of the offending expression or statement.
         span: Span,
     },
+
+    // ── Agent annotation well-formedness variants (WF-016..018) ──────────────
+    // These are emitted by `type_checker::wellformed::check_family_e` (P3·Step 12).
+    // The pass runs as Family E within the WF pass, after Family D.
+    /// WF-016 — `@agentCallable` carries an invalid argument list: missing
+    /// `maxValueOut` named argument, non-integer `maxValueOut`, or uses
+    /// positional args instead of named.
+    ///
+    /// `@agentCallable` must carry `maxValueOut: <integer-expr>` — this WF rule
+    /// enforces the arg shape before the safety analyzer runs.
+    ///
+    /// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-014` for the spec requirement.
+    InvalidAgentCallableAnnotation {
+        /// The function with the malformed annotation.
+        func: String,
+        /// Human-readable reason (e.g. "missing maxValueOut argument").
+        reason: String,
+        /// Source location of the offending annotation.
+        span: Span,
+    },
+
+    /// WF-017 — `@cosignRequired` is placed on an invalid target: must be on a
+    /// `pub` or `external` non-init function (not on private functions).
+    ///
+    /// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-018` and
+    /// `docs/14-AGENT_LAYER §2.3.4` for co-sign semantics.
+    InvalidCosignPlacement {
+        /// The function with the invalid annotation.
+        func: String,
+        /// Human-readable reason.
+        reason: String,
+        /// Source location of the offending annotation.
+        span: Span,
+    },
+
+    /// WF-018 — `@anomalyGuard` is placed on an invalid target: must be on a
+    /// function that returns `bool` (it is a predicate), not on void functions,
+    /// events, or init.
+    ///
+    /// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-019` and
+    /// `docs/14-AGENT_LAYER §2.3.5` for anomaly-guard semantics.
+    InvalidAnomalyGuardPlacement {
+        /// The function with the invalid annotation.
+        func: String,
+        /// Human-readable reason.
+        reason: String,
+        /// Source location of the offending annotation.
+        span: Span,
+    },
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

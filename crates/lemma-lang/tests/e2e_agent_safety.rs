@@ -99,8 +99,13 @@ return self.bal > 10000
 #[test]
 fn e2e_unsafe_agent_contract_emits_multiple_violations() {
     // A contract with deliberate SAFETY-014 and SAFETY-015 violations:
-    // - @agentCallable without maxValueOut (SAFETY-014)
+    // - @agentCallable(maxValueOut: 500) with a transfer call inside a while loop
+    //   (SAFETY-014: loop-driven payout is unbounded even with a declared cap)
     // - grantAgent without @onlyOwner (SAFETY-015)
+    //
+    // Note: bare `@agentCallable` (no maxValueOut) is now caught by WF-016 before
+    // the safety analyzer runs.  This test uses a valid annotation shape so the
+    // WF pass succeeds and the safety analyzer can detect both violations.
     //
     // Expected: pipeline returns Err(LangError::Safety) with both violations.
     let violations = expect_violations(
@@ -108,6 +113,7 @@ fn e2e_unsafe_agent_contract_emits_multiple_violations() {
 state {
 owner: Address
 bal: u128 = 0
+count: u128 = 0
 }
 init(owner: Address) {
 self.owner = owner
@@ -115,9 +121,16 @@ self.owner = owner
 pub fn grantAgent(agent: Address) {
 let _ = agent
 }
-@agentCallable
-pub fn agentWithdraw(amount: u128) {
+pub fn transfer(to: Address, amount: u128) {
 self.bal = self.bal - amount
+let _ = to
+}
+@agentCallable(maxValueOut: 500)
+pub fn agentWithdraw(n: u128, to: Address) {
+while (self.count < n) {
+let _ = self.transfer(to, 100)
+self.count = self.count + 1
+}
 }
 }"#,
     );
