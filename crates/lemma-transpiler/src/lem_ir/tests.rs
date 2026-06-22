@@ -59,7 +59,7 @@ fn lem_contract_default_has_empty_vecs() {
 }
 
 #[test]
-fn lem_function_constructor_flag() {
+fn lem_function_kind_constructor() {
     let f = LemFunction {
         name: "init".to_owned(),
         params: vec![],
@@ -68,9 +68,34 @@ fn lem_function_constructor_flag() {
         mutability: LemMutability::Mutable,
         decorators: vec![],
         body: vec![],
-        is_constructor: true,
+        kind: LemFunctionKind::Constructor,
     };
-    assert!(f.is_constructor);
+    assert_eq!(f.kind, LemFunctionKind::Constructor);
+    assert_eq!(f.name, "init");
+}
+
+#[test]
+fn lem_function_kind_method() {
+    let f = LemFunction {
+        name: "transfer".to_owned(),
+        params: vec![],
+        returns: Some(LemType::Bool),
+        visibility: LemVisibility::Public,
+        mutability: LemMutability::Mutable,
+        decorators: vec![],
+        body: vec![],
+        kind: LemFunctionKind::Method,
+    };
+    assert_eq!(f.kind, LemFunctionKind::Method);
+}
+
+#[test]
+fn lem_expr_tuple_holds_elements() {
+    let t = LemExpr::Tuple(vec![LemExpr::BoolLit(true), LemExpr::IntLit(42)]);
+    match t {
+        LemExpr::Tuple(elems) => assert_eq!(elems.len(), 2),
+        _ => panic!("wrong variant"),
+    }
 }
 
 #[test]

@@ -51,19 +51,20 @@ fn first_parse_error(diags: &[Diagnostic]) -> TranspileError {
         .map(diagnostic_to_error)
         .unwrap_or_else(|| TranspileError::ParseError {
             file: "<input>".to_owned(),
-            line: 0,
+            offset: 0,
             message: "unknown parse error".to_owned(),
         })
 }
 
 fn diagnostic_to_error(d: &Diagnostic) -> TranspileError {
-    let line = match d.loc {
+    // pt::Loc::File(_, start, _) carries a byte offset, not a line number.
+    let offset = match d.loc {
         pt::Loc::File(_, start, _) => start,
         _ => 0,
     };
     TranspileError::ParseError {
         file: "<input>".to_owned(),
-        line,
+        offset,
         message: d.message.clone(),
     }
 }

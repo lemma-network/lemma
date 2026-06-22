@@ -135,6 +135,14 @@ pub enum UnaryOp {
 /// Covers the expression forms needed to represent ERC-20 contract bodies.
 /// Complex Solidity expressions with no Lem equivalent are represented as
 /// [`LemExpr::Raw`] with a comment inserted by the codegen.
+///
+/// ## Batch 1 scope limits (ERC-20)
+///
+/// - **Tuples**: `LemExpr::Tuple` holds `Vec<LemExpr>` for ≤2-element returns common in ERC-20.
+///   N-element tuples (>2) from `UniswapV2`-style multi-returns lower to `LemExpr::Raw`.
+/// - **Custom modifier bodies**: Solidity modifiers with inline `_` bodies have no direct
+///   Lem equivalent; they lower to `LemExpr::Raw` with a W00x warning comment.
+///   Decorator *names* (`onlyOwner`, `whenNotPaused`) are represented as `LemFunction::decorators`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LemExpr {
     // Literals
@@ -200,6 +208,11 @@ pub enum LemExpr {
         then_expr: Box<LemExpr>,
         else_expr: Box<LemExpr>,
     },
+
+    /// Tuple of expressions — Solidity multi-return `(a, b)` → `(expr, expr)`.
+    ///
+    /// ERC-20 scope: 2-element tuples only. N-element (>2) lower to `Raw`.
+    Tuple(Vec<LemExpr>),
 
     /// Raw Lem source fallback — emitted verbatim with a `// transpiled` comment.
     /// Used for expressions that have no clean IR equivalent.
@@ -289,6 +302,20 @@ pub struct LemEvent {
     pub fields: Vec<LemEventField>,
 }
 
+// ── Function kind ─────────────────────────────────────────────────────────────
+
+/// Whether a [`LemFunction`] is a constructor or a regular method.
+///
+/// Single source of truth for constructor-ness — replaces a `bool` flag to
+/// prevent the `name == "init"` vs `is_constructor` dual-truth drift risk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LemFunctionKind {
+    /// Solidity `constructor(...)` → Lem `fn init(...)`.
+    Constructor,
+    /// Solidity `function <name>(...)` → Lem `fn <name>(...)`.
+    Method,
+}
+
 // ── Functions ─────────────────────────────────────────────────────────────────
 
 /// A function or constructor definition in Lem.
@@ -303,8 +330,8 @@ pub struct LemFunction {
     /// Decorator names: `["onlyOwner", "whenNotPaused"]` etc.
     pub decorators: Vec<String>,
     pub body: Vec<LemStmt>,
-    /// `true` if this was a Solidity `constructor`.
-    pub is_constructor: bool,
+    /// Whether this function is the contract constructor. Single source of truth.
+    pub kind: LemFunctionKind,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────

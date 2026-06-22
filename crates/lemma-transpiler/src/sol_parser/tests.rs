@@ -53,3 +53,24 @@ fn extract_name_returns_first_contract() {
     let name = extract_primary_contract_name(&unit);
     assert_eq!(name.as_deref(), Some("Alpha"));
 }
+
+#[test]
+fn extract_name_skips_abstract_contract() {
+    // Real ERC-20 pattern: abstract base first, concrete token last.
+    // extract_primary_contract_name must skip the abstract and return the concrete.
+    let src = r#"
+        pragma solidity ^0.8.0;
+        abstract contract ERC20Base {
+            mapping(address => uint256) internal _balances;
+        }
+        contract MyToken is ERC20Base { }
+    "#;
+    let unit = parse_solidity(src).expect("should parse");
+    let name = extract_primary_contract_name(&unit);
+    // Must NOT return "ERC20Base" (that's abstract, ContractTy::Abstract)
+    assert_eq!(
+        name.as_deref(),
+        Some("MyToken"),
+        "should skip abstract and return concrete contract"
+    );
+}

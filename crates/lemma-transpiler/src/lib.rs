@@ -39,10 +39,11 @@ pub struct TranspileResult {
 #[derive(Debug, thiserror::Error)]
 pub enum TranspileError {
     /// The Solidity source could not be parsed.
-    #[error("solidity parse error in {file} near offset {line}: {message}")]
+    #[error("solidity parse error in {file} near byte offset {offset}: {message}")]
     ParseError {
         file: String,
-        line: usize,
+        /// Byte offset in the source string (from `pt::Loc::File(_, start, _)`).
+        offset: usize,
         message: String,
     },
     /// No `contract` definition was found in the source.

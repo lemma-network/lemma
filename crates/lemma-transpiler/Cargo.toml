@@ -8,7 +8,7 @@ description = "Solidity-to-Lem transpiler: parse Solidity source, emit equivalen
 serde = { workspace = true }
 thiserror = { workspace = true }
 solang-parser = { workspace = true }
-lemma-core = { path = "../lemma-core" }
+# lemma-core added in Batch 2 when mapper first uses LemType::Address ← lemma_core::Address
 
 [dev-dependencies]
 serde_json = { workspace = true }
