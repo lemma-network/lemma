@@ -595,7 +595,8 @@ fn map_contract_events_collected() {
 }
 
 #[test]
-fn map_contract_functions_collected_with_empty_bodies() {
+fn map_contract_functions_collected_with_populated_bodies() {
+    // Batch 3: function bodies are now populated (not empty).
     let contract = parse_contract(
         r#"pragma solidity ^0.8.0;
         contract C {
@@ -606,9 +607,12 @@ fn map_contract_functions_collected_with_empty_bodies() {
     let mut warnings = WarningCollector::new();
     let lem = map_contract(&contract, &mut warnings);
     assert_eq!(lem.functions.len(), 2);
-    // Bodies are empty in Batch 2.
-    assert!(lem.functions[0].body.is_empty());
-    assert!(lem.functions[1].body.is_empty());
+    // Bodies are populated in Batch 3.
+    assert!(!lem.functions[0].body.is_empty(), "totalSupply body should be populated");
+    assert!(!lem.functions[1].body.is_empty(), "balanceOf body should be populated");
+    // Both return 0 → Return(IntLit(0))
+    assert_eq!(lem.functions[0].body, vec![LemStmt::Return(Some(LemExpr::IntLit(0)))]);
+    assert_eq!(lem.functions[1].body, vec![LemStmt::Return(Some(LemExpr::IntLit(0)))]);
 }
 
 #[test]
@@ -670,4 +674,389 @@ fn map_contract_full_erc20_shape() {
     assert_eq!(lem.functions[0].kind, LemFunctionKind::Constructor);
     assert_eq!(lem.functions[0].name, "init");
     assert!(warnings.finish().is_empty());
+}
+
+// ── Batch 3: Expression mapping tests ────────────────────────────────────────
+
+/// Parse a Solidity function body and return its statements.
+///
+/// Wraps the function in a minimal contract so solang-parser can parse it.
+fn parse_function_body(fn_src: &str) -> Vec<pt::Statement> {
+    let contract_src = format!("pragma solidity ^0.8.0; contract T {{ {} }}", fn_src);
+    let contract = parse_contract(&contract_src);
+    let func_def = contract
+        .parts
+        .into_iter()
+        .find_map(|p| {
+            if let pt::ContractPart::FunctionDefinition(f) = p {
+                Some(*f)
+            } else {
+                None
+            }
+        })
+        .expect("no function found");
+    match func_def.body {
+        Some(pt::Statement::Block { statements, .. }) => statements,
+        _ => vec![],
+    }
+}
+
+#[test]
+fn map_expr_number_literal_produces_int_lit() {
+    let loc = pt::Loc::File(0, 0, 0);
+    let expr = pt::Expression::NumberLiteral(loc, "42".to_owned(), "".to_owned(), None);
+    let mut warnings = WarningCollector::new();
+    let result = map_expr(&expr, &mut warnings);
+    assert_eq!(result, LemExpr::IntLit(42));
+    assert!(warnings.finish().is_empty());
+}
+
+#[test]
+fn map_expr_bool_literal_true_produces_bool_lit() {
+    let loc = pt::Loc::File(0, 0, 0);
+    let expr = pt::Expression::BoolLiteral(loc, true);
+    let mut warnings = WarningCollector::new();
+    let result = map_expr(&expr, &mut warnings);
+    assert_eq!(result, LemExpr::BoolLit(true));
+}
+
+#[test]
+fn map_expr_bool_literal_false_produces_bool_lit() {
+    let loc = pt::Loc::File(0, 0, 0);
+    let expr = pt::Expression::BoolLiteral(loc, false);
+    let mut warnings = WarningCollector::new();
+    let result = map_expr(&expr, &mut warnings);
+    assert_eq!(result, LemExpr::BoolLit(false));
+}
+
+#[test]
+fn map_expr_string_literal_produces_string_lit() {
+    let loc = pt::Loc::File(0, 0, 0);
+    let expr = pt::Expression::StringLiteral(vec![pt::StringLiteral {
+        loc,
+        unicode: false,
+        string: "hello".to_owned(),
+    }]);
+    let mut warnings = WarningCollector::new();
+    let result = map_expr(&expr, &mut warnings);
+    assert_eq!(result, LemExpr::StringLit("hello".to_owned()));
+}
+
+#[test]
+fn map_expr_variable_ident_produces_ident() {
+    let loc = pt::Loc::File(0, 0, 0);
+    let expr = pt::Expression::Variable(pt::Identifier {
+        loc,
+        name: "myVar".to_owned(),
+    });
+    let mut warnings = WarningCollector::new();
+    let result = map_expr(&expr, &mut warnings);
+    assert_eq!(result, LemExpr::Ident("myVar".to_owned()));
+}
+
+#[test]
+fn map_expr_member_access_msg_sender() {
+    // `msg.sender` → MemberAccess(Ident("msg"), "sender")
+    let stmts = parse_function_body(
+        r#"function f() public view returns (address) { return msg.sender; }"#,
+    );
+    let mut warnings = WarningCollector::new();
+    // The return statement contains the member access expression.
+    let stmt = map_stmt(&stmts[0], &mut warnings);
+    assert!(
+        matches!(
+            stmt,
+            LemStmt::Return(Some(LemExpr::MemberAccess(ref inner, ref field)))
+            if matches!(inner.as_ref(), LemExpr::Ident(n) if n == "msg")
+            && field == "sender"
+        ),
+        "expected Return(MemberAccess(Ident(msg), sender)), got: {stmt:?}"
+    );
+}
+
+#[test]
+fn map_expr_add_binary_op_produces_binary_op() {
+    let loc = pt::Loc::File(0, 0, 0);
+    let left = Box::new(pt::Expression::NumberLiteral(
+        loc,
+        "1".to_owned(),
+        "".to_owned(),
+        None,
+    ));
+    let right = Box::new(pt::Expression::NumberLiteral(
+        loc,
+        "2".to_owned(),
+        "".to_owned(),
+        None,
+    ));
+    let expr = pt::Expression::Add(loc, left, right);
+    let mut warnings = WarningCollector::new();
+    let result = map_expr(&expr, &mut warnings);
+    assert_eq!(
+        result,
+        LemExpr::BinaryOp {
+            op: BinOp::Add,
+            left: Box::new(LemExpr::IntLit(1)),
+            right: Box::new(LemExpr::IntLit(2)),
+        }
+    );
+}
+
+#[test]
+fn map_expr_comparison_less_produces_lt_op() {
+    let loc = pt::Loc::File(0, 0, 0);
+    let left = Box::new(pt::Expression::Variable(pt::Identifier {
+        loc,
+        name: "a".to_owned(),
+    }));
+    let right = Box::new(pt::Expression::NumberLiteral(
+        loc,
+        "10".to_owned(),
+        "".to_owned(),
+        None,
+    ));
+    let expr = pt::Expression::Less(loc, left, right);
+    let mut warnings = WarningCollector::new();
+    let result = map_expr(&expr, &mut warnings);
+    assert_eq!(
+        result,
+        LemExpr::BinaryOp {
+            op: BinOp::Lt,
+            left: Box::new(LemExpr::Ident("a".to_owned())),
+            right: Box::new(LemExpr::IntLit(10)),
+        }
+    );
+}
+
+#[test]
+fn map_expr_logical_not_produces_unary_not() {
+    let loc = pt::Loc::File(0, 0, 0);
+    let inner = Box::new(pt::Expression::BoolLiteral(loc, true));
+    let expr = pt::Expression::Not(loc, inner);
+    let mut warnings = WarningCollector::new();
+    let result = map_expr(&expr, &mut warnings);
+    assert_eq!(
+        result,
+        LemExpr::UnaryOp {
+            op: UnaryOp::Not,
+            expr: Box::new(LemExpr::BoolLit(true)),
+        }
+    );
+}
+
+#[test]
+fn map_expr_address_zero_cast_produces_address_lit() {
+    // `address(0)` → AddressLit("Address.zero")
+    let stmts = parse_function_body(
+        r#"function f() public pure returns (address) { return address(0); }"#,
+    );
+    let mut warnings = WarningCollector::new();
+    let stmt = map_stmt(&stmts[0], &mut warnings);
+    assert!(
+        matches!(stmt, LemStmt::Return(Some(LemExpr::AddressLit(ref s))) if s == "Address.zero"),
+        "expected Return(AddressLit(Address.zero)), got: {stmt:?}"
+    );
+}
+
+// ── Batch 3: Statement mapping tests ─────────────────────────────────────────
+
+#[test]
+fn map_stmt_return_expr_produces_return() {
+    let stmts = parse_function_body(
+        r#"function f() public pure returns (uint256) { return 42; }"#,
+    );
+    let mut warnings = WarningCollector::new();
+    let stmt = map_stmt(&stmts[0], &mut warnings);
+    assert_eq!(stmt, LemStmt::Return(Some(LemExpr::IntLit(42))));
+}
+
+#[test]
+fn map_stmt_require_becomes_assert() {
+    // `require(condition, "msg")` → `LemStmt::Assert { cond, msg }`
+    let stmts = parse_function_body(
+        r#"function f(uint256 x) public pure { require(x > 0, "must be positive"); }"#,
+    );
+    let mut warnings = WarningCollector::new();
+    let stmt = map_stmt(&stmts[0], &mut warnings);
+    match stmt {
+        LemStmt::Assert { cond, msg } => {
+            assert_eq!(msg, "must be positive");
+            // cond should be x > 0
+            assert!(
+                matches!(cond, LemExpr::BinaryOp { op: BinOp::Gt, .. }),
+                "expected Gt binary op, got: {cond:?}"
+            );
+        }
+        other => panic!("expected Assert, got: {other:?}"),
+    }
+}
+
+#[test]
+fn map_stmt_if_else_produces_if_stmt() {
+    let stmts = parse_function_body(
+        r#"function f(bool b) public pure returns (uint256) {
+            if (b) { return 1; } else { return 2; }
+        }"#,
+    );
+    let mut warnings = WarningCollector::new();
+    let stmt = map_stmt(&stmts[0], &mut warnings);
+    match stmt {
+        LemStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            assert_eq!(cond, LemExpr::Ident("b".to_owned()));
+            assert_eq!(then_body, vec![LemStmt::Return(Some(LemExpr::IntLit(1)))]);
+            assert_eq!(
+                else_body,
+                Some(vec![LemStmt::Return(Some(LemExpr::IntLit(2)))])
+            );
+        }
+        other => panic!("expected If, got: {other:?}"),
+    }
+}
+
+#[test]
+fn map_stmt_assembly_emits_w001_and_raw() {
+    // Inline assembly → W001 warning + Raw fallback.
+    let stmts = parse_function_body(
+        r#"function f() public pure returns (uint256 result) {
+            assembly { result := 42 }
+        }"#,
+    );
+    let mut warnings = WarningCollector::new();
+    let stmt = map_stmt(&stmts[0], &mut warnings);
+    // Must produce a Raw fallback.
+    assert!(
+        matches!(stmt, LemStmt::Raw(ref s) if s.contains("W001")),
+        "expected Raw with W001, got: {stmt:?}"
+    );
+    // Must emit exactly one W001 warning.
+    let emitted = warnings.finish();
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].code, crate::warnings::WarningCode::InlineAssembly);
+}
+
+#[test]
+fn map_stmt_unchecked_block_emits_w003() {
+    // `unchecked { x = x + 1; }` → W003 warning + normal mapping.
+    let stmts = parse_function_body(
+        r#"function f(uint256 x) public pure returns (uint256) {
+            unchecked { return x + 1; }
+        }"#,
+    );
+    let mut warnings = WarningCollector::new();
+    let _stmt = map_stmt(&stmts[0], &mut warnings);
+    let emitted = warnings.finish();
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].code, crate::warnings::WarningCode::UncheckedBlock);
+}
+
+#[test]
+fn map_function_body_is_populated_after_batch3() {
+    // After Batch 3, function bodies must be non-empty for functions with bodies.
+    let func = parse_first_function(
+        r#"pragma solidity ^0.8.0;
+        contract C {
+            function totalSupply() public view returns (uint256) {
+                return 100;
+            }
+        }"#,
+    );
+    let mut seen = BTreeMap::new();
+    let mut warnings = WarningCollector::new();
+    let lem_fn = map_function_sig(&func, &mut seen, &mut warnings).expect("should map");
+    // Body must be populated — Batch 3 fills it.
+    assert!(
+        !lem_fn.body.is_empty(),
+        "function body should be populated after Batch 3"
+    );
+    assert_eq!(lem_fn.body, vec![LemStmt::Return(Some(LemExpr::IntLit(100)))]);
+}
+
+#[test]
+fn map_contract_function_bodies_not_empty() {
+    // End-to-end: parse ERC-20 snippet with bodies — all non-abstract functions
+    // must have non-empty bodies after Batch 3.
+    let src = r#"
+        pragma solidity ^0.8.0;
+        interface IERC20 {}
+        contract MyToken is IERC20 {
+            mapping(address => uint256) private _balances;
+            uint256 private _totalSupply;
+
+            event Transfer(address indexed from, address indexed to, uint256 value);
+
+            constructor(uint256 initialSupply) {
+                _totalSupply = initialSupply;
+            }
+
+            function totalSupply() public view returns (uint256) {
+                return _totalSupply;
+            }
+
+            function transfer(address to, uint256 amount) public returns (bool) {
+                require(amount > 0, "zero amount");
+                _balances[to] = _balances[to] + amount;
+                emit Transfer(msg.sender, to, amount);
+                return true;
+            }
+        }
+    "#;
+    let contract = parse_contract(src);
+    let mut warnings = WarningCollector::new();
+    let lem = map_contract(&contract, &mut warnings);
+
+    // All 3 functions (constructor + 2 methods) must have non-empty bodies.
+    assert_eq!(lem.functions.len(), 3);
+    for func in &lem.functions {
+        assert!(
+            !func.body.is_empty(),
+            "function '{}' body should not be empty",
+            func.name
+        );
+    }
+
+    // Constructor body: `_totalSupply = initialSupply` → Assign
+    let constructor = &lem.functions[0];
+    assert_eq!(constructor.name, "init");
+    assert!(
+        matches!(constructor.body[0], LemStmt::Assign { .. }),
+        "constructor body[0] should be Assign, got: {:?}",
+        constructor.body[0]
+    );
+
+    // totalSupply body: `return _totalSupply` → Return(Ident)
+    let total_supply = &lem.functions[1];
+    assert_eq!(total_supply.name, "totalSupply");
+    assert!(
+        matches!(total_supply.body[0], LemStmt::Return(Some(LemExpr::Ident(_)))),
+        "totalSupply body[0] should be Return(Ident), got: {:?}",
+        total_supply.body[0]
+    );
+
+    // transfer body: require → Assert, assign → Assign, emit → Emit, return → Return
+    let transfer = &lem.functions[2];
+    assert_eq!(transfer.name, "transfer");
+    assert!(
+        matches!(transfer.body[0], LemStmt::Assert { .. }),
+        "transfer body[0] should be Assert (from require), got: {:?}",
+        transfer.body[0]
+    );
+    assert!(
+        matches!(transfer.body[1], LemStmt::Assign { .. }),
+        "transfer body[1] should be Assign, got: {:?}",
+        transfer.body[1]
+    );
+    assert!(
+        matches!(transfer.body[2], LemStmt::Emit { .. }),
+        "transfer body[2] should be Emit, got: {:?}",
+        transfer.body[2]
+    );
+    assert!(
+        matches!(transfer.body[3], LemStmt::Return(Some(LemExpr::BoolLit(true)))),
+        "transfer body[3] should be Return(true), got: {:?}",
+        transfer.body[3]
+    );
 }

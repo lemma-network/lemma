@@ -2,17 +2,20 @@
 //!
 //! Maps `solang_parser::pt` types to the Lem IR defined in [`crate::lem_ir`].
 //!
-//! ## Batch 2 scope
+//! ## Batch 3 scope
 //!
-//! Types, declarations (state vars, function signatures, events, structs, enums).
-//! Function bodies are `Vec::new()` — mapped in Batch 3 (`map_expr`, `map_stmt`).
+//! Expression and statement mapping (`map_expr`, `map_stmt`, `map_body`).
+//! Function bodies are now populated by calling `map_body` from `map_function_sig`.
 //!
 //! ## DRY note
 //!
 //! One canonical verb per concept (AGENTS §2.3):
 //! - [`map_type`] — Solidity `Expression` type annotation → `LemType`
 //! - [`map_sol_type`] — Solidity `pt::Type` enum → `LemType`
-//! - [`map_function_sig`] — `FunctionDefinition` → `LemFunction` (body empty)
+//! - [`map_expr`] — Solidity `pt::Expression` → `LemExpr`
+//! - [`map_stmt`] — Solidity `pt::Statement` → `LemStmt`
+//! - [`map_body`] — `&[pt::Statement]` → `Vec<LemStmt>`
+//! - [`map_function_sig`] — `FunctionDefinition` → `LemFunction` (body populated)
 //! - [`map_state_var`] — `VariableDefinition` → `Option<LemParam>`
 //! - [`map_event`] — `EventDefinition` → `LemEvent`
 //! - [`map_struct`] — `StructDefinition` → `LemStruct`
@@ -25,8 +28,9 @@ use solang_parser::pt;
 
 use crate::{
     lem_ir::{
-        LemContract, LemEnum, LemEvent, LemEventField, LemFunction, LemFunctionKind, LemMutability,
-        LemParam, LemStruct, LemType, LemVisibility,
+        BinOp, LemContract, LemEnum, LemEvent, LemEventField, LemExpr, LemFunction,
+        LemFunctionKind, LemMutability, LemParam, LemStmt, LemStruct, LemType, LemVisibility,
+        UnaryOp,
     },
     warnings::{TranspileWarning, WarningCollector},
 };
@@ -234,9 +238,9 @@ pub(crate) fn map_state_var(def: &pt::VariableDefinition) -> Option<LemParam> {
 
 // ── Function signature mapping ────────────────────────────────────────────────
 
-/// Map a Solidity function definition to a [`LemFunction`] with an empty body.
+/// Map a Solidity function definition to a [`LemFunction`] with a populated body.
 ///
-/// Bodies are populated in Batch 3. Returns `None` for:
+/// Returns `None` for:
 /// - `FunctionTy::Modifier` — Lem has no modifier bodies; decorator names are
 ///   captured in `LemFunction::decorators` instead.
 ///
@@ -289,6 +293,19 @@ pub(crate) fn map_function_sig(
     // Collect decorator names from modifier invocations.
     let decorators = collect_decorators(&def.attributes);
 
+    // Map the function body (Batch 3).
+    let body = def
+        .body
+        .as_ref()
+        .map(|block| {
+            if let pt::Statement::Block { statements, .. } = block {
+                map_body(statements, warnings)
+            } else {
+                vec![map_stmt(block, warnings)]
+            }
+        })
+        .unwrap_or_default();
+
     Some(LemFunction {
         name,
         params,
@@ -296,7 +313,7 @@ pub(crate) fn map_function_sig(
         visibility,
         mutability,
         decorators,
-        body: Vec::new(), // Batch 3 fills this.
+        body,
         kind,
     })
 }
@@ -524,6 +541,652 @@ fn apply_decorator_flags(decorators: &[String], contract: &mut LemContract) {
         } else if ACCESS_CONTROL_MODIFIERS.contains(&name) {
             contract.uses_access_control = true;
         }
+    }
+}
+
+// ── Expression mapping ────────────────────────────────────────────────────────
+
+/// Map a Solidity expression to a [`LemExpr`].
+///
+/// Unmappable expressions degrade to [`LemExpr::Raw`] — transpilation never
+/// aborts on an unsupported expression form (AGENTS §12.2).
+pub(crate) fn map_expr(expr: &pt::Expression, warnings: &mut WarningCollector) -> LemExpr {
+    match expr {
+        // ── Literals ──────────────────────────────────────────────────────────
+        pt::Expression::NumberLiteral(_, value_str, _exp_str, _unit) => {
+            // Parse the decimal string; fall back to Raw on overflow (e.g. very large hex).
+            match value_str.parse::<u128>() {
+                Ok(n) => LemExpr::IntLit(n),
+                // Value exceeds u128 (e.g. type(uint256).max) — emit Raw.
+                Err(_) => LemExpr::Raw(format!("/* {value_str} */")),
+            }
+        }
+        pt::Expression::BoolLiteral(_, b) => LemExpr::BoolLit(*b),
+        pt::Expression::StringLiteral(parts) => {
+            // Take the first string part (multi-part string literals are rare in ERC-20).
+            let s = parts.first().map(|p| p.string.clone()).unwrap_or_default();
+            LemExpr::StringLit(s)
+        }
+        pt::Expression::HexLiteral(parts) => {
+            // Decode hex bytes from all parts concatenated.
+            let hex_str: String = parts.iter().map(|p| p.hex.as_str()).collect();
+            let bytes = decode_hex_literal(&hex_str);
+            LemExpr::BytesLit(bytes)
+        }
+
+        // ── References ────────────────────────────────────────────────────────
+        pt::Expression::Variable(id) => LemExpr::Ident(id.name.clone()),
+        pt::Expression::MemberAccess(_, inner, id) => {
+            LemExpr::MemberAccess(Box::new(map_expr(inner, warnings)), id.name.clone())
+        }
+        pt::Expression::ArraySubscript(_, inner, Some(idx)) => LemExpr::IndexAccess(
+            Box::new(map_expr(inner, warnings)),
+            Box::new(map_expr(idx, warnings)),
+        ),
+        // Index access with no subscript (e.g. `arr[]`) — degrade to Raw.
+        pt::Expression::ArraySubscript(_, inner, None) => {
+            LemExpr::Raw(format!("/* {}[] */", expr_to_raw_hint(inner)))
+        }
+
+        // ── Function calls ────────────────────────────────────────────────────
+        pt::Expression::FunctionCall(_, func, args) => map_function_call_expr(func, args, warnings),
+        // Named function call: f({a: x, b: y}) — degrade to Raw for MVP.
+        pt::Expression::NamedFunctionCall(_, func, _named_args) => {
+            LemExpr::Raw(format!("/* named call: {} */", expr_to_raw_hint(func)))
+        }
+        // f{value: x}(args) — degrade to Raw for MVP.
+        pt::Expression::FunctionCallBlock(_, func, _block) => {
+            LemExpr::Raw(format!("/* call-block: {} */", expr_to_raw_hint(func)))
+        }
+
+        // ── Arithmetic binary ops ─────────────────────────────────────────────
+        pt::Expression::Add(_, l, r) => map_binop(BinOp::Add, l, r, warnings),
+        pt::Expression::Subtract(_, l, r) => map_binop(BinOp::Sub, l, r, warnings),
+        pt::Expression::Multiply(_, l, r) => map_binop(BinOp::Mul, l, r, warnings),
+        pt::Expression::Divide(_, l, r) => map_binop(BinOp::Div, l, r, warnings),
+        pt::Expression::Modulo(_, l, r) => map_binop(BinOp::Rem, l, r, warnings),
+
+        // ── Comparison ops ────────────────────────────────────────────────────
+        pt::Expression::Equal(_, l, r) => map_binop(BinOp::Eq, l, r, warnings),
+        pt::Expression::NotEqual(_, l, r) => map_binop(BinOp::Ne, l, r, warnings),
+        pt::Expression::Less(_, l, r) => map_binop(BinOp::Lt, l, r, warnings),
+        pt::Expression::LessEqual(_, l, r) => map_binop(BinOp::Le, l, r, warnings),
+        pt::Expression::More(_, l, r) => map_binop(BinOp::Gt, l, r, warnings),
+        pt::Expression::MoreEqual(_, l, r) => map_binop(BinOp::Ge, l, r, warnings),
+
+        // ── Logical ops ───────────────────────────────────────────────────────
+        pt::Expression::And(_, l, r) => map_binop(BinOp::And, l, r, warnings),
+        pt::Expression::Or(_, l, r) => map_binop(BinOp::Or, l, r, warnings),
+        pt::Expression::Not(_, e) => LemExpr::UnaryOp {
+            op: UnaryOp::Not,
+            expr: Box::new(map_expr(e, warnings)),
+        },
+        pt::Expression::Negate(_, e) => LemExpr::UnaryOp {
+            op: UnaryOp::Neg,
+            expr: Box::new(map_expr(e, warnings)),
+        },
+
+        // ── Bitwise ops ───────────────────────────────────────────────────────
+        pt::Expression::BitwiseAnd(_, l, r) => map_binop(BinOp::BitAnd, l, r, warnings),
+        pt::Expression::BitwiseOr(_, l, r) => map_binop(BinOp::BitOr, l, r, warnings),
+        pt::Expression::BitwiseXor(_, l, r) => map_binop(BinOp::BitXor, l, r, warnings),
+        pt::Expression::ShiftLeft(_, l, r) => map_binop(BinOp::Shl, l, r, warnings),
+        pt::Expression::ShiftRight(_, l, r) => map_binop(BinOp::Shr, l, r, warnings),
+
+        // ── Compound assignment ops — expand to Assign + BinOp ───────────────
+        pt::Expression::AssignAdd(_, l, r) => expand_assign_op(BinOp::Add, l, r, warnings),
+        pt::Expression::AssignSubtract(_, l, r) => expand_assign_op(BinOp::Sub, l, r, warnings),
+        pt::Expression::AssignMultiply(_, l, r) => expand_assign_op(BinOp::Mul, l, r, warnings),
+        pt::Expression::AssignDivide(_, l, r) => expand_assign_op(BinOp::Div, l, r, warnings),
+        pt::Expression::AssignModulo(_, l, r) => expand_assign_op(BinOp::Rem, l, r, warnings),
+        pt::Expression::AssignAnd(_, l, r) => expand_assign_op(BinOp::BitAnd, l, r, warnings),
+        pt::Expression::AssignOr(_, l, r) => expand_assign_op(BinOp::BitOr, l, r, warnings),
+        pt::Expression::AssignXor(_, l, r) => expand_assign_op(BinOp::BitXor, l, r, warnings),
+        pt::Expression::AssignShiftLeft(_, l, r) => expand_assign_op(BinOp::Shl, l, r, warnings),
+        pt::Expression::AssignShiftRight(_, l, r) => expand_assign_op(BinOp::Shr, l, r, warnings),
+
+        // ── Increment / decrement — expand to Assign + BinOp(1) ──────────────
+        pt::Expression::PreIncrement(_, e) | pt::Expression::PostIncrement(_, e) => {
+            // i++ / ++i → i + 1 (as expression; stmt context wraps in Assign)
+            LemExpr::BinaryOp {
+                op: BinOp::Add,
+                left: Box::new(map_expr(e, warnings)),
+                right: Box::new(LemExpr::IntLit(1)),
+            }
+        }
+        pt::Expression::PreDecrement(_, e) | pt::Expression::PostDecrement(_, e) => {
+            LemExpr::BinaryOp {
+                op: BinOp::Sub,
+                left: Box::new(map_expr(e, warnings)),
+                right: Box::new(LemExpr::IntLit(1)),
+            }
+        }
+
+        // ── Ternary ───────────────────────────────────────────────────────────
+        pt::Expression::ConditionalOperator(_, cond, then_e, else_e) => LemExpr::Ternary {
+            cond: Box::new(map_expr(cond, warnings)),
+            then_expr: Box::new(map_expr(then_e, warnings)),
+            else_expr: Box::new(map_expr(else_e, warnings)),
+        },
+
+        // ── Assignment (as expression) ────────────────────────────────────────
+        // Solidity allows `a = b` as an expression; in Lem it's a statement.
+        // Represent as Raw — the stmt mapper handles the common `Expression(Assign)` case.
+        pt::Expression::Assign(_, l, r) => LemExpr::Raw(format!(
+            "/* assign: {} = {} */",
+            expr_to_raw_hint(l),
+            expr_to_raw_hint(r)
+        )),
+
+        // ── Parenthesized expression — transparent ────────────────────────────
+        pt::Expression::Parenthesis(_, inner) => map_expr(inner, warnings),
+
+        // ── Address literal (0x... checksummed address) ───────────────────────
+        pt::Expression::AddressLiteral(_, addr) => LemExpr::AddressLit(addr.clone()),
+
+        // ── `new T(...)` — no Lem equivalent for MVP ─────────────────────────
+        pt::Expression::New(_, _) => LemExpr::Raw("/* new — not supported in MVP */".to_owned()),
+
+        // ── Bare type expression (in cast context) ────────────────────────────
+        pt::Expression::Type(_, _) => LemExpr::Raw("/* type expr */".to_owned()),
+
+        // ── Anything else — degrade gracefully ───────────────────────────────
+        _ => LemExpr::Raw(format!(
+            "/* unsupported expr: {:?} */",
+            expr_kind_name(expr)
+        )),
+    }
+}
+
+/// Map a binary operation: build `LemExpr::BinaryOp` from two sub-expressions.
+fn map_binop(
+    op: BinOp,
+    left: &pt::Expression,
+    right: &pt::Expression,
+    warnings: &mut WarningCollector,
+) -> LemExpr {
+    LemExpr::BinaryOp {
+        op,
+        left: Box::new(map_expr(left, warnings)),
+        right: Box::new(map_expr(right, warnings)),
+    }
+}
+
+/// Expand a compound assignment (`a += b`) into `a = a + b` as a `LemExpr`.
+///
+/// This is used when the compound assignment appears in expression position.
+/// The statement mapper handles the common `Expression(AssignAdd(...))` case
+/// by calling `map_expr` and wrapping in `LemStmt::Assign`.
+fn expand_assign_op(
+    op: BinOp,
+    left: &pt::Expression,
+    right: &pt::Expression,
+    warnings: &mut WarningCollector,
+) -> LemExpr {
+    // a op= b → a op b (the Assign wrapper is added by the stmt mapper)
+    LemExpr::BinaryOp {
+        op,
+        left: Box::new(map_expr(left, warnings)),
+        right: Box::new(map_expr(right, warnings)),
+    }
+}
+
+/// Map a Solidity function call expression.
+///
+/// In solang-parser 0.3.5, type casts (`address(0)`, `uint256(x)`) are
+/// represented as `FunctionCall(_, Type(_, ty), args)` — not a separate `Cast`
+/// variant. This function handles both casts and regular calls.
+///
+/// Special cases:
+/// - `address(0)` → `AddressLit("Address.zero")`
+/// - `address(x)` / `uint256(x)` → `Cast { expr: x, ty: ... }`
+/// - `require(cond, "msg")` → `Call { func: Ident("assert"), args: [cond, msg] }`
+/// - `revert("msg")` → `Call { func: Ident("revert"), args: [msg] }`
+/// - General calls → `Call { func: map_expr(func), args: map_expr(args) }`
+fn map_function_call_expr(
+    func: &pt::Expression,
+    args: &[pt::Expression],
+    warnings: &mut WarningCollector,
+) -> LemExpr {
+    // ── Type cast: FunctionCall(_, Type(_, ty), [inner]) ─────────────────────
+    // In solang-parser 0.3.5, `address(0)` and `uint256(x)` parse as FunctionCall
+    // with a Type expression as the function (not a separate Cast variant).
+    if let pt::Expression::Type(_, ty) = func {
+        if let Some(inner) = args.first() {
+            // Special case: `address(0)` → AddressLit("Address.zero").
+            if matches!(ty, pt::Type::Address | pt::Type::AddressPayable) {
+                if let pt::Expression::NumberLiteral(_, val, _, _) = inner {
+                    if val == "0" {
+                        return LemExpr::AddressLit("Address.zero".to_owned());
+                    }
+                }
+            }
+            // General type cast: `uint256(x)` → Cast { expr: x, ty: U256 }.
+            let lem_ty = map_sol_type(ty);
+            return LemExpr::Cast {
+                expr: Box::new(map_expr(inner, warnings)),
+                ty: lem_ty,
+            };
+        }
+    }
+
+    // ── Named built-ins ───────────────────────────────────────────────────────
+    if let pt::Expression::Variable(id) = func {
+        // `require(cond, "msg")` → assert call in Lem.
+        if id.name == "require" {
+            let cond = args
+                .first()
+                .map(|a| map_expr(a, warnings))
+                .unwrap_or(LemExpr::BoolLit(true));
+            let msg = args
+                .get(1)
+                .and_then(extract_string_literal)
+                .unwrap_or_else(|| "require failed".to_owned());
+            return LemExpr::Call {
+                func: Box::new(LemExpr::Ident("assert".to_owned())),
+                args: vec![cond, LemExpr::StringLit(msg)],
+            };
+        }
+        if id.name == "revert" {
+            let msg = args
+                .first()
+                .and_then(extract_string_literal)
+                .unwrap_or_else(|| "revert".to_owned());
+            return LemExpr::Call {
+                func: Box::new(LemExpr::Ident("revert".to_owned())),
+                args: vec![LemExpr::StringLit(msg)],
+            };
+        }
+    }
+
+    // ── General call ──────────────────────────────────────────────────────────
+    let mapped_func = map_expr(func, warnings);
+    let mapped_args: Vec<LemExpr> = args.iter().map(|a| map_expr(a, warnings)).collect();
+    LemExpr::Call {
+        func: Box::new(mapped_func),
+        args: mapped_args,
+    }
+}
+
+/// Extract a string literal value from an expression, if it is one.
+fn extract_string_literal(expr: &pt::Expression) -> Option<String> {
+    if let pt::Expression::StringLiteral(parts) = expr {
+        parts.first().map(|p| p.string.clone())
+    } else {
+        None
+    }
+}
+
+/// Decode a hex literal string (e.g. `"deadbeef"`) into bytes.
+///
+/// Strips any `0x` prefix and decodes pairs of hex digits.
+/// Odd-length or invalid hex falls back to an empty byte vector.
+fn decode_hex_literal(hex: &str) -> Vec<u8> {
+    let stripped = hex.strip_prefix("0x").unwrap_or(hex);
+    // Pad to even length if needed.
+    let padded: String = if stripped.len() % 2 != 0 {
+        format!("0{stripped}")
+    } else {
+        stripped.to_owned()
+    };
+    padded
+        .as_bytes()
+        .chunks(2)
+        .filter_map(|chunk| {
+            let s = std::str::from_utf8(chunk).ok()?;
+            u8::from_str_radix(s, 16).ok()
+        })
+        .collect()
+}
+
+/// Return a short human-readable hint for an expression (for Raw fallback messages).
+///
+/// Does not recurse — just names the variant.
+fn expr_to_raw_hint(expr: &pt::Expression) -> &'static str {
+    expr_kind_name(expr)
+}
+
+/// Return the variant name of a `pt::Expression` for diagnostic messages.
+fn expr_kind_name(expr: &pt::Expression) -> &'static str {
+    match expr {
+        pt::Expression::Variable(_) => "Variable",
+        pt::Expression::NumberLiteral(..) => "NumberLiteral",
+        pt::Expression::BoolLiteral(..) => "BoolLiteral",
+        pt::Expression::StringLiteral(_) => "StringLiteral",
+        pt::Expression::HexLiteral(_) => "HexLiteral",
+        pt::Expression::MemberAccess(..) => "MemberAccess",
+        pt::Expression::ArraySubscript(..) => "ArraySubscript",
+        pt::Expression::FunctionCall(..) => "FunctionCall",
+        pt::Expression::Add(..) => "Add",
+        pt::Expression::Subtract(..) => "Subtract",
+        pt::Expression::Multiply(..) => "Multiply",
+        pt::Expression::Divide(..) => "Divide",
+        pt::Expression::Modulo(..) => "Modulo",
+        pt::Expression::Equal(..) => "Equal",
+        pt::Expression::NotEqual(..) => "NotEqual",
+        pt::Expression::Less(..) => "Less",
+        pt::Expression::LessEqual(..) => "LessEqual",
+        pt::Expression::More(..) => "More",
+        pt::Expression::MoreEqual(..) => "MoreEqual",
+        pt::Expression::And(..) => "And",
+        pt::Expression::Or(..) => "Or",
+        pt::Expression::Not(..) => "Not",
+        pt::Expression::Negate(..) => "Negate",
+        pt::Expression::BitwiseAnd(..) => "BitwiseAnd",
+        pt::Expression::BitwiseOr(..) => "BitwiseOr",
+        pt::Expression::BitwiseXor(..) => "BitwiseXor",
+        pt::Expression::ShiftLeft(..) => "ShiftLeft",
+        pt::Expression::ShiftRight(..) => "ShiftRight",
+        pt::Expression::Assign(..) => "Assign",
+        pt::Expression::AssignAdd(..) => "AssignAdd",
+        pt::Expression::AssignSubtract(..) => "AssignSubtract",
+        pt::Expression::AssignMultiply(..) => "AssignMultiply",
+        pt::Expression::AssignDivide(..) => "AssignDivide",
+        pt::Expression::AssignModulo(..) => "AssignModulo",
+        pt::Expression::ConditionalOperator(..) => "ConditionalOperator",
+        pt::Expression::New(..) => "New",
+        pt::Expression::Type(..) => "Type",
+        pt::Expression::PreIncrement(..) => "PreIncrement",
+        pt::Expression::PostIncrement(..) => "PostIncrement",
+        pt::Expression::PreDecrement(..) => "PreDecrement",
+        pt::Expression::PostDecrement(..) => "PostDecrement",
+        _ => "Unknown",
+    }
+}
+
+// ── Statement mapping ─────────────────────────────────────────────────────────
+
+/// Map a slice of Solidity statements to a `Vec<LemStmt>`.
+///
+/// This is the canonical entry point for mapping function bodies.
+pub(crate) fn map_body(stmts: &[pt::Statement], warnings: &mut WarningCollector) -> Vec<LemStmt> {
+    stmts.iter().map(|s| map_stmt(s, warnings)).collect()
+}
+
+/// Map a single Solidity statement to a [`LemStmt`].
+///
+/// Unmappable statements degrade to [`LemStmt::Raw`] — transpilation never
+/// aborts on an unsupported statement form (AGENTS §12.2).
+pub(crate) fn map_stmt(stmt: &pt::Statement, warnings: &mut WarningCollector) -> LemStmt {
+    match stmt {
+        // ── Block ─────────────────────────────────────────────────────────────
+        // Normal block: flatten into the parent body.
+        // Unchecked block: emit W003 then treat as normal (Lem always checks).
+        pt::Statement::Block {
+            loc,
+            unchecked,
+            statements,
+        } => {
+            if *unchecked {
+                // W003: unchecked arithmetic block treated as normal.
+                warnings.push(TranspileWarning::unchecked_block(loc));
+            }
+            // A block with multiple statements is represented as a single Raw
+            // only if it's the top-level call; normally map_body flattens.
+            // When map_stmt is called on a Block directly (e.g. from map_stmt_to_vec),
+            // we wrap the inner statements in a Raw comment if there's more than one,
+            // or return the single statement directly.
+            let inner = map_body(statements, warnings);
+            match inner.len() {
+                0 => LemStmt::Raw("/* empty block */".to_owned()),
+                1 => inner.into_iter().next().expect("len checked above"),
+                _ => {
+                    // Multiple statements in a nested block — wrap in a Raw block comment.
+                    // The codegen will emit these as a scoped block.
+                    LemStmt::Raw(format!("/* block: {} stmts */", statements.len()))
+                }
+            }
+        }
+
+        // ── Return ────────────────────────────────────────────────────────────
+        pt::Statement::Return(_, expr_opt) => {
+            LemStmt::Return(expr_opt.as_ref().map(|e| map_expr(e, warnings)))
+        }
+
+        // ── Variable definition ───────────────────────────────────────────────
+        pt::Statement::VariableDefinition(_, decl, init_opt) => {
+            let name = decl
+                .name
+                .as_ref()
+                .map(|id| strip_leading_underscore(&id.name).to_owned())
+                .unwrap_or_else(|| "unnamed".to_owned());
+            let ty = Some(map_type(&decl.ty));
+            let value = init_opt
+                .as_ref()
+                .map(|e| map_expr(e, warnings))
+                .unwrap_or(LemExpr::Raw("// uninitialized".to_owned()));
+            LemStmt::Let { name, ty, value }
+        }
+
+        // ── Expression statement ──────────────────────────────────────────────
+        pt::Statement::Expression(_, expr) => map_expr_stmt(expr, warnings),
+
+        // ── If / else ─────────────────────────────────────────────────────────
+        pt::Statement::If(_, cond, then_stmt, else_opt) => {
+            let cond_ir = map_expr(cond, warnings);
+            let then_body = map_stmt_to_vec(then_stmt, warnings);
+            let else_body = else_opt.as_ref().map(|e| map_stmt_to_vec(e, warnings));
+            LemStmt::If {
+                cond: cond_ir,
+                then_body,
+                else_body,
+            }
+        }
+
+        // ── While ─────────────────────────────────────────────────────────────
+        pt::Statement::While(_, cond, body) => LemStmt::While {
+            cond: map_expr(cond, warnings),
+            body: map_stmt_to_vec(body, warnings),
+        },
+
+        // ── Do-while — map as while (semantics differ on first iteration) ─────
+        pt::Statement::DoWhile(_, body, cond) => LemStmt::While {
+            cond: map_expr(cond, warnings),
+            body: map_stmt_to_vec(body, warnings),
+        },
+
+        // ── For ───────────────────────────────────────────────────────────────
+        pt::Statement::For(_, init_opt, cond_opt, update_opt, body_opt) => {
+            let init = init_opt.as_ref().map(|s| Box::new(map_stmt(s, warnings)));
+            let cond = cond_opt.as_ref().map(|e| map_expr(e, warnings));
+            // For-loop update is an Expression in solang-parser, not a Statement.
+            let update = update_opt
+                .as_ref()
+                .map(|e| Box::new(LemStmt::Expr(map_expr(e, warnings))));
+            let body = body_opt
+                .as_ref()
+                .map(|s| map_stmt_to_vec(s, warnings))
+                .unwrap_or_default();
+            LemStmt::For {
+                init,
+                cond,
+                update,
+                body,
+            }
+        }
+
+        // ── Break / Continue ──────────────────────────────────────────────────
+        pt::Statement::Break(_) => LemStmt::Break,
+        pt::Statement::Continue(_) => LemStmt::Continue,
+
+        // ── Emit ──────────────────────────────────────────────────────────────
+        pt::Statement::Emit(_, call_expr) => map_emit_stmt(call_expr, warnings),
+
+        // ── Revert ────────────────────────────────────────────────────────────
+        pt::Statement::Revert(_, name_opt, args) => {
+            let msg = name_opt
+                .as_ref()
+                .and_then(|path| path.identifiers.last())
+                .map(|id| id.name.clone())
+                .unwrap_or_else(|| "revert".to_owned());
+            let mapped_args: Vec<LemExpr> = args.iter().map(|a| map_expr(a, warnings)).collect();
+            let mut call_args = vec![LemExpr::StringLit(msg)];
+            call_args.extend(mapped_args);
+            LemStmt::Expr(LemExpr::Call {
+                func: Box::new(LemExpr::Ident("revert".to_owned())),
+                args: call_args,
+            })
+        }
+
+        // ── Try/catch — no Lem equivalent; use ? operator pattern ────────────
+        pt::Statement::Try(_, _, _, _) => {
+            LemStmt::Raw("// try/catch — use Lem's ? operator".to_owned())
+        }
+
+        // ── Inline assembly (Yul) — W001 ─────────────────────────────────────
+        pt::Statement::Assembly { loc, .. } => {
+            warnings.push(TranspileWarning::inline_assembly(loc));
+            LemStmt::Raw("// W001: inline assembly — skipped".to_owned())
+        }
+
+        // ── Anything else — degrade gracefully ───────────────────────────────
+        _ => LemStmt::Raw("// unsupported statement".to_owned()),
+    }
+}
+
+/// Map a statement that is expected to produce a `Vec<LemStmt>`.
+///
+/// A `Block` is flattened into its children; any other statement becomes a
+/// single-element vec. This is the canonical helper for `if`/`while`/`for` bodies.
+fn map_stmt_to_vec(stmt: &pt::Statement, warnings: &mut WarningCollector) -> Vec<LemStmt> {
+    match stmt {
+        pt::Statement::Block {
+            unchecked,
+            statements,
+            loc,
+        } => {
+            // W003: unchecked arithmetic block treated as normal (Lem always checks).
+            if *unchecked {
+                warnings.push(TranspileWarning::unchecked_block(loc));
+            }
+            map_body(statements, warnings)
+        }
+        other => vec![map_stmt(other, warnings)],
+    }
+}
+
+/// Map an expression statement, handling special cases.
+///
+/// - `require(cond, "msg")` → `LemStmt::Assert`
+/// - `emit Event(...)` is handled by `map_emit_stmt` (via `pt::Statement::Emit`)
+/// - Assignments (`a = b`, `a += b`) → `LemStmt::Assign`
+/// - General expression → `LemStmt::Expr`
+fn map_expr_stmt(expr: &pt::Expression, warnings: &mut WarningCollector) -> LemStmt {
+    match expr {
+        // `require(cond, "msg")` → Assert
+        pt::Expression::FunctionCall(_, func, args) if matches!(func.as_ref(), pt::Expression::Variable(id) if id.name == "require") =>
+        {
+            let cond = args
+                .first()
+                .map(|a| map_expr(a, warnings))
+                .unwrap_or(LemExpr::BoolLit(true));
+            let msg = args
+                .get(1)
+                .and_then(extract_string_literal)
+                .unwrap_or_else(|| "require failed".to_owned());
+            LemStmt::Assert { cond, msg }
+        }
+
+        // `a = b` → Assign
+        pt::Expression::Assign(_, l, r) => LemStmt::Assign {
+            target: map_expr(l, warnings),
+            value: map_expr(r, warnings),
+        },
+
+        // `a += b` → Assign { target: a, value: a + b }
+        pt::Expression::AssignAdd(_, l, r) => LemStmt::Assign {
+            target: map_expr(l, warnings),
+            value: LemExpr::BinaryOp {
+                op: BinOp::Add,
+                left: Box::new(map_expr(l, warnings)),
+                right: Box::new(map_expr(r, warnings)),
+            },
+        },
+        pt::Expression::AssignSubtract(_, l, r) => LemStmt::Assign {
+            target: map_expr(l, warnings),
+            value: LemExpr::BinaryOp {
+                op: BinOp::Sub,
+                left: Box::new(map_expr(l, warnings)),
+                right: Box::new(map_expr(r, warnings)),
+            },
+        },
+        pt::Expression::AssignMultiply(_, l, r) => LemStmt::Assign {
+            target: map_expr(l, warnings),
+            value: LemExpr::BinaryOp {
+                op: BinOp::Mul,
+                left: Box::new(map_expr(l, warnings)),
+                right: Box::new(map_expr(r, warnings)),
+            },
+        },
+        pt::Expression::AssignDivide(_, l, r) => LemStmt::Assign {
+            target: map_expr(l, warnings),
+            value: LemExpr::BinaryOp {
+                op: BinOp::Div,
+                left: Box::new(map_expr(l, warnings)),
+                right: Box::new(map_expr(r, warnings)),
+            },
+        },
+        pt::Expression::AssignModulo(_, l, r) => LemStmt::Assign {
+            target: map_expr(l, warnings),
+            value: LemExpr::BinaryOp {
+                op: BinOp::Rem,
+                left: Box::new(map_expr(l, warnings)),
+                right: Box::new(map_expr(r, warnings)),
+            },
+        },
+
+        // `i++` / `++i` as statement → `i = i + 1`
+        pt::Expression::PreIncrement(_, e) | pt::Expression::PostIncrement(_, e) => {
+            LemStmt::Assign {
+                target: map_expr(e, warnings),
+                value: LemExpr::BinaryOp {
+                    op: BinOp::Add,
+                    left: Box::new(map_expr(e, warnings)),
+                    right: Box::new(LemExpr::IntLit(1)),
+                },
+            }
+        }
+        pt::Expression::PreDecrement(_, e) | pt::Expression::PostDecrement(_, e) => {
+            LemStmt::Assign {
+                target: map_expr(e, warnings),
+                value: LemExpr::BinaryOp {
+                    op: BinOp::Sub,
+                    left: Box::new(map_expr(e, warnings)),
+                    right: Box::new(LemExpr::IntLit(1)),
+                },
+            }
+        }
+
+        // General expression statement.
+        other => LemStmt::Expr(map_expr(other, warnings)),
+    }
+}
+
+/// Map a Solidity `emit Event(args)` statement to [`LemStmt::Emit`].
+///
+/// The emit call is a `FunctionCall` expression inside `pt::Statement::Emit`.
+/// Field names are positional (`param0`, `param1`, …) for MVP — the codegen
+/// resolves them against `LemContract.events` when emitting Lem source.
+fn map_emit_stmt(call_expr: &pt::Expression, warnings: &mut WarningCollector) -> LemStmt {
+    if let pt::Expression::FunctionCall(_, func, args) = call_expr {
+        // Extract the event name from the function expression.
+        let event_name = match func.as_ref() {
+            pt::Expression::Variable(id) => id.name.clone(),
+            pt::Expression::MemberAccess(_, _, id) => id.name.clone(),
+            _ => "UnknownEvent".to_owned(),
+        };
+        let fields: Vec<(String, LemExpr)> = args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| (format!("param{i}"), map_expr(arg, warnings)))
+            .collect();
+        LemStmt::Emit {
+            event: event_name,
+            fields,
+        }
+    } else {
+        // Unexpected emit form — degrade to Raw.
+        LemStmt::Raw("// emit — unexpected form".to_owned())
     }
 }
 
