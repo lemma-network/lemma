@@ -608,11 +608,23 @@ fn map_contract_functions_collected_with_populated_bodies() {
     let lem = map_contract(&contract, &mut warnings);
     assert_eq!(lem.functions.len(), 2);
     // Bodies are populated in Batch 3.
-    assert!(!lem.functions[0].body.is_empty(), "totalSupply body should be populated");
-    assert!(!lem.functions[1].body.is_empty(), "balanceOf body should be populated");
+    assert!(
+        !lem.functions[0].body.is_empty(),
+        "totalSupply body should be populated"
+    );
+    assert!(
+        !lem.functions[1].body.is_empty(),
+        "balanceOf body should be populated"
+    );
     // Both return 0 → Return(IntLit(0))
-    assert_eq!(lem.functions[0].body, vec![LemStmt::Return(Some(LemExpr::IntLit(0)))]);
-    assert_eq!(lem.functions[1].body, vec![LemStmt::Return(Some(LemExpr::IntLit(0)))]);
+    assert_eq!(
+        lem.functions[0].body,
+        vec![LemStmt::Return(Some(LemExpr::IntLit(0)))]
+    );
+    assert_eq!(
+        lem.functions[1].body,
+        vec![LemStmt::Return(Some(LemExpr::IntLit(0)))]
+    );
 }
 
 #[test]
@@ -757,9 +769,8 @@ fn map_expr_variable_ident_produces_ident() {
 #[test]
 fn map_expr_member_access_msg_sender() {
     // `msg.sender` → MemberAccess(Ident("msg"), "sender")
-    let stmts = parse_function_body(
-        r#"function f() public view returns (address) { return msg.sender; }"#,
-    );
+    let stmts =
+        parse_function_body(r#"function f() public view returns (address) { return msg.sender; }"#);
     let mut warnings = WarningCollector::new();
     // The return statement contains the member access expression.
     let stmt = map_stmt(&stmts[0], &mut warnings);
@@ -847,9 +858,8 @@ fn map_expr_logical_not_produces_unary_not() {
 #[test]
 fn map_expr_address_zero_cast_produces_address_lit() {
     // `address(0)` → AddressLit("Address.zero")
-    let stmts = parse_function_body(
-        r#"function f() public pure returns (address) { return address(0); }"#,
-    );
+    let stmts =
+        parse_function_body(r#"function f() public pure returns (address) { return address(0); }"#);
     let mut warnings = WarningCollector::new();
     let stmt = map_stmt(&stmts[0], &mut warnings);
     assert!(
@@ -862,9 +872,7 @@ fn map_expr_address_zero_cast_produces_address_lit() {
 
 #[test]
 fn map_stmt_return_expr_produces_return() {
-    let stmts = parse_function_body(
-        r#"function f() public pure returns (uint256) { return 42; }"#,
-    );
+    let stmts = parse_function_body(r#"function f() public pure returns (uint256) { return 42; }"#);
     let mut warnings = WarningCollector::new();
     let stmt = map_stmt(&stmts[0], &mut warnings);
     assert_eq!(stmt, LemStmt::Return(Some(LemExpr::IntLit(42))));
@@ -935,7 +943,10 @@ fn map_stmt_assembly_emits_w001_and_raw() {
     // Must emit exactly one W001 warning.
     let emitted = warnings.finish();
     assert_eq!(emitted.len(), 1);
-    assert_eq!(emitted[0].code, crate::warnings::WarningCode::InlineAssembly);
+    assert_eq!(
+        emitted[0].code,
+        crate::warnings::WarningCode::InlineAssembly
+    );
 }
 
 #[test]
@@ -950,7 +961,10 @@ fn map_stmt_unchecked_block_emits_w003() {
     let _stmt = map_stmt(&stmts[0], &mut warnings);
     let emitted = warnings.finish();
     assert_eq!(emitted.len(), 1);
-    assert_eq!(emitted[0].code, crate::warnings::WarningCode::UncheckedBlock);
+    assert_eq!(
+        emitted[0].code,
+        crate::warnings::WarningCode::UncheckedBlock
+    );
 }
 
 #[test]
@@ -972,7 +986,10 @@ fn map_function_body_is_populated_after_batch3() {
         !lem_fn.body.is_empty(),
         "function body should be populated after Batch 3"
     );
-    assert_eq!(lem_fn.body, vec![LemStmt::Return(Some(LemExpr::IntLit(100)))]);
+    assert_eq!(
+        lem_fn.body,
+        vec![LemStmt::Return(Some(LemExpr::IntLit(100)))]
+    );
 }
 
 #[test]
@@ -1031,7 +1048,10 @@ fn map_contract_function_bodies_not_empty() {
     let total_supply = &lem.functions[1];
     assert_eq!(total_supply.name, "totalSupply");
     assert!(
-        matches!(total_supply.body[0], LemStmt::Return(Some(LemExpr::Ident(_)))),
+        matches!(
+            total_supply.body[0],
+            LemStmt::Return(Some(LemExpr::Ident(_)))
+        ),
         "totalSupply body[0] should be Return(Ident), got: {:?}",
         total_supply.body[0]
     );
@@ -1055,7 +1075,10 @@ fn map_contract_function_bodies_not_empty() {
         transfer.body[2]
     );
     assert!(
-        matches!(transfer.body[3], LemStmt::Return(Some(LemExpr::BoolLit(true)))),
+        matches!(
+            transfer.body[3],
+            LemStmt::Return(Some(LemExpr::BoolLit(true)))
+        ),
         "transfer body[3] should be Return(true), got: {:?}",
         transfer.body[3]
     );
@@ -1083,8 +1106,9 @@ fn compound_assign_pure_lvalue_expands_to_assign() {
 fn compound_assign_complex_lvalue_emits_raw() {
     // `_balances[next()] += 1` — complex index (function call) → Raw, not double-eval
     // We simulate this by parsing a mapping subscript with a function call as index.
-    let stmts =
-        parse_function_body("function f() public { mapping(address => uint256) storage m; m[next()] += 1; }");
+    let stmts = parse_function_body(
+        "function f() public { mapping(address => uint256) storage m; m[next()] += 1; }",
+    );
     let mut w = WarningCollector::new();
     // Last stmt is the compound assign on a complex lvalue
     let stmt = map_stmt(stmts.last().expect("at least one stmt"), &mut w);

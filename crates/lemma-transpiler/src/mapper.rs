@@ -876,7 +876,7 @@ fn extract_string_literal(expr: &pt::Expression) -> Option<String> {
 fn decode_hex_literal(hex: &str) -> Vec<u8> {
     let stripped = hex.strip_prefix("0x").unwrap_or(hex);
     // Pad to even length if needed.
-    let padded: String = if stripped.len() % 2 != 0 {
+    let padded: String = if !stripped.len().is_multiple_of(2) {
         format!("0{stripped}")
     } else {
         stripped.to_owned()
@@ -1166,9 +1166,7 @@ fn map_expr_stmt(expr: &pt::Expression, warnings: &mut WarningCollector) -> LemS
         pt::Expression::AssignOr(_, l, r) => expand_assign_op(BinOp::BitOr, l, r, warnings),
         pt::Expression::AssignXor(_, l, r) => expand_assign_op(BinOp::BitXor, l, r, warnings),
         pt::Expression::AssignShiftLeft(_, l, r) => expand_assign_op(BinOp::Shl, l, r, warnings),
-        pt::Expression::AssignShiftRight(_, l, r) => {
-            expand_assign_op(BinOp::Shr, l, r, warnings)
-        }
+        pt::Expression::AssignShiftRight(_, l, r) => expand_assign_op(BinOp::Shr, l, r, warnings),
 
         // `i++` / `++i` as statement → `i = i + 1`
         pt::Expression::PreIncrement(_, e) | pt::Expression::PostIncrement(_, e) => {

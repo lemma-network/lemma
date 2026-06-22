@@ -15,6 +15,7 @@
 //!   → Lem text + TranspileWarning list
 //! ```
 
+pub mod codegen;
 pub mod lem_ir;
 mod mapper;
 mod sol_parser;
@@ -82,13 +83,12 @@ pub fn transpile(sol_source: &str) -> Result<TranspileResult, TranspileError> {
         .ok_or(TranspileError::NoContractFound)?;
 
     let mut warnings_col = warnings::WarningCollector::new();
-    // Batch 2: map Solidity AST → Lem IR (declarations only; bodies empty).
-    let _ir = mapper::map_contract(contract_def, &mut warnings_col);
+    // Map Solidity AST → Lem IR (Batches 2-3).
+    let ir = mapper::map_contract(contract_def, &mut warnings_col);
     let warnings = warnings_col.finish();
 
-    // Codegen (Batch 4) will replace this placeholder with real Lem source.
-    let lem_source =
-        format!("// Transpiled from Solidity by lemma-transpiler\n// Contract: {contract_name}\n");
+    // Emit Lem source from the IR (Batch 4).
+    let lem_source = codegen::emit_lem(&ir);
 
     Ok(TranspileResult {
         lem_source,
