@@ -4,7 +4,7 @@
 //! Warden which makes *accounts* safe at runtime.
 //! See `docs/09-SAFETY_ANALYZER_SPEC §3-bis` for full definitions.
 //!
-//! ## Rule status (Batch 2 — P3·Step 11)
+//! ## Rule status (Batch 3 — P3·Step 11 COMPLETE)
 //!
 //! | Rule | Status |
 //! |------|--------|
@@ -12,8 +12,8 @@
 //! | SAFETY-015 | ✅ Reachability check via call graph |
 //! | SAFETY-016 | ✅ Reachability check via call graph |
 //! | SAFETY-017 | ✅ Declaration-forcing: agent-state access without @agentCallable rejected |
-//! | SAFETY-018 | ⬜ Stub — Batch 3 |
-//! | SAFETY-019 | ⬜ Stub — Batch 3 |
+//! | SAFETY-018 | ✅ Declaration-forcing: co-sign must verify against owner key |
+//! | SAFETY-019 | ✅ Declaration-forcing: anomaly predicates must use on-chain state only |
 //!
 //! SAFETY-015/016 use intra-contract call graph reachability (`cfg::build_call_graph`)
 //! to catch transitive paths, not just direct-declaration checks. This matches the spec
@@ -137,6 +137,78 @@ const AGENT_STATE_FIELDS: &[&str] = &[
     "sessionKey",
 ];
 
+// ── Co-sign-gated function name patterns (for SAFETY-018) ────────────────────
+//
+// A function is "co-sign-gated" if its name matches one of these patterns OR
+// it carries the `@cosignRequired` annotation.
+//
+// Completeness verified against 14-AGENT_LAYER §2.3.4:
+//   cosignedAction / approvedAction / ownerApproved — canonical co-sign entry names
+//   coSignedTransfer / coSignedWithdraw — high-value transfer variants requiring step-up
+//
+// Honest limit: non-canonical co-sign function names escape static analysis.
+// Warden runtime provides defence-in-depth for missed names.
+// Decision pinned: DB-A17 (SAFETY-018 canonical co-sign names).
+const COSIGN_ACTION_NAMES: &[&str] = &[
+    "cosignedAction",
+    "approvedAction",
+    "ownerApproved",
+    "coSignedTransfer",
+    "coSignedWithdraw",
+];
+
+// ── Non-owner signer field names (for SAFETY-018) ────────────────────────────
+//
+// A co-sign-gated function is "forgeable" if its body accesses one of these
+// fields on `msg` — these are agent-controlled keys, not the owner key.
+// Accessing them for co-sign verification means the co-signer is NOT the owner.
+//
+// Canonical agent-key field names from 14-AGENT_LAYER §2 (session key registry):
+//   sessionKey — the per-session key granted to an agent
+//   agentKey   — an agent-controlled key (synonym in some patterns)
+//   signerKey  — a generic signer key (non-owner form)
+const AGENT_SIGNER_FIELDS: &[&str] = &["sessionKey", "agentKey", "signerKey"];
+
+// ── Anomaly-predicate function name patterns (for SAFETY-019) ────────────────
+//
+// A function is an "anomaly predicate" if its name matches one of these patterns
+// OR it carries the `@anomalyGuard` annotation.
+//
+// Completeness verified against 14-AGENT_LAYER §2.3.5 and §9.1:
+//   checkAnomaly / isAnomalous / anomalyGuard — canonical anomaly-detection names
+//   shouldAutoRevoke / deadmanCheck           — dead-man's switch / auto-revoke predicates
+//
+// Honest limit: non-canonical anomaly-predicate names escape static analysis.
+// Warden runtime provides defence-in-depth for missed names.
+// Decision pinned: DB-A17 (SAFETY-019 canonical anomaly-predicate names).
+const ANOMALY_PREDICATE_NAMES: &[&str] = &[
+    "checkAnomaly",
+    "isAnomalous",
+    "anomalyGuard",
+    "shouldAutoRevoke",
+    "deadmanCheck",
+];
+
+// ── Non-deterministic function call names (for SAFETY-019) ───────────────────
+//
+// A call to any of these names inside an anomaly predicate is a non-deterministic
+// input — it would produce different results on different nodes, forking consensus.
+//
+// Canonical non-deterministic sources (14-AGENT_LAYER §9.1 + 07-CONSENSUS_SPEC):
+//   random / rand / getRandom / getEntropy — RNG (non-deterministic by definition)
+//   currentTime / getTime / now            — wall-clock time (node-local)
+//   SystemTime                             — Rust/Lem system-time access
+const NON_DETERMINISTIC_CALL_NAMES: &[&str] = &[
+    "random",
+    "rand",
+    "getRandom",
+    "getEntropy",
+    "currentTime",
+    "getTime",
+    "now",
+    "SystemTime",
+];
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /// Check a contract for SAFETY-014..019 agent-safety violations.
@@ -159,11 +231,11 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     // SAFETY-017 — kill-switch honored.
     violations.extend(check_017_kill_switch_honored(contract));
 
-    // SAFETY-018 — co-sign threshold integrity (Batch 3).
-    // violations.extend(check_018_cosign_threshold_integrity(contract));
+    // SAFETY-018 — co-sign threshold integrity.
+    violations.extend(check_018_cosign_threshold_integrity(contract));
 
-    // SAFETY-019 — deterministic anomaly inputs (Batch 3).
-    // violations.extend(check_019_deterministic_anomaly_inputs(contract));
+    // SAFETY-019 — deterministic anomaly inputs.
+    violations.extend(check_019_deterministic_anomaly_inputs(contract));
 
     violations
 }
@@ -397,6 +469,164 @@ fn accesses_agent_state(func: &ContractFunction<'_>) -> bool {
     let mut visitor = AgentStateVisitor { found: false };
     visitor.visit_stmts(body);
     visitor.found
+}
+
+// ─── SAFETY-018 — Co-sign threshold integrity ─────────────────────────────────
+
+/// Check that every co-sign-gated action verifies the co-signature against the
+/// **owner** key, not a session key or agent-controlled key.
+///
+/// Spec requirement (09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-018):
+/// > "The co-signature on a co-sign-gated action must verify against the owner
+/// > key, never the session key or an agent-controlled key; an agent-satisfiable
+/// > co-sign ⇒ reject (`AgentCosignForgeable`)."
+///
+/// ## Detection strategy (declaration-forcing, MVP)
+///
+/// A function is "co-sign-gated" if:
+/// 1. It carries the `@cosignRequired` annotation, OR
+/// 2. Its name matches `COSIGN_ACTION_NAMES`.
+///
+/// A co-sign-gated function is **forgeable** if:
+/// - Its body accesses `msg.sessionKey`, `msg.agentKey`, or `msg.signerKey`
+///   (agent-controlled keys — the co-signer is NOT the owner), OR
+/// - Its body does NOT access `self.owner` or call `requireOwner`/`isOwner`
+///   (the owner key is never consulted for the co-sign verification).
+///
+/// ## Honest limit
+///
+/// Declaration-forcing: non-canonical co-sign function names and non-canonical
+/// owner-verification patterns escape static analysis. Warden runtime is the
+/// backstop. Decision pinned: DB-A17.
+fn check_018_cosign_threshold_integrity(contract: &TypedContract<'_>) -> Vec<SafetyError> {
+    contract
+        .functions()
+        .into_iter()
+        .filter(|func| is_cosign_gated(func))
+        .filter(|func| !verifies_owner_cosign(func))
+        .map(|func| SafetyError::AgentCosignForgeable {
+            func: func.name.to_owned(),
+        })
+        .collect()
+}
+
+/// Returns `true` if the function is a co-sign-gated action.
+///
+/// A function is co-sign-gated if it carries `@cosignRequired` OR its name
+/// matches a canonical co-sign action name (see `COSIGN_ACTION_NAMES`).
+fn is_cosign_gated(func: &ContractFunction<'_>) -> bool {
+    func.annotations
+        .iter()
+        .any(|ann| ann.name == "cosignRequired")
+        || COSIGN_ACTION_NAMES.contains(&func.name)
+}
+
+/// Returns `true` if the function verifies the co-signature against the owner key.
+///
+/// A function verifies owner co-sign if its body:
+/// - Does NOT access `msg.sessionKey`, `msg.agentKey`, or `msg.signerKey`
+///   (agent-controlled keys that would make the co-sign forgeable), AND
+/// - DOES access `self.owner` (the owner key is consulted for verification) OR
+///   calls `requireOwner` / `isOwner` (canonical owner-check helpers).
+///
+/// If the body is absent (external/abstract function), returns `false` —
+/// reject on doubt (soundness over completeness).
+fn verifies_owner_cosign(func: &ContractFunction<'_>) -> bool {
+    let Some(body) = func.body else {
+        // No body — cannot prove owner co-sign; reject on doubt.
+        return false;
+    };
+
+    // First: check if the function accesses agent-controlled signer fields.
+    // If it does, the co-sign is verified against a session key, not the owner.
+    let mut agent_key_visitor = AgentSignerVisitor { found: false };
+    agent_key_visitor.visit_stmts(body);
+    if agent_key_visitor.found {
+        // Accesses agent-controlled key → co-sign is forgeable.
+        return false;
+    }
+
+    // Second: check if the function accesses self.owner or calls requireOwner/isOwner.
+    // If it does, the owner key is consulted → co-sign is verified against the owner.
+    let mut owner_visitor = OwnerVerifyVisitor { found: false };
+    owner_visitor.visit_stmts(body);
+    owner_visitor.found
+}
+
+// ─── SAFETY-019 — Deterministic anomaly inputs ────────────────────────────────
+
+/// Check that every anomaly/auto-revoke predicate uses only committed on-chain
+/// state as inputs — no system time, no RNG, no external calls.
+///
+/// Spec requirement (09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-019):
+/// > "The predicate's inputs must be committed on-chain state only — no
+/// > `SystemTime`, no RNG, no external call, no model inference. Any
+/// > non-deterministic input ⇒ reject (`AgentAnomalyNonDeterministic`)."
+///
+/// ## Detection strategy (declaration-forcing, MVP)
+///
+/// A function is an "anomaly predicate" if:
+/// 1. It carries the `@anomalyGuard` annotation, OR
+/// 2. Its name matches `ANOMALY_PREDICATE_NAMES`.
+///
+/// Non-deterministic sources detected:
+/// - External calls (`ext_calls(func)` is non-empty — any call leaving the
+///   contract is non-deterministic from the consensus perspective).
+/// - Direct calls to known non-deterministic functions (`NON_DETERMINISTIC_CALL_NAMES`).
+/// - `block.random` / `block.randao` / `block.prevrandao` member access.
+/// - `SystemTime::now()` — system-time access (node-local, non-deterministic).
+/// - `Expr::New { .. }` — contract deployment (leaves current context).
+///
+/// ## Key difference from SAFETY-021 (isTaxable purity)
+///
+/// SAFETY-019 does NOT require view-purity — anomaly predicates MAY read state.
+/// Only non-deterministic inputs are rejected (state reads are deterministic).
+///
+/// ## Honest limit
+///
+/// Declaration-forcing: non-canonical anomaly-predicate names escape static
+/// analysis. Warden runtime is the backstop. Decision pinned: DB-A17.
+fn check_019_deterministic_anomaly_inputs(contract: &TypedContract<'_>) -> Vec<SafetyError> {
+    let mut violations = Vec::new();
+
+    for func in contract
+        .functions()
+        .into_iter()
+        .filter(|f| is_anomaly_predicate(f))
+    {
+        // Check for external calls (non-deterministic by definition — any call
+        // leaving the contract may return different results on different nodes).
+        let ext = crate::analyzer::cfg::ext_calls(&func);
+        for call in &ext {
+            violations.push(SafetyError::AgentAnomalyNonDeterministic {
+                func: func.name.to_owned(),
+                input: format!("external call to {}", call.callee_desc),
+            });
+        }
+
+        // Check for direct non-deterministic function calls and block.random access.
+        if let Some(body) = func.body {
+            let mut visitor = AnomalyNonDetVisitor {
+                func: func.name.to_owned(),
+                violations: Vec::new(),
+            };
+            visitor.visit_stmts(body);
+            violations.extend(visitor.violations);
+        }
+    }
+
+    violations
+}
+
+/// Returns `true` if the function is an anomaly/auto-revoke predicate.
+///
+/// A function is an anomaly predicate if it carries `@anomalyGuard` OR its
+/// name matches a canonical anomaly-predicate name (see `ANOMALY_PREDICATE_NAMES`).
+fn is_anomaly_predicate(func: &ContractFunction<'_>) -> bool {
+    func.annotations
+        .iter()
+        .any(|ann| ann.name == "anomalyGuard")
+        || ANOMALY_PREDICATE_NAMES.contains(&func.name)
 }
 
 // ─── SAFETY-015 — Policy-mutation owner-gating ────────────────────────────────
@@ -753,6 +983,177 @@ impl Visitor for AgentStateVisitor {
                     return;
                 }
             }
+        }
+        walk_expr(self, expr);
+    }
+}
+
+/// AST visitor that detects `msg.<agent_signer_field>` member accesses (SAFETY-018).
+///
+/// Flags any access to `msg.sessionKey`, `msg.agentKey`, or `msg.signerKey` —
+/// these are agent-controlled keys, not the owner key. If a co-sign-gated
+/// function accesses these fields, the co-signature is verified against an
+/// agent-controlled key, making it forgeable.
+///
+/// Short-circuits on first match to avoid redundant work.
+struct AgentSignerVisitor {
+    /// Whether any agent-controlled signer field access was found.
+    found: bool,
+}
+
+impl Visitor for AgentSignerVisitor {
+    fn visit_expr(&mut self, expr: &Expr) {
+        // Short-circuit: once found, no need to continue traversal.
+        if self.found {
+            return;
+        }
+        // Detect `msg.<field>` where field is in AGENT_SIGNER_FIELDS.
+        // In the Lem AST: `Expr::Member(box Expr::Ident("msg", _), field, _)`.
+        if let Expr::Member(base, field, _) = expr {
+            if let Expr::Ident(name, _) = base.as_ref() {
+                if name == "msg" && AGENT_SIGNER_FIELDS.contains(&field.as_str()) {
+                    self.found = true;
+                    return;
+                }
+            }
+        }
+        walk_expr(self, expr);
+    }
+}
+
+/// AST visitor that detects owner-key verification patterns (SAFETY-018).
+///
+/// A function verifies the owner co-sign if its body:
+/// - Accesses `self.owner` (the owner key is consulted), OR
+/// - Calls `requireOwner()` or `isOwner()` (canonical owner-check helpers).
+///
+/// Short-circuits on first match to avoid redundant work.
+struct OwnerVerifyVisitor {
+    /// Whether any owner-verification pattern was found.
+    found: bool,
+}
+
+impl Visitor for OwnerVerifyVisitor {
+    fn visit_expr(&mut self, expr: &Expr) {
+        // Short-circuit: once found, no need to continue traversal.
+        if self.found {
+            return;
+        }
+        match expr {
+            // Detect `self.owner` — the owner key is accessed.
+            // In the Lem AST: `Expr::Member(box Expr::Ident("self", _), "owner", _)`.
+            Expr::Member(base, field, _) => {
+                if let Expr::Ident(name, _) = base.as_ref() {
+                    if name == "self" && field == "owner" {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+            // Detect `requireOwner()` or `isOwner()` — canonical owner-check helpers.
+            // Both bare-call (Ident) and method-call (Member) forms are detected.
+            Expr::Call { callee, .. } => {
+                if let Some(name) = extract_call_name(callee) {
+                    if matches!(name.as_str(), "requireOwner" | "isOwner") {
+                        self.found = true;
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+        walk_expr(self, expr);
+    }
+}
+
+/// AST visitor that detects non-deterministic inputs in anomaly predicates (SAFETY-019).
+///
+/// Flags:
+/// - Calls to known non-deterministic functions (`NON_DETERMINISTIC_CALL_NAMES`).
+/// - `block.random` / `block.randao` / `block.prevrandao` member access.
+/// - `SystemTime::now()` — system-time access (node-local, non-deterministic).
+/// - `Expr::New { .. }` — contract deployment (leaves current context).
+///
+/// Note: external calls are detected separately via `cfg::ext_calls` before
+/// this visitor runs (to get the callee description for the error message).
+/// This visitor catches the remaining non-deterministic patterns.
+struct AnomalyNonDetVisitor {
+    /// Name of the enclosing anomaly-predicate function.
+    func: String,
+    /// Accumulated violations.
+    violations: Vec<SafetyError>,
+}
+
+impl Visitor for AnomalyNonDetVisitor {
+    fn visit_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Call { callee, .. } => {
+                match callee.as_ref() {
+                    // `block.random` / `block.randao` / `block.prevrandao` via method call.
+                    // In Lem: `Call { callee: Member(Ident("block"), "random") }`.
+                    Expr::Member(obj, method, _)
+                        if matches!(obj.as_ref(), Expr::Ident(n, _) if n == "block")
+                            && matches!(method.as_str(), "random" | "randao" | "prevrandao") =>
+                    {
+                        self.violations
+                            .push(SafetyError::AgentAnomalyNonDeterministic {
+                                func: self.func.clone(),
+                                input: format!(
+                                    "block.{method} (non-deterministic block randomness)"
+                                ),
+                            });
+                        // Continue traversal — collect all violations.
+                    }
+                    // `SystemTime::now()` — callee is `Member(Ident("SystemTime"), "now")`.
+                    Expr::Member(obj, method, _) if matches!(obj.as_ref(), Expr::Ident(n, _) if n == "SystemTime") =>
+                    {
+                        self.violations
+                            .push(SafetyError::AgentAnomalyNonDeterministic {
+                                func: self.func.clone(),
+                                input: format!(
+                                    "SystemTime.{method} (non-deterministic system clock)"
+                                ),
+                            });
+                    }
+                    // Bare non-deterministic function calls: `random()`, `rand()`, etc.
+                    // In Lem: `Call { callee: Ident("random") }`.
+                    Expr::Ident(name, _)
+                        if NON_DETERMINISTIC_CALL_NAMES.contains(&name.as_str()) =>
+                    {
+                        self.violations
+                            .push(SafetyError::AgentAnomalyNonDeterministic {
+                                func: self.func.clone(),
+                                input: format!("{name}() (non-deterministic RNG/clock call)"),
+                            });
+                    }
+                    _ => {}
+                }
+            }
+            // `block.random` / `block.randao` as a member access (not a call).
+            // In Lem: `Member(Ident("block"), "random")`.
+            Expr::Member(obj, field, _)
+                if matches!(obj.as_ref(), Expr::Ident(n, _) if n == "block")
+                    && matches!(field.as_str(), "random" | "randao" | "prevrandao") =>
+            {
+                self.violations
+                    .push(SafetyError::AgentAnomalyNonDeterministic {
+                        func: self.func.clone(),
+                        input: format!("block.{field} (non-deterministic block randomness)"),
+                    });
+                // Do NOT call walk_expr here — the Member node has no sub-expressions
+                // that need visiting beyond what we've already matched.
+                return;
+            }
+            // `new Contract(…)` — deployment leaves the contract context.
+            Expr::New { .. } => {
+                self.violations
+                    .push(SafetyError::AgentAnomalyNonDeterministic {
+                        func: self.func.clone(),
+                        input: "new <Contract> (contract deployment is non-deterministic input)"
+                            .to_owned(),
+                    });
+            }
+            _ => {}
         }
         walk_expr(self, expr);
     }
