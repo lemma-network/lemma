@@ -647,8 +647,14 @@ fn emit_function_constructor_uses_init_name() {
     };
     let out = emit_one_function(&func);
     // Constructor emits `init(params) {` — keyword form, no `pub fn` prefix.
-    assert!(out.contains("init("), "constructor should emit 'init(': {out}");
-    assert!(!out.contains("fn init("), "constructor should NOT use 'fn init': {out}");
+    assert!(
+        out.contains("init("),
+        "constructor should emit 'init(': {out}"
+    );
+    assert!(
+        !out.contains("fn init("),
+        "constructor should NOT use 'fn init': {out}"
+    );
     assert!(!out.contains("fn constructor("));
 }
 
@@ -698,8 +704,14 @@ fn emit_contract_uses_itoken_adds_itoken_to_implements_clause() {
     // MF-2: IToken is an interface → `implements IToken`, not `uses IToken`
     let contract = make_itoken_contract();
     let out = emit_lem(&contract);
-    assert!(out.contains("implements IToken"), "IToken should be in implements: {out}");
-    assert!(!out.contains("uses IToken"), "IToken should NOT be in uses: {out}");
+    assert!(
+        out.contains("implements IToken"),
+        "IToken should be in implements: {out}"
+    );
+    assert!(
+        !out.contains("uses IToken"),
+        "IToken should NOT be in uses: {out}"
+    );
 }
 
 #[test]
@@ -1023,8 +1035,8 @@ fn emit_lem_full_erc20_like_contract_is_well_formed() {
 /// `LineComment`, `BlockComment`, and `DocComment` tokens before parsing.
 fn parse_lem_src(src: &str) {
     use lemma_lang::lexer::token::Token;
-    let tokens = lemma_lang::tokenize(src)
-        .unwrap_or_else(|e| panic!("tokenize failed:\n{src}\n{e:?}"));
+    let tokens =
+        lemma_lang::tokenize(src).unwrap_or_else(|e| panic!("tokenize failed:\n{src}\n{e:?}"));
     // Filter comment trivia — the parser processes logic tokens only.
     let non_trivia: Vec<_> = tokens
         .into_iter()
@@ -1035,8 +1047,7 @@ fn parse_lem_src(src: &str) {
             )
         })
         .collect();
-    lemma_lang::parse(non_trivia)
-        .unwrap_or_else(|e| panic!("parse failed:\n{src}\n{e:?}"));
+    lemma_lang::parse(non_trivia).unwrap_or_else(|e| panic!("parse failed:\n{src}\n{e:?}"));
 }
 
 #[test]
@@ -1059,7 +1070,10 @@ fn round_trip_itoken_contract_uses_implements_not_uses() {
         uses_access_control: false,
         structs: vec![],
         enums: vec![],
-        state: vec![LemParam { name: "supply".to_owned(), ty: LemType::U128 }],
+        state: vec![LemParam {
+            name: "supply".to_owned(),
+            ty: LemType::U128,
+        }],
         events: vec![],
         functions: vec![],
     };
@@ -1087,13 +1101,22 @@ fn round_trip_ownable_trait_goes_in_uses_not_implements() {
         uses_access_control: false,
         structs: vec![],
         enums: vec![],
-        state: vec![LemParam { name: "owner".to_owned(), ty: LemType::Address }],
+        state: vec![LemParam {
+            name: "owner".to_owned(),
+            ty: LemType::Address,
+        }],
         events: vec![],
         functions: vec![],
     };
     let src = emit_lem(&contract);
-    assert!(src.contains("uses Ownable"), "Ownable is a trait, should go in uses: {src}");
-    assert!(!src.contains("implements Ownable"), "Ownable should not be in implements: {src}");
+    assert!(
+        src.contains("uses Ownable"),
+        "Ownable is a trait, should go in uses: {src}"
+    );
+    assert!(
+        !src.contains("implements Ownable"),
+        "Ownable should not be in implements: {src}"
+    );
     parse_lem_src(&src);
 }
 
@@ -1139,7 +1162,10 @@ fn round_trip_function_with_view_parses() {
         uses_access_control: false,
         structs: vec![],
         enums: vec![],
-        state: vec![LemParam { name: "supply".to_owned(), ty: LemType::U128 }],
+        state: vec![LemParam {
+            name: "supply".to_owned(),
+            ty: LemType::U128,
+        }],
         events: vec![],
         functions: vec![LemFunction {
             name: "totalSupply".to_owned(),
@@ -1175,7 +1201,10 @@ fn round_trip_assert_stmt_parses() {
         events: vec![],
         functions: vec![LemFunction {
             name: "check".to_owned(),
-            params: vec![LemParam { name: "x".to_owned(), ty: LemType::U128 }],
+            params: vec![LemParam {
+                name: "x".to_owned(),
+                ty: LemType::U128,
+            }],
             returns: None,
             visibility: LemVisibility::Public,
             mutability: LemMutability::Mutable,
@@ -1214,11 +1243,17 @@ fn round_trip_constructor_emits_fn_init() {
         uses_access_control: false,
         structs: vec![],
         enums: vec![],
-        state: vec![LemParam { name: "supply".to_owned(), ty: LemType::U128 }],
+        state: vec![LemParam {
+            name: "supply".to_owned(),
+            ty: LemType::U128,
+        }],
         events: vec![],
         functions: vec![LemFunction {
             name: "init".to_owned(),
-            params: vec![LemParam { name: "initialSupply".to_owned(), ty: LemType::U128 }],
+            params: vec![LemParam {
+                name: "initialSupply".to_owned(),
+                ty: LemType::U128,
+            }],
             returns: None,
             visibility: LemVisibility::Public,
             mutability: LemMutability::Mutable,
@@ -1235,7 +1270,13 @@ fn round_trip_constructor_emits_fn_init() {
     };
     let src = emit_lem(&contract);
     // Lem constructor syntax: `init(params) { }` — keyword form, not `pub fn init`.
-    assert!(src.contains("init(initialSupply"), "constructor should emit as 'init(': {src}");
-    assert!(!src.contains("fn init("), "constructor should NOT use 'fn init': {src}");
+    assert!(
+        src.contains("init(initialSupply"),
+        "constructor should emit as 'init(': {src}"
+    );
+    assert!(
+        !src.contains("fn init("),
+        "constructor should NOT use 'fn init': {src}"
+    );
     parse_lem_src(&src);
 }

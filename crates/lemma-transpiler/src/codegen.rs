@@ -156,9 +156,7 @@ fn emit_contract(out: &mut CodegenWriter, contract: &LemContract) {
             "// Concrete inheritance from Solidity: {} — manual review:",
             contract.extends.join(", ")
         ));
-        out.line(
-            "// Lem contracts compose via `uses` (traits) and `implements` (interfaces),",
-        );
+        out.line("// Lem contracts compose via `uses` (traits) and `implements` (interfaces),");
         out.line("// not class-style `extends`. Extract shared logic into a trait.");
     }
 
