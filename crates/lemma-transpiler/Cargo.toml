@@ -2,9 +2,13 @@
 name = "lemma-transpiler"
 version = "0.1.0"
 edition = "2021"
-description = "Solidity-to-Lem transpiler: parse Solidity, emit equivalent Lem source"
+description = "Solidity-to-Lem transpiler: parse Solidity source, emit equivalent Lem source"
 
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+solang-parser = { workspace = true }
 lemma-core = { path = "../lemma-core" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
