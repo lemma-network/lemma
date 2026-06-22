@@ -11,6 +11,7 @@
 //! | `@std/token` | Token, TaxToken bases | P3·Step 8 |
 //! | `@std/interfaces` | IToken, INFT, IMultiToken, IVault | P3·Step 8 |
 //! | `@std/access` | Ownable, Pausable, AccessControl | P3·Step 8 |
+//! | `@std/agent` | AgentPolicy, AutoRevoke, KyaTier | P3·Step 12 |
 //! | `@std/security` | ReentrancyGuard, PullPayment, RateLimiter | future |
 //! | `@std/math` | SafeMath, mulDiv, sqrt, exp, log, FixedPoint | future |
 //! | `@std/crypto` | hashing, signatures, merkle, ZK, commitments | future |
@@ -26,6 +27,9 @@ use crate::type_checker::types::SymbolKind;
 
 /// Embedded source for `@std/access` — Ownable, Pausable, AccessControl traits.
 const ACCESS_SRC: &str = include_str!("access.lem");
+
+/// Embedded source for `@std/agent` — AgentPolicy, AutoRevoke, KyaTier (§2.1, §2.3.5, §7).
+const AGENT_SRC: &str = include_str!("agent.lem");
 
 /// Embedded source for `@std/interfaces` — IToken, INFT, IMultiToken, IVault.
 const INTERFACES_SRC: &str = include_str!("interfaces.lem");
@@ -57,6 +61,7 @@ impl StdLibRegistry {
     pub fn new() -> Self {
         let mut modules = BTreeMap::new();
         modules.insert("access", ACCESS_SRC);
+        modules.insert("agent", AGENT_SRC);
         modules.insert("interfaces", INTERFACES_SRC);
         modules.insert("token", TOKEN_SRC);
         Self { modules }
@@ -102,6 +107,14 @@ impl StdLibRegistry {
             ("access", "Ownable") => Some(SymbolKind::Trait),
             ("access", "Pausable") => Some(SymbolKind::Trait),
             ("access", "AccessControl") => Some(SymbolKind::Trait),
+
+            // @std/agent exports (P3·Step 12)
+            // AgentPolicy: bounded-authority grant for a session key (14-AGENT_LAYER §2.1).
+            // AutoRevoke: dead-man's switch declaration (§2.3.5).
+            // KyaTier: identity-verification tier for A2A interactions (§7).
+            ("agent", "AgentPolicy") => Some(SymbolKind::Struct),
+            ("agent", "AutoRevoke") => Some(SymbolKind::Struct),
+            ("agent", "KyaTier") => Some(SymbolKind::Enum),
 
             _ => None,
         }

@@ -1,0 +1,45 @@
+// @std/agent — Agent policy types for the Warden / Agent Layer.
+// See docs/14-AGENT_LAYER.md §2 for the full spec.
+//
+// AgentPolicy: the core bounded-authority grant for a session key.
+// Warden enforces this policy on every transaction signed by the session key.
+// The VM's full AgentPolicy includes AllowList, ActionMask, and CategoryCaps;
+// these are VM-internal fields and are deferred to Phase 4.
+//
+// Usage:
+//   @onlyOwner
+//   pub fn grantAgent(key: Address, policy: AgentPolicy) {
+//       self.agentPolicies.set(key, policy)
+//   }
+
+// AgentPolicy — the bounded authority grant for a session key (§2.1).
+//
+// All amounts in Drop (1 LEM = 1e18 Drop).
+// All time values are in epoch numbers (consensus-derived, never wall-clock — §0 determinism).
+struct AgentPolicy {
+    expiryEpoch: u64
+    budgetTotal: u128
+    perTxCap: u128
+    perEpochCap: u128
+}
+
+// AutoRevoke — dead-man's switch declaration for the agent (§2.3.5).
+//
+// When attached to an AgentPolicy (in a future extension), specifies when
+// Warden should automatically revoke the policy without owner action.
+// MVP: just the violation threshold; auto-revoke on anomaly is Phase 4.
+struct AutoRevoke {
+    maxViolationsPerEpoch: u64
+}
+
+// KyaTier — the agent's identity-verification tier (§7).
+//
+// Counterparties in A2A interactions may require a minimum KyaTier.
+// Verified: full KYA onboarding completed.
+// Identified: basic onboarding completed.
+// None: unverified (default for new agents).
+enum KyaTier {
+    None,
+    Identified,
+    Verified
+}

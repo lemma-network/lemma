@@ -30,8 +30,9 @@ fn available_modules_lists_all() {
     let modules = reg.available_modules();
     assert!(modules.contains(&"token"));
     assert!(modules.contains(&"access"));
+    assert!(modules.contains(&"agent"));
     assert!(modules.contains(&"interfaces"));
-    assert_eq!(modules.len(), 3);
+    assert_eq!(modules.len(), 4);
 }
 
 #[test]
@@ -249,4 +250,49 @@ fn base_members_returns_access_control_fields_and_functions() {
 #[test]
 fn base_members_returns_none_for_unknown() {
     assert!(StdLibRegistry::base_members("UnknownBase").is_none());
+}
+
+// ── @std/agent module ─────────────────────────────────────────────────────────
+
+#[test]
+fn get_returns_agent_module() {
+    let reg = StdLibRegistry::new();
+    assert!(reg.get("agent").is_some());
+}
+
+#[test]
+fn agent_module_source_is_nonempty() {
+    let reg = StdLibRegistry::new();
+    let src = reg.get("agent").expect("agent module should exist");
+    assert!(!src.is_empty(), "agent.lem source should not be empty");
+}
+
+#[test]
+fn symbol_kind_returns_struct_for_agent_policy() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(
+        reg.symbol_kind("agent", "AgentPolicy"),
+        Some(SymbolKind::Struct),
+    );
+}
+
+#[test]
+fn symbol_kind_returns_struct_for_auto_revoke() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(
+        reg.symbol_kind("agent", "AutoRevoke"),
+        Some(SymbolKind::Struct),
+    );
+}
+
+#[test]
+fn symbol_kind_returns_enum_for_kya_tier() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(reg.symbol_kind("agent", "KyaTier"), Some(SymbolKind::Enum),);
+}
+
+#[test]
+fn symbol_kind_returns_none_for_unknown_agent_export() {
+    let reg = StdLibRegistry::new();
+    assert_eq!(reg.symbol_kind("agent", "Nonexistent"), None);
 }

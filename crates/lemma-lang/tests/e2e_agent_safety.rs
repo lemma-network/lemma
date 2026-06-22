@@ -1,4 +1,5 @@
-//! E2E integration tests — P3·Step 11 agent-safety rules (SAFETY-014..019).
+//! E2E integration tests — P3·Step 11 agent-safety rules (SAFETY-014..019) +
+//! P3·Step 12 @std/agent type usage (AgentPolicy in function signatures).
 //!
 //! These tests exercise the full `tokenize → parse → check` pipeline against
 //! complete agent contracts, proving the acceptance criterion:
@@ -249,5 +250,76 @@ return price > 1000
             |v| matches!(v, SafetyError::AgentAnomalyNonDeterministic { func, .. } if func == "checkAnomaly")
         ),
         "SAFETY-019 AgentAnomalyNonDeterministic must be present; got {violations:?}"
+    );
+}
+
+// ─── P3·Step 12: @std/agent type usage ───────────────────────────────────────
+
+// ─── E2E Test 6: AgentPolicy as a parameter type compiles cleanly ─────────────
+
+#[test]
+fn e2e_agent_policy_as_param_type_compiles_cleanly() {
+    // A contract that imports AgentPolicy from @std/agent and uses it as a
+    // function parameter type in grantAgent / revokeAgent.
+    //
+    // Proves: the @std/agent module is registered, AgentPolicy resolves to
+    // SymbolKind::Struct, and the full pipeline (tokenize → parse → check)
+    // accepts AgentPolicy in function signatures without UndefinedType errors.
+    //
+    // Expected: full pipeline returns Ok(TypedAst).
+    let _ = expect_clean(
+        r#"import { AgentPolicy } from "@std/agent"
+
+contract AgentRegistry {
+state {
+owner: Address
+agentPolicies: u128 = 0
+}
+init(owner: Address) {
+self.owner = owner
+}
+@onlyOwner
+pub fn grantAgent(key: Address, policy: AgentPolicy) {
+let _ = key
+let _ = policy
+self.agentPolicies = 1
+}
+@onlyOwner
+pub fn revokeAgent(key: Address) {
+let _ = key
+}
+}"#,
+    );
+}
+
+// ─── E2E Test 7: AgentPolicy as a return type compiles cleanly ────────────────
+
+#[test]
+fn e2e_agent_policy_as_return_type_compiles_cleanly() {
+    // A contract that imports AgentPolicy from @std/agent and uses it as a
+    // function return type in getPolicy.
+    //
+    // Proves: AgentPolicy is usable in return-type position — the type checker
+    // resolves it to Named(id, []) and does not emit ReturnTypeMismatch or
+    // UndefinedType errors.
+    //
+    // Expected: full pipeline returns Ok(TypedAst).
+    let _ = expect_clean(
+        r#"import { AgentPolicy } from "@std/agent"
+
+contract PolicyReader {
+state {
+owner: Address
+agentPolicies: u128 = 0
+}
+init(owner: Address) {
+self.owner = owner
+}
+pub fn getPolicy(key: Address) -> AgentPolicy {
+let _ = key
+let p = AgentPolicy { expiryEpoch: 0, budgetTotal: 0, perTxCap: 0, perEpochCap: 0 }
+return p
+}
+}"#,
     );
 }
