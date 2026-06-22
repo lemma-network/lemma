@@ -12,3 +12,5 @@ solang-parser = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# lemma-lang for round-trip tests: tokenize+parse the emitted Lem source (MF-3 fix)
+lemma-lang = { path = "../lemma-lang" }

@@ -132,7 +132,7 @@ fn emit_preamble(out: &mut CodegenWriter) {
 ///
 /// Produces:
 /// ```text
-/// contract Name [extends Base1, Base2] [uses Trait1, Trait2] {
+/// contract Name [implements IFace1, IFace2] [uses Trait1, Trait2] {
 ///     <structs>
 ///     <enums>
 ///     <state block>
@@ -140,12 +140,42 @@ fn emit_preamble(out: &mut CodegenWriter) {
 ///     <functions>
 /// }
 /// ```
+///
+/// ## Grammar note
+///
+/// The Lem `contract` grammar has no `extends` clause (that keyword belongs to
+/// `token` declarations only). Concrete Solidity `is ConcreteBase` bases are
+/// emitted as a comment and excluded from the header. Interface bases go in
+/// `implements`, traits go in `uses`.
 fn emit_contract(out: &mut CodegenWriter, contract: &LemContract) {
-    // Build the `uses` list from trait flags + explicit uses.
-    let mut uses: Vec<&str> = Vec::new();
-    if contract.uses_itoken {
-        uses.push("IToken");
+    // Concrete bases (`contract.extends`) are not expressible in the `contract`
+    // header — emit a comment and skip them (MF-1 fix; `extends` is only valid
+    // on `token` declarations in Lem grammar).
+    if !contract.extends.is_empty() {
+        out.line(&format!(
+            "// Concrete inheritance from Solidity: {} — manual review:",
+            contract.extends.join(", ")
+        ));
+        out.line(
+            "// Lem contracts compose via `uses` (traits) and `implements` (interfaces),",
+        );
+        out.line("// not class-style `extends`. Extract shared logic into a trait.");
     }
+
+    // `implements` clause: interfaces (IToken, plus any other interface names
+    // from `contract.uses` whose names start with 'I' per convention).
+    // Traits (`Ownable`, `Pausable`, `AccessControl`) go to `uses` (MF-2 fix).
+    let mut implements: Vec<&str> = Vec::new();
+    if contract.uses_itoken {
+        implements.push("IToken");
+    }
+    // Items in contract.uses are interface names (collected by apply_base when
+    // the base name follows the `I<Upper>...` convention — see mapper.rs).
+    let extra_ifaces: Vec<&str> = contract.uses.iter().map(String::as_str).collect();
+    implements.extend_from_slice(&extra_ifaces);
+
+    // `uses` clause: traits only.
+    let mut uses: Vec<&str> = Vec::new();
     if contract.uses_ownable {
         uses.push("Ownable");
     }
@@ -155,15 +185,12 @@ fn emit_contract(out: &mut CodegenWriter, contract: &LemContract) {
     if contract.uses_access_control {
         uses.push("AccessControl");
     }
-    // Append any additional explicit uses (unknown interfaces from mapper).
-    let extra_uses: Vec<&str> = contract.uses.iter().map(String::as_str).collect();
-    uses.extend_from_slice(&extra_uses);
 
     // Build the contract declaration line.
     let mut decl = format!("contract {}", contract.name);
-    if !contract.extends.is_empty() {
-        decl.push_str(" extends ");
-        decl.push_str(&contract.extends.join(", "));
+    if !implements.is_empty() {
+        decl.push_str(" implements ");
+        decl.push_str(&implements.join(", "));
     }
     if !uses.is_empty() {
         decl.push_str(" uses ");
@@ -323,12 +350,6 @@ fn emit_function(out: &mut CodegenWriter, func: &LemFunction) {
         LemMutability::Payable => "payable ",
     };
 
-    // Constructor → `fn init`, regular method → `fn <name>`.
-    let fn_name = match func.kind {
-        LemFunctionKind::Constructor => "init".to_owned(),
-        LemFunctionKind::Method => func.name.clone(),
-    };
-
     // Parameters: `name: Type, ...`
     let params: Vec<String> = func
         .params
@@ -336,15 +357,40 @@ fn emit_function(out: &mut CodegenWriter, func: &LemFunction) {
         .map(|p| format!("{}: {}", p.name, emit_type(&p.ty)))
         .collect();
 
-    // Build the function signature line: `pub fn name(params) -> RetType {`
-    let sig = if let Some(ret_ty) = &func.returns {
-        format!(
-            "{vis}{mutability_kw}fn {fn_name}({}) -> {} {{",
-            params.join(", "),
-            emit_type(ret_ty)
-        )
-    } else {
-        format!("{vis}{mutability_kw}fn {fn_name}({}) {{", params.join(", "))
+    // Constructor → `[payable] init(params)` (keyword form, no `pub`/`fn`).
+    // Regular method → `pub [view|pure|payable] fn name(params) [-> RetType]`.
+    //
+    // Grammar reference (parser/decl/tests.rs:619-636):
+    //   `init(owner: Address) { }` — plain constructor
+    //   `payable init(val: u128) { }` — payable constructor
+    // `init` is a reserved keyword; `pub fn init` is a parse error.
+    let sig = match func.kind {
+        LemFunctionKind::Constructor => {
+            // Only `payable` is valid before `init` (WF-003).
+            let payable_prefix = if func.mutability == LemMutability::Payable {
+                "payable "
+            } else {
+                ""
+            };
+            format!("{payable_prefix}init({}) {{", params.join(", "))
+        }
+        LemFunctionKind::Method => {
+            // Build the function signature line: `pub fn name(params) -> RetType {`
+            if let Some(ret_ty) = &func.returns {
+                format!(
+                    "{vis}{mutability_kw}fn {}({}) -> {} {{",
+                    func.name,
+                    params.join(", "),
+                    emit_type(ret_ty)
+                )
+            } else {
+                format!(
+                    "{vis}{mutability_kw}fn {}({}) {{",
+                    func.name,
+                    params.join(", ")
+                )
+            }
+        }
     };
 
     out.line(&sig);
@@ -402,7 +448,7 @@ pub(crate) fn emit_expr(expr: &LemExpr) -> String {
         // ── Literals ──────────────────────────────────────────────────────────
         LemExpr::IntLit(n) => n.to_string(),
         LemExpr::BoolLit(b) => b.to_string(),
-        LemExpr::StringLit(s) => format!("\"{s}\""),
+        LemExpr::StringLit(s) => format!("\"{}\"", escape_string(s)),
         LemExpr::BytesLit(bytes) => {
             let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             format!("0x{hex}")
@@ -457,16 +503,17 @@ pub(crate) fn emit_expr(expr: &LemExpr) -> String {
         LemExpr::Cast { expr, ty } => {
             format!("{} as {}", emit_expr(expr), emit_type(ty))
         }
-        // Lem has no ternary operator — emit as inline if/else expression.
-        // This is a best-effort representation; complex ternaries may need
-        // manual refactoring to a full if/else statement.
+        // Lem has no ternary operator. When a ternary appears in expression
+        // position it cannot be lowered to an if/else (which is a statement
+        // in Lem). Emit Raw with a comment so the human reviewer can refactor
+        // it to a let + if/else statement.
         LemExpr::Ternary {
             cond,
             then_expr,
             else_expr,
         } => {
             format!(
-                "if ({}) {{ {} }} else {{ {} }}",
+                "/* ternary: ({}) ? ({}) : ({}) — refactor to if/else statement */",
                 emit_expr(cond),
                 emit_expr(then_expr),
                 emit_expr(else_expr)
@@ -508,6 +555,27 @@ fn emit_binop(op: BinOp) -> &'static str {
     }
 }
 
+// ── String escape helper ──────────────────────────────────────────────────────
+
+/// Escape a string literal for inclusion in Lem source.
+///
+/// Escapes `\` → `\\`, `"` → `\"`, newline → `\n`, carriage return → `\r`,
+/// tab → `\t`. Other non-ASCII characters are passed through (Lem source is UTF-8).
+fn escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 // ── Statement emitter ─────────────────────────────────────────────────────────
 
 /// Emit a [`LemStmt`] into the writer.
@@ -532,7 +600,11 @@ pub(crate) fn emit_stmt(stmt: &LemStmt, out: &mut CodegenWriter) {
 
         // ── Assert ────────────────────────────────────────────────────────────
         LemStmt::Assert { cond, msg } => {
-            out.line(&format!("assert({}, \"{}\")", emit_expr(cond), msg));
+            out.line(&format!(
+                "assert({}, \"{}\")",
+                emit_expr(cond),
+                escape_string(msg)
+            ));
         }
 
         // ── Emit ──────────────────────────────────────────────────────────────

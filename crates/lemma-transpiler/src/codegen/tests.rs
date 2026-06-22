@@ -2,6 +2,10 @@
 //!
 //! All tests build IR directly (no Solidity parsing) to exercise the codegen
 //! in isolation. This keeps tests fast and independent of the mapper.
+//!
+//! Round-trip tests (at the bottom) feed `emit_lem()` output into
+//! `lemma_lang::tokenize` + `lemma_lang::parse` to verify the emitted source
+//! is valid per the grammar (MF-3 fix — the critical parseability guarantee).
 
 use super::*;
 use crate::lem_ir::{
@@ -349,13 +353,18 @@ fn emit_expr_cast_produces_as_syntax() {
 }
 
 #[test]
-fn emit_expr_ternary_produces_if_else_inline() {
+fn emit_expr_ternary_produces_comment_not_if_else() {
+    // Lem has no ternary operator — ternary in expr position emits a Raw comment.
     let expr = LemExpr::Ternary {
         cond: Box::new(LemExpr::BoolLit(true)),
         then_expr: Box::new(LemExpr::IntLit(1)),
         else_expr: Box::new(LemExpr::IntLit(0)),
     };
-    assert_eq!(emit_expr(&expr), "if (true) { 1 } else { 0 }");
+    let out = emit_expr(&expr);
+    assert!(
+        out.contains("ternary") && out.contains("refactor"),
+        "ternary in expr position should emit a Raw comment, got: {out}"
+    );
 }
 
 #[test]
@@ -637,7 +646,9 @@ fn emit_function_constructor_uses_init_name() {
         kind: LemFunctionKind::Constructor,
     };
     let out = emit_one_function(&func);
-    assert!(out.contains("fn init("));
+    // Constructor emits `init(params) {` — keyword form, no `pub fn` prefix.
+    assert!(out.contains("init("), "constructor should emit 'init(': {out}");
+    assert!(!out.contains("fn init("), "constructor should NOT use 'fn init': {out}");
     assert!(!out.contains("fn constructor("));
 }
 
@@ -683,10 +694,12 @@ fn emit_contract_has_state_block() {
 }
 
 #[test]
-fn emit_contract_uses_itoken_adds_itoken_to_uses_clause() {
+fn emit_contract_uses_itoken_adds_itoken_to_implements_clause() {
+    // MF-2: IToken is an interface → `implements IToken`, not `uses IToken`
     let contract = make_itoken_contract();
     let out = emit_lem(&contract);
-    assert!(out.contains("uses IToken"));
+    assert!(out.contains("implements IToken"), "IToken should be in implements: {out}");
+    assert!(!out.contains("uses IToken"), "IToken should NOT be in uses: {out}");
 }
 
 #[test]
@@ -726,11 +739,19 @@ fn emit_contract_multiple_traits_all_appear_in_uses_clause() {
 }
 
 #[test]
-fn emit_contract_extends_produces_extends_clause() {
+fn emit_contract_extends_produces_comment_not_header_extends() {
+    // MF-1: concrete bases emit as comment, NOT `extends` in the header (invalid Lem grammar)
     let mut contract = make_minimal_contract();
     contract.extends = vec!["BaseToken".to_owned()];
     let out = emit_lem(&contract);
-    assert!(out.contains("extends BaseToken"));
+    assert!(
+        !out.contains("extends BaseToken"),
+        "header should NOT contain 'extends BaseToken': {out}"
+    );
+    assert!(
+        out.contains("// Concrete inheritance from Solidity: BaseToken"),
+        "should emit concrete base as comment: {out}"
+    );
 }
 
 #[test]
@@ -966,7 +987,8 @@ fn emit_lem_full_erc20_like_contract_is_well_formed() {
     let out = emit_lem(&contract);
 
     // Contract header.
-    assert!(out.contains("contract MyToken uses IToken, Ownable {"));
+    // MF-2: IToken → implements; Ownable → uses; order: implements before uses
+    assert!(out.contains("contract MyToken implements IToken uses Ownable {"));
     // State block.
     assert!(out.contains("state {"));
     assert!(out.contains("balances: Map<Address, u128>,"));
@@ -985,4 +1007,235 @@ fn emit_lem_full_erc20_like_contract_is_well_formed() {
     assert!(out.contains("pub fn mint(to: Address, amount: u128) {"));
     // Closing brace.
     assert!(out.ends_with("}\n"));
+}
+
+// ── Round-trip tests (MF-3 fix) ───────────────────────────────────────────────
+// These tests feed emit_lem() output into lemma_lang::tokenize + lemma_lang::parse
+// to verify the emitted Lem source is actually valid per the grammar.
+//
+// The Lem parser does not skip comment tokens (LineComment/BlockComment/DocComment).
+// These are emitted by the tokenizer for the benefit of LSP/doc tools but must be
+// filtered before calling parse(). `parse_lem_src` handles this correctly.
+
+/// Parse Lem source through the full tokenize→filter-trivia→parse pipeline.
+///
+/// The lemma-lang parser does not skip comment tokens, so we filter
+/// `LineComment`, `BlockComment`, and `DocComment` tokens before parsing.
+fn parse_lem_src(src: &str) {
+    use lemma_lang::lexer::token::Token;
+    let tokens = lemma_lang::tokenize(src)
+        .unwrap_or_else(|e| panic!("tokenize failed:\n{src}\n{e:?}"));
+    // Filter comment trivia — the parser processes logic tokens only.
+    let non_trivia: Vec<_> = tokens
+        .into_iter()
+        .filter(|(t, _)| {
+            !matches!(
+                t,
+                Token::LineComment(_) | Token::BlockComment(_) | Token::DocComment(_)
+            )
+        })
+        .collect();
+    lemma_lang::parse(non_trivia)
+        .unwrap_or_else(|e| panic!("parse failed:\n{src}\n{e:?}"));
+}
+
+#[test]
+fn round_trip_minimal_contract_parses() {
+    let contract = make_minimal_contract();
+    let src = emit_lem(&contract);
+    parse_lem_src(&src);
+}
+
+#[test]
+fn round_trip_itoken_contract_uses_implements_not_uses() {
+    // MF-2 regression: `uses_itoken` must emit `implements IToken`, not `uses IToken`
+    let contract = LemContract {
+        name: "MyToken".to_owned(),
+        extends: vec![],
+        uses: vec![],
+        uses_itoken: true,
+        uses_ownable: false,
+        uses_pausable: false,
+        uses_access_control: false,
+        structs: vec![],
+        enums: vec![],
+        state: vec![LemParam { name: "supply".to_owned(), ty: LemType::U128 }],
+        events: vec![],
+        functions: vec![],
+    };
+    let src = emit_lem(&contract);
+    assert!(
+        src.contains("implements IToken"),
+        "should contain 'implements IToken', got:\n{src}"
+    );
+    assert!(
+        !src.contains("uses IToken"),
+        "should NOT contain 'uses IToken' (interfaces go in implements), got:\n{src}"
+    );
+    parse_lem_src(&src);
+}
+
+#[test]
+fn round_trip_ownable_trait_goes_in_uses_not_implements() {
+    let contract = LemContract {
+        name: "OwnedToken".to_owned(),
+        extends: vec![],
+        uses: vec![],
+        uses_itoken: false,
+        uses_ownable: true,
+        uses_pausable: false,
+        uses_access_control: false,
+        structs: vec![],
+        enums: vec![],
+        state: vec![LemParam { name: "owner".to_owned(), ty: LemType::Address }],
+        events: vec![],
+        functions: vec![],
+    };
+    let src = emit_lem(&contract);
+    assert!(src.contains("uses Ownable"), "Ownable is a trait, should go in uses: {src}");
+    assert!(!src.contains("implements Ownable"), "Ownable should not be in implements: {src}");
+    parse_lem_src(&src);
+}
+
+#[test]
+fn round_trip_concrete_base_emits_comment_not_extends() {
+    // MF-1 regression: concrete bases must emit as comments, not `extends` (invalid grammar)
+    let contract = LemContract {
+        name: "ChildToken".to_owned(),
+        extends: vec!["ERC20Base".to_owned()],
+        uses: vec![],
+        uses_itoken: false,
+        uses_ownable: false,
+        uses_pausable: false,
+        uses_access_control: false,
+        structs: vec![],
+        enums: vec![],
+        state: vec![],
+        events: vec![],
+        functions: vec![],
+    };
+    let src = emit_lem(&contract);
+    assert!(
+        !src.contains("extends ERC20Base"),
+        "should NOT contain 'extends' in contract header, got:\n{src}"
+    );
+    assert!(
+        !src.contains("uses IToken"),
+        "should NOT contain 'uses IToken' (interfaces go in implements), got:\n{src}"
+    );
+    // Must parse without error
+    parse_lem_src(&src);
+}
+
+#[test]
+fn round_trip_function_with_view_parses() {
+    let contract = LemContract {
+        name: "ViewToken".to_owned(),
+        extends: vec![],
+        uses: vec![],
+        uses_itoken: false,
+        uses_ownable: false,
+        uses_pausable: false,
+        uses_access_control: false,
+        structs: vec![],
+        enums: vec![],
+        state: vec![LemParam { name: "supply".to_owned(), ty: LemType::U128 }],
+        events: vec![],
+        functions: vec![LemFunction {
+            name: "totalSupply".to_owned(),
+            params: vec![],
+            returns: Some(LemType::U128),
+            visibility: LemVisibility::Public,
+            mutability: LemMutability::View,
+            decorators: vec![],
+            body: vec![LemStmt::Return(Some(LemExpr::MemberAccess(
+                Box::new(LemExpr::Ident("self".to_owned())),
+                "supply".to_owned(),
+            )))],
+            kind: LemFunctionKind::Method,
+        }],
+    };
+    let src = emit_lem(&contract);
+    parse_lem_src(&src);
+}
+
+#[test]
+fn round_trip_assert_stmt_parses() {
+    let contract = LemContract {
+        name: "AssertToken".to_owned(),
+        extends: vec![],
+        uses: vec![],
+        uses_itoken: false,
+        uses_ownable: false,
+        uses_pausable: false,
+        uses_access_control: false,
+        structs: vec![],
+        enums: vec![],
+        state: vec![],
+        events: vec![],
+        functions: vec![LemFunction {
+            name: "check".to_owned(),
+            params: vec![LemParam { name: "x".to_owned(), ty: LemType::U128 }],
+            returns: None,
+            visibility: LemVisibility::Public,
+            mutability: LemMutability::Mutable,
+            decorators: vec![],
+            body: vec![LemStmt::Assert {
+                cond: LemExpr::BinaryOp {
+                    op: BinOp::Gt,
+                    left: Box::new(LemExpr::Ident("x".to_owned())),
+                    right: Box::new(LemExpr::IntLit(0)),
+                },
+                msg: "must be positive".to_owned(),
+            }],
+            kind: LemFunctionKind::Method,
+        }],
+    };
+    let src = emit_lem(&contract);
+    parse_lem_src(&src);
+}
+
+#[test]
+fn round_trip_string_with_quotes_escapes_correctly() {
+    // m-1 regression: strings with embedded quotes must be escaped
+    let src = emit_expr(&LemExpr::StringLit("say \"hello\"".to_owned()));
+    assert_eq!(src, r#""say \"hello\"""#, "quotes must be escaped: {src}");
+}
+
+#[test]
+fn round_trip_constructor_emits_fn_init() {
+    let contract = LemContract {
+        name: "InitToken".to_owned(),
+        extends: vec![],
+        uses: vec![],
+        uses_itoken: false,
+        uses_ownable: false,
+        uses_pausable: false,
+        uses_access_control: false,
+        structs: vec![],
+        enums: vec![],
+        state: vec![LemParam { name: "supply".to_owned(), ty: LemType::U128 }],
+        events: vec![],
+        functions: vec![LemFunction {
+            name: "init".to_owned(),
+            params: vec![LemParam { name: "initialSupply".to_owned(), ty: LemType::U128 }],
+            returns: None,
+            visibility: LemVisibility::Public,
+            mutability: LemMutability::Mutable,
+            decorators: vec![],
+            body: vec![LemStmt::Assign {
+                target: LemExpr::MemberAccess(
+                    Box::new(LemExpr::Ident("self".to_owned())),
+                    "supply".to_owned(),
+                ),
+                value: LemExpr::Ident("initialSupply".to_owned()),
+            }],
+            kind: LemFunctionKind::Constructor,
+        }],
+    };
+    let src = emit_lem(&contract);
+    // Lem constructor syntax: `init(params) { }` — keyword form, not `pub fn init`.
+    assert!(src.contains("init(initialSupply"), "constructor should emit as 'init(': {src}");
+    assert!(!src.contains("fn init("), "constructor should NOT use 'fn init': {src}");
+    parse_lem_src(&src);
 }

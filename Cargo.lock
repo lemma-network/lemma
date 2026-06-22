@@ -2520,6 +2520,7 @@ dependencies = [
 name = "lemma-transpiler"
 version = "0.1.0"
 dependencies = [
+ "lemma-lang",
  "serde",
  "serde_json",
  "solang-parser",
