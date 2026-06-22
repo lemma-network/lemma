@@ -633,17 +633,24 @@ pub(crate) fn map_expr(expr: &pt::Expression, warnings: &mut WarningCollector) -
         pt::Expression::ShiftLeft(_, l, r) => map_binop(BinOp::Shl, l, r, warnings),
         pt::Expression::ShiftRight(_, l, r) => map_binop(BinOp::Shr, l, r, warnings),
 
-        // ── Compound assignment ops — expand to Assign + BinOp ───────────────
-        pt::Expression::AssignAdd(_, l, r) => expand_assign_op(BinOp::Add, l, r, warnings),
-        pt::Expression::AssignSubtract(_, l, r) => expand_assign_op(BinOp::Sub, l, r, warnings),
-        pt::Expression::AssignMultiply(_, l, r) => expand_assign_op(BinOp::Mul, l, r, warnings),
-        pt::Expression::AssignDivide(_, l, r) => expand_assign_op(BinOp::Div, l, r, warnings),
-        pt::Expression::AssignModulo(_, l, r) => expand_assign_op(BinOp::Rem, l, r, warnings),
-        pt::Expression::AssignAnd(_, l, r) => expand_assign_op(BinOp::BitAnd, l, r, warnings),
-        pt::Expression::AssignOr(_, l, r) => expand_assign_op(BinOp::BitOr, l, r, warnings),
-        pt::Expression::AssignXor(_, l, r) => expand_assign_op(BinOp::BitXor, l, r, warnings),
-        pt::Expression::AssignShiftLeft(_, l, r) => expand_assign_op(BinOp::Shl, l, r, warnings),
-        pt::Expression::AssignShiftRight(_, l, r) => expand_assign_op(BinOp::Shr, l, r, warnings),
+        // ── Compound assignment ops in expression position ────────────────────
+        // In Lem, compound assigns are statements not expressions. When a compound
+        // assign appears in expression position (e.g. `f(a += 1)`) there is no clean
+        // LemExpr equivalent — emit Raw. The statement mapper handles the common
+        // `Expression(AssignAdd(...))` case via expand_assign_op (which returns LemStmt).
+        pt::Expression::AssignAdd(..)
+        | pt::Expression::AssignSubtract(..)
+        | pt::Expression::AssignMultiply(..)
+        | pt::Expression::AssignDivide(..)
+        | pt::Expression::AssignModulo(..)
+        | pt::Expression::AssignAnd(..)
+        | pt::Expression::AssignOr(..)
+        | pt::Expression::AssignXor(..)
+        | pt::Expression::AssignShiftLeft(..)
+        | pt::Expression::AssignShiftRight(..) => {
+            // TODO(scope): compound-assign-in-expr-position unsupported (rare in ERC-20)
+            LemExpr::Raw("/* compound-assign in expression position */".to_owned())
+        }
 
         // ── Increment / decrement — expand to Assign + BinOp(1) ──────────────
         pt::Expression::PreIncrement(_, e) | pt::Expression::PostIncrement(_, e) => {
@@ -712,22 +719,67 @@ fn map_binop(
     }
 }
 
-/// Expand a compound assignment (`a += b`) into `a = a + b` as a `LemExpr`.
+/// Returns `true` if `expr` is a side-effect-free lvalue: plain identifier,
+/// member access of a pure lvalue, or array subscript with a pure key.
 ///
-/// This is used when the compound assignment appears in expression position.
-/// The statement mapper handles the common `Expression(AssignAdd(...))` case
-/// by calling `map_expr` and wrapping in `LemStmt::Assign`.
+/// Used by [`expand_assign_op`] to guard against double-evaluation of
+/// side-effecting index expressions (e.g. `map[next()] += 1` would call
+/// `next()` twice if naively expanded to `map[next()] = map[next()] + 1`).
+fn is_pure_lvalue(expr: &pt::Expression) -> bool {
+    match expr {
+        pt::Expression::Variable(_) => true,
+        pt::Expression::MemberAccess(_, inner, _) => is_pure_lvalue(inner),
+        pt::Expression::ArraySubscript(_, inner, Some(idx)) => {
+            is_pure_lvalue(inner) && is_pure_expr(idx)
+        }
+        _ => false,
+    }
+}
+
+/// Returns `true` if `expr` is free of side effects (literals, identifiers,
+/// and member/subscript chains over identifiers — no function calls).
+fn is_pure_expr(expr: &pt::Expression) -> bool {
+    match expr {
+        pt::Expression::Variable(_) => true,
+        pt::Expression::MemberAccess(_, inner, _) => is_pure_expr(inner),
+        pt::Expression::NumberLiteral(..) | pt::Expression::BoolLiteral(..) => true,
+        pt::Expression::ArraySubscript(_, inner, Some(idx)) => {
+            is_pure_expr(inner) && is_pure_expr(idx)
+        }
+        _ => false,
+    }
+}
+
+/// Expand a compound assignment (`a op= b`) into `LemStmt::Assign { a = a op b }`.
+///
+/// Guards against double-evaluation: if `left` is not a pure lvalue (e.g.
+/// `map[side_effect()]`), falls back to `LemStmt::Raw` with an explanatory
+/// comment rather than silently evaluating the index expression twice.
+///
+/// Called for ALL compound-assign operators (Add, Sub, Mul, Div, Rem, and
+/// bitwise/shift) from both expression-position and statement-position paths,
+/// keeping the logic DRY (AGENTS §2, M3 fix).
 fn expand_assign_op(
     op: BinOp,
     left: &pt::Expression,
     right: &pt::Expression,
     warnings: &mut WarningCollector,
-) -> LemExpr {
-    // a op= b → a op b (the Assign wrapper is added by the stmt mapper)
-    LemExpr::BinaryOp {
-        op,
-        left: Box::new(map_expr(left, warnings)),
-        right: Box::new(map_expr(right, warnings)),
+) -> LemStmt {
+    if !is_pure_lvalue(left) {
+        // Complex lvalue (e.g. `map[fn_call()] += n`): expanding to
+        // `map[fn_call()] = map[fn_call()] + n` would evaluate fn_call() twice,
+        // diverging from Solidity semantics. Emit Raw to preserve correctness.
+        return LemStmt::Raw(format!(
+            "// compound-assign on complex lvalue: manual expansion needed ({op:?})"
+        ));
+    }
+    LemStmt::Assign {
+        target: map_expr(left, warnings),
+        value: LemExpr::BinaryOp {
+            op,
+            left: Box::new(map_expr(left, warnings)),
+            right: Box::new(map_expr(right, warnings)),
+        },
     }
 }
 
@@ -899,8 +951,15 @@ fn expr_kind_name(expr: &pt::Expression) -> &'static str {
 /// Map a slice of Solidity statements to a `Vec<LemStmt>`.
 ///
 /// This is the canonical entry point for mapping function bodies.
+/// Nested blocks (including `unchecked {}`) are **flattened** into the parent
+/// body via [`map_stmt_to_vec`], so multi-statement blocks never lose their
+/// contents (M2 fix: calling `map_stmt` on a Block dropped all but the first
+/// statement when there were ≥2 inner statements).
 pub(crate) fn map_body(stmts: &[pt::Statement], warnings: &mut WarningCollector) -> Vec<LemStmt> {
-    stmts.iter().map(|s| map_stmt(s, warnings)).collect()
+    stmts
+        .iter()
+        .flat_map(|s| map_stmt_to_vec(s, warnings))
+        .collect()
 }
 
 /// Map a single Solidity statement to a [`LemStmt`].
@@ -1093,47 +1152,23 @@ fn map_expr_stmt(expr: &pt::Expression, warnings: &mut WarningCollector) -> LemS
             value: map_expr(r, warnings),
         },
 
-        // `a += b` → Assign { target: a, value: a + b }
-        pt::Expression::AssignAdd(_, l, r) => LemStmt::Assign {
-            target: map_expr(l, warnings),
-            value: LemExpr::BinaryOp {
-                op: BinOp::Add,
-                left: Box::new(map_expr(l, warnings)),
-                right: Box::new(map_expr(r, warnings)),
-            },
-        },
-        pt::Expression::AssignSubtract(_, l, r) => LemStmt::Assign {
-            target: map_expr(l, warnings),
-            value: LemExpr::BinaryOp {
-                op: BinOp::Sub,
-                left: Box::new(map_expr(l, warnings)),
-                right: Box::new(map_expr(r, warnings)),
-            },
-        },
-        pt::Expression::AssignMultiply(_, l, r) => LemStmt::Assign {
-            target: map_expr(l, warnings),
-            value: LemExpr::BinaryOp {
-                op: BinOp::Mul,
-                left: Box::new(map_expr(l, warnings)),
-                right: Box::new(map_expr(r, warnings)),
-            },
-        },
-        pt::Expression::AssignDivide(_, l, r) => LemStmt::Assign {
-            target: map_expr(l, warnings),
-            value: LemExpr::BinaryOp {
-                op: BinOp::Div,
-                left: Box::new(map_expr(l, warnings)),
-                right: Box::new(map_expr(r, warnings)),
-            },
-        },
-        pt::Expression::AssignModulo(_, l, r) => LemStmt::Assign {
-            target: map_expr(l, warnings),
-            value: LemExpr::BinaryOp {
-                op: BinOp::Rem,
-                left: Box::new(map_expr(l, warnings)),
-                right: Box::new(map_expr(r, warnings)),
-            },
-        },
+        // `a op= b` → expand_assign_op (DRY: all compound-assign ops share one path,
+        // including bitwise/shift which were missing before M3 fix). Pure-lvalue guard
+        // prevents double-evaluation on side-effecting index expressions (M1 fix).
+        pt::Expression::AssignAdd(_, l, r) => expand_assign_op(BinOp::Add, l, r, warnings),
+        pt::Expression::AssignSubtract(_, l, r) => expand_assign_op(BinOp::Sub, l, r, warnings),
+        pt::Expression::AssignMultiply(_, l, r) => expand_assign_op(BinOp::Mul, l, r, warnings),
+        pt::Expression::AssignDivide(_, l, r) => expand_assign_op(BinOp::Div, l, r, warnings),
+        pt::Expression::AssignModulo(_, l, r) => expand_assign_op(BinOp::Rem, l, r, warnings),
+        // Bitwise/shift compound-assigns (missing before M3 fix — fell through to
+        // bare BinOp without Assign wrapper, silently dropping the write):
+        pt::Expression::AssignAnd(_, l, r) => expand_assign_op(BinOp::BitAnd, l, r, warnings),
+        pt::Expression::AssignOr(_, l, r) => expand_assign_op(BinOp::BitOr, l, r, warnings),
+        pt::Expression::AssignXor(_, l, r) => expand_assign_op(BinOp::BitXor, l, r, warnings),
+        pt::Expression::AssignShiftLeft(_, l, r) => expand_assign_op(BinOp::Shl, l, r, warnings),
+        pt::Expression::AssignShiftRight(_, l, r) => {
+            expand_assign_op(BinOp::Shr, l, r, warnings)
+        }
 
         // `i++` / `++i` as statement → `i = i + 1`
         pt::Expression::PreIncrement(_, e) | pt::Expression::PostIncrement(_, e) => {

@@ -1060,3 +1060,83 @@ fn map_contract_function_bodies_not_empty() {
         transfer.body[3]
     );
 }
+
+// ── CR Gate 3 must-fix regression tests ──────────────────────────────────────
+// M1: double-eval guard on compound-assign lvalue
+// M2: multi-statement unchecked/nested block body preservation
+// M3: bitwise/shift compound-assign emits Assign (not bare BinOp)
+
+#[test]
+fn compound_assign_pure_lvalue_expands_to_assign() {
+    // `x += 1` where x is a plain ident → LemStmt::Assign { x, x + 1 }
+    let stmts = parse_function_body("function f() public { uint256 x = 0; x += 1; }");
+    let mut w = WarningCollector::new();
+    // stmts[0] is VariableDefinition; stmts[1] is the += assignment
+    let stmt = map_stmt(&stmts[1], &mut w);
+    assert!(
+        matches!(&stmt, LemStmt::Assign { .. }),
+        "pure-lvalue compound assign should produce Assign, got: {stmt:?}"
+    );
+}
+
+#[test]
+fn compound_assign_complex_lvalue_emits_raw() {
+    // `_balances[next()] += 1` — complex index (function call) → Raw, not double-eval
+    // We simulate this by parsing a mapping subscript with a function call as index.
+    let stmts =
+        parse_function_body("function f() public { mapping(address => uint256) storage m; m[next()] += 1; }");
+    let mut w = WarningCollector::new();
+    // Last stmt is the compound assign on a complex lvalue
+    let stmt = map_stmt(stmts.last().expect("at least one stmt"), &mut w);
+    // Must be Raw (not Assign with double-eval)
+    assert!(
+        matches!(&stmt, LemStmt::Raw(_)),
+        "complex-lvalue compound assign should degrade to Raw, got: {stmt:?}"
+    );
+}
+
+#[test]
+fn multi_stmt_unchecked_block_body_survives() {
+    // M2: `unchecked { a = 1; b = 2; }` — both statements must survive in the body.
+    let stmts = parse_function_body(
+        r#"function f() public {
+            uint256 a; uint256 b;
+            unchecked { a = 1; b = 2; }
+        }"#,
+    );
+    let mut w = WarningCollector::new();
+    let body = map_body(&stmts, &mut w);
+    // The unchecked block should be flattened into the parent body.
+    // Expect: Let(a), Let(b), Assign(a=1), Assign(b=2) — 4 statements total.
+    assert!(
+        body.len() >= 4,
+        "unchecked block body should be flattened (got {} stmts): {body:?}",
+        body.len()
+    );
+    // W003 must be emitted
+    assert_eq!(w.finish().len(), 1, "exactly one W003 warning expected");
+}
+
+#[test]
+fn bitwise_compound_assign_in_stmt_position_emits_assign() {
+    // M3: `x &= mask` in statement position should produce Assign, not bare BinOp.
+    let stmts = parse_function_body("function f() public { uint256 x = 0xFF; x &= 0x0F; }");
+    let mut w = WarningCollector::new();
+    // stmts[0] = VariableDefinition; stmts[1] = compound-assign statement
+    let stmt = map_stmt(&stmts[1], &mut w);
+    assert!(
+        matches!(&stmt, LemStmt::Assign { .. }),
+        "bitwise &= should produce Assign in stmt position, got: {stmt:?}"
+    );
+}
+
+#[test]
+fn shift_compound_assign_in_stmt_position_emits_assign() {
+    let stmts = parse_function_body("function f() public { uint256 x = 1; x <<= 3; }");
+    let mut w = WarningCollector::new();
+    let stmt = map_stmt(&stmts[1], &mut w);
+    assert!(
+        matches!(&stmt, LemStmt::Assign { .. }),
+        "shift <<= should produce Assign in stmt position, got: {stmt:?}"
+    );
+}
