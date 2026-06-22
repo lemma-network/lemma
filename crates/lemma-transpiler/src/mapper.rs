@@ -51,8 +51,11 @@ const ACCESS_CONTROL_MODIFIERS: &[&str] = &["onlyRole"];
 
 /// Solidity event parameter name that Lem renames to `amount` (IToken convention, spec §13).
 const SOLIDITY_VALUE_PARAM: &str = "value";
-/// Lem canonical name for token transfer amounts.
 const LEM_AMOUNT_PARAM: &str = "amount";
+/// Events for which `value` → `amount` is applied (IToken spec §13).
+/// Only Transfer and Approval carry a token amount named `value` in Solidity's IERC20.
+/// Renaming unconditionally would corrupt other events (e.g. `event Bid(..., uint256 value)`).
+const ITOKEN_VALUE_EVENTS: &[&str] = &["Transfer", "Approval"];
 
 // ── Type mapping ──────────────────────────────────────────────────────────────
 
@@ -402,9 +405,12 @@ pub(crate) fn map_event(def: &pt::EventDefinition) -> LemEvent {
         .enumerate()
         .map(|(i, field)| {
             let raw_name = field.name.as_ref().map(|id| id.name.as_str()).unwrap_or("");
-            // Rename `value` → `amount` per IToken convention (spec §13).
-            // Anonymous params get positional fallback names.
-            let name = if raw_name == SOLIDITY_VALUE_PARAM {
+            // Rename `value` → `amount` ONLY for IToken standard events (Transfer/Approval).
+            // Other events with a `value` field (e.g. `event Bid(address, uint256 value)`)
+            // keep their field name unchanged — DB-A59 scope (see decisions-log).
+            let name = if raw_name == SOLIDITY_VALUE_PARAM
+                && ITOKEN_VALUE_EVENTS.contains(&name.as_str())
+            {
                 LEM_AMOUNT_PARAM.to_owned()
             } else if raw_name.is_empty() {
                 format!("param{i}")
