@@ -16,6 +16,7 @@
 //! ```
 
 pub mod lem_ir;
+mod mapper;
 mod sol_parser;
 pub mod warnings;
 
@@ -66,15 +67,32 @@ pub fn transpile(sol_source: &str) -> Result<TranspileResult, TranspileError> {
     let contract_name = sol_parser::extract_primary_contract_name(&source_unit)
         .ok_or(TranspileError::NoContractFound)?;
 
-    // Mapper (Batch 2) and codegen (Batch 4) will replace this placeholder.
-    // The placeholder emits a minimal valid comment so the result is non-empty
-    // and the contract_name is correct for downstream consumers.
+    // Find the primary contract definition to pass to the mapper.
+    let contract_def = source_unit
+        .0
+        .iter()
+        .find_map(|part| {
+            if let solang_parser::pt::SourceUnitPart::ContractDefinition(def) = part {
+                if def.name.as_ref().map(|n| n.name.as_str()) == Some(contract_name.as_str()) {
+                    return Some(def.as_ref());
+                }
+            }
+            None
+        })
+        .ok_or(TranspileError::NoContractFound)?;
+
+    let mut warnings_col = warnings::WarningCollector::new();
+    // Batch 2: map Solidity AST → Lem IR (declarations only; bodies empty).
+    let _ir = mapper::map_contract(contract_def, &mut warnings_col);
+    let warnings = warnings_col.finish();
+
+    // Codegen (Batch 4) will replace this placeholder with real Lem source.
     let lem_source =
         format!("// Transpiled from Solidity by lemma-transpiler\n// Contract: {contract_name}\n");
 
     Ok(TranspileResult {
         lem_source,
-        warnings: Vec::new(),
+        warnings,
         contract_name,
     })
 }
