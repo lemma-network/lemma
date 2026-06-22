@@ -188,8 +188,14 @@ impl<'a> TypedContract<'a> {
         None
     }
 
-    /// All functions declared by this contract (including modifiers, receive,
-    /// and fallback — but NOT init, which is a regular function named `init`).
+    /// All regular functions declared by this contract — **excluding** modifiers,
+    /// `init`, receive, and fallback.
+    ///
+    /// - Modifiers: use `modifiers()`. `ModifierDef` has no `annotations` field,
+    ///   so agent annotations (`@cosignRequired`, `@anomalyGuard`) cannot appear
+    ///   on modifiers — the parser does not allow it. WF-017/018 need not check them.
+    /// - `init`: excluded from this iterator. Modifiers, receive, and fallback are
+    ///   separate `ContractMember` variants and are NOT returned here.
     ///
     /// Returns [`ContractFunction`] views in declaration order.
     #[must_use]

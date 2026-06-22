@@ -3865,19 +3865,27 @@ fn check_wf016_agent_callable_annotation(contract: &TypedContract<'_>) -> Vec<Ty
             };
 
             // Rule 3: maxValueOut must be an integer literal.
+            //
+            // Constant identifiers (e.g. `@agentCallable(maxValueOut: MY_CONST)`) are
+            // NOT accepted — annotation arg expressions are not in function-body scope
+            // and are not typed by the inferer, so `contract.type_of()` returns None for
+            // them. Accepting only literal values is the correct MVP posture: the SAFETY-014
+            // rule verifies the cap at the AST level, and the Warden runtime enforces it at
+            // execution time. Use a literal: `@agentCallable(maxValueOut: 1_000_000)`.
             if !is_integer_literal(expr) {
                 violations.push(TypeError {
                     kind: TypeErrorKind::InvalidAgentCallableAnnotation {
                         func: func.name.to_owned(),
-                        reason: "maxValueOut must be an integer expression \
-                                 (literal or integer constant)"
+                        reason: "maxValueOut must be an integer literal \
+                                 (e.g. @agentCallable(maxValueOut: 1_000_000)); \
+                                 constant identifiers are not accepted in annotation args"
                             .to_owned(),
                         span: ann.span,
                     },
                     span: ann.span,
                     message: format!(
                         "WF-016 @agentCallable annotation on `{}`: maxValueOut must be an \
-                         integer expression (literal or integer constant)",
+                         integer literal — constant identifiers not accepted in annotation args",
                         func.name
                     ),
                 });
@@ -3894,9 +3902,11 @@ fn check_wf016_agent_callable_annotation(contract: &TypedContract<'_>) -> Vec<Ty
 ///
 /// Requirements:
 /// - Must be on a `pub` or `external` function (session-key-reachable paths).
-/// - `TypedContract::functions()` already excludes `init` (it is a regular
-///   function named "init" but the WF-003 check handles init-specific rules).
-///   We additionally skip `init` here to avoid double-reporting.
+/// - `TypedContract::functions()` excludes modifiers, receive, and fallback
+///   (separate `ContractMember` variants). `ModifierDef` has no `annotations`
+///   field — the parser does not allow annotations on modifiers, so `@cosignRequired`
+///   cannot appear there. No explicit modifier check is needed here.
+/// - We additionally skip `init` to avoid double-reporting with WF-003.
 ///
 /// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-018` and
 /// `docs/14-AGENT_LAYER §2.3.4`.
@@ -3944,7 +3954,10 @@ fn check_wf017_cosign_required_placement(contract: &TypedContract<'_>) -> Vec<Ty
 ///
 /// Requirements:
 /// - Must be on a function returning `bool` (it is a predicate, not a void action).
-/// - `TypedContract::functions()` excludes `init` — only check return type.
+/// - `TypedContract::functions()` excludes modifiers, receive, and fallback.
+///   `ModifierDef` has no `annotations` field — the parser does not allow
+///   `@anomalyGuard` on modifiers, so no explicit modifier check is needed.
+/// - We skip `init` to avoid double-reporting with WF-003.
 ///
 /// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-019` and
 /// `docs/14-AGENT_LAYER §2.3.5`.
@@ -3991,12 +4004,17 @@ fn check_wf018_anomaly_guard_placement(contract: &TypedContract<'_>) -> Vec<Type
 
 /// Returns `true` if `expr` is a numeric literal node at the AST level.
 ///
-/// Used for WF-016 `maxValueOut` validation: annotation arg expressions are not
-/// fully typed by the inferer in Phase 3 (they are not part of the function body),
-/// so we fall back to an AST-level literal check rather than the type table.
+/// Used for WF-016 `maxValueOut` validation. Annotation arg expressions are NOT
+/// part of a function body and are NOT typed by the inferer — `contract.type_of()`
+/// returns `None` for them. We therefore use an AST-level literal check.
 ///
-/// Accepts: `Int`, `IntTyped`, `Hex`, `Bin` literals — all integer forms.
-/// Rejects: `Str`, `Bool`, `Float`, `Char`, `Address`, `Unit`, and all non-literal exprs.
+/// **Constant identifiers are intentionally rejected**: `@agentCallable(maxValueOut: MY_CONST)`
+/// where `MY_CONST` is a declared const is represented as `Expr::Ident`, which does not match
+/// any variant below. This is the correct MVP posture — use a literal value directly.
+///
+/// Accepts: `Int`, `IntTyped`, `Hex`, `Bin` literals — all compile-time integer forms.
+/// Rejects: `Str`, `Bool`, `Float`, `Char`, `Address`, `Unit`, identifiers, and all
+///          non-literal expressions (including constant references).
 fn is_integer_literal(expr: &Expr) -> bool {
     use crate::parser::Literal;
     matches!(

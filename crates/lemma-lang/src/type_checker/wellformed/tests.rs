@@ -2262,6 +2262,32 @@ fn check_wf016_agent_callable_bool_max_value_out_fails() {
     );
 }
 
+#[test]
+fn check_wf016_agent_callable_const_ident_max_value_out_fails() {
+    // (neg/M3) @agentCallable(maxValueOut: MY_CONST) — constant identifier, not a literal.
+    // Annotation args are not in function scope; the inferer does not type them.
+    // Only integer literals are accepted — constant references are rejected.
+    assert_wf_error(
+        r#"
+        contract Agent {
+            state { balance: u128 = 0 }
+            @agentCallable(maxValueOut: MAX_CAP)
+            pub fn withdraw() {
+                self.balance = 0
+            }
+        }
+        "#,
+        |kind| {
+            matches!(
+                kind,
+                TypeErrorKind::InvalidAgentCallableAnnotation { func, reason, .. }
+                    if func == "withdraw"
+                    && reason.contains("integer literal")
+            )
+        },
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // WF-017: @cosignRequired placement validation
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2423,5 +2449,56 @@ fn check_wf018_anomaly_guard_on_u128_fn_fails() {
                     if func == "getBalance"
             )
         },
+    );
+}
+
+// ─── M4: Modifier annotation enforcement (design-constraint documentation) ────
+//
+// `ModifierDef` in the Lem parser has no `annotations` field — annotations cannot
+// be placed on modifiers syntactically. Therefore `@cosignRequired` / `@anomalyGuard`
+// on a modifier is a **parse error**, not a WF error. WF-017/018 only run on
+// `contract.functions()`, which excludes modifiers (separate ContractMember variants).
+//
+// These tests document the enforced invariant: the parser prevents the malformed form.
+
+#[test]
+fn check_wf017_cosign_on_modifier_is_parse_error_not_wf_error() {
+    // (M4/neg) @cosignRequired on a modifier — this is a parse error.
+    // The Lem parser does not allow annotations on modifier definitions.
+    // A Lem modifier body starts with `modifier name(params) { ... }` — no
+    // annotation prefix is parseable there, so this is caught before WF runs.
+    // This test verifies the parse fails cleanly (not a WF error).
+    let src = r#"
+    contract C {
+        state { owner: Address }
+        @cosignRequired
+        modifier onlySigned() { _ }
+    }
+    "#;
+    let tokens = crate::tokenize(src).expect("tokenize");
+    // Parse must fail — modifier definitions don't accept annotation prefixes.
+    // (If the grammar ever adds annotations to modifiers, WF-017 must be extended.)
+    let result = crate::parse(tokens);
+    assert!(
+        result.is_err(),
+        "@cosignRequired on a modifier must be caught at parse time, not WF"
+    );
+}
+
+#[test]
+fn check_wf018_anomaly_guard_on_modifier_is_parse_error_not_wf_error() {
+    // (M4/neg) @anomalyGuard on a modifier — same parse-level enforcement.
+    let src = r#"
+    contract C {
+        state { bal: u128 = 0 }
+        @anomalyGuard
+        modifier guarded() { _ }
+    }
+    "#;
+    let tokens = crate::tokenize(src).expect("tokenize");
+    let result = crate::parse(tokens);
+    assert!(
+        result.is_err(),
+        "@anomalyGuard on a modifier must be caught at parse time, not WF"
     );
 }

@@ -417,11 +417,13 @@ pub enum TypeErrorKind {
     // These are emitted by `type_checker::wellformed::check_family_e` (P3·Step 12).
     // The pass runs as Family E within the WF pass, after Family D.
     /// WF-016 — `@agentCallable` carries an invalid argument list: missing
-    /// `maxValueOut` named argument, non-integer `maxValueOut`, or uses
+    /// `maxValueOut` named argument, non-integer-literal `maxValueOut`, or uses
     /// positional args instead of named.
     ///
-    /// `@agentCallable` must carry `maxValueOut: <integer-expr>` — this WF rule
-    /// enforces the arg shape before the safety analyzer runs.
+    /// `@agentCallable` must carry `maxValueOut: <integer-literal>` (e.g.
+    /// `@agentCallable(maxValueOut: 1_000_000)`). Constant identifiers are NOT
+    /// accepted — annotation arg expressions are not in a function body and are not
+    /// typed by the inferer; use a literal value directly.
     ///
     /// See `docs/09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-014` for the spec requirement.
     InvalidAgentCallableAnnotation {
