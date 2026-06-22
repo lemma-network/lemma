@@ -33,3 +33,6 @@ pub(crate) mod launch;
 
 // Batch 4 (4g): sell-path external-veto rule (SAFETY-025).
 pub(crate) mod sell_path_veto;
+
+// Phase 3 Track C (P3·Step 11): agent-safety rules (SAFETY-014..019).
+pub(crate) mod agent;

@@ -22,6 +22,7 @@
 //!   tax.rs             — SAFETY-020/021/022  (4f-tax, TaxToken fee-model rules)
 //!   launch.rs          — SAFETY-023/024 + P3-own-3 (a)(c)  (4f-launch)
 //!   sell_path_veto.rs  — SAFETY-025  (4g, sell-path external-call revert veto)
+//!   agent.rs           — SAFETY-014..019  (P3·Step 11, agent-safety rules)
 //! ```
 //!
 //! Note: SAFETY-013 (ticker registration) retired per decision DB-A48 —
@@ -48,6 +49,8 @@ use super::rules;
 /// **Batch 3 (4f-tax)**: SAFETY-020, SAFETY-021, SAFETY-022 (TaxToken fee-model) — active.
 /// **Batch 3 (4f-launch)**: SAFETY-023 (maxWallet) + P3-own-3 (a)(c) — active. SAFETY-024 RETIRED (DB-A57).
 /// **Batch 4 (4g)**: SAFETY-025 (sell-path external-call revert veto) — active.
+/// **P3·Step 11**: SAFETY-015 (policy-mutation owner-gating), SAFETY-016 (no agent re-grant) — active.
+///   SAFETY-014/017 (stubs — Batch 2), SAFETY-018/019 (stubs — Batch 3).
 /// SAFETY-013 retired per decision DB-A48 (auto-injected by codegen).
 ///
 /// ## Caller
@@ -90,6 +93,15 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     // Batch 4 (4g): sell-path external-call revert veto.
     // SAFETY-025: any external call on the transfer path must be try-wrapped.
     violations.extend(rules::sell_path_veto::check(contract)); // SAFETY-025
+
+    // Phase 3 Track C (P3·Step 11): agent-safety rules.
+    // SAFETY-014: @agentCallable bounded effects (stub — Batch 2).
+    // SAFETY-015: policy-mutation functions must be @onlyOwner-gated.
+    // SAFETY-016: @agentCallable functions must not call grant functions.
+    // SAFETY-017: kill-switch honored (stub — Batch 2).
+    // SAFETY-018: co-sign threshold integrity (stub — Batch 3).
+    // SAFETY-019: deterministic anomaly inputs (stub — Batch 3).
+    violations.extend(rules::agent::check(contract)); // SAFETY-014..019
 
     if violations.is_empty() {
         Ok(())

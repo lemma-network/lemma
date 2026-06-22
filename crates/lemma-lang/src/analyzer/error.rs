@@ -319,6 +319,102 @@ pub enum SafetyError {
         func: String,
     },
 
+    // ── SAFETY-014 — Agent-callable bounded effects ───────────────────────────
+    /// An `@agentCallable` function has value outflow the analyzer cannot prove
+    /// is bounded by the declared `maxValueOut` cap, or the annotation is missing
+    /// the required `maxValueOut` argument.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-014`.
+    #[error(
+        "SAFETY-014 agent outflow unbounded: `{func}` is @agentCallable but value \
+         outflow cannot be proven ≤ declared cap — {reason}"
+    )]
+    AgentOutflowUnbounded {
+        /// The @agentCallable function with unprovable outflow.
+        func: String,
+        /// Human-readable reason (e.g. "unbounded transfer loop", "missing maxValueOut").
+        reason: String,
+    },
+
+    // ── SAFETY-015 — Policy-mutation owner-gating ─────────────────────────────
+    /// A function that creates or widens an `AgentPolicy` is not gated by
+    /// `@onlyOwner`, meaning a session key could reach it.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-015`.
+    #[error(
+        "SAFETY-015 agent policy self-escalation: `{func}` modifies agent policy \
+         but is not @onlyOwner — session keys must not widen their own authority"
+    )]
+    AgentPolicySelfEscalation {
+        /// The policy-mutation function that lacks owner gating.
+        func: String,
+    },
+
+    // ── SAFETY-016 — No agent re-grant ────────────────────────────────────────
+    /// A session-key-reachable path (from an `@agentCallable` function) calls
+    /// `grantAgent` — authority laundering through nested agents.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-016`.
+    #[error(
+        "SAFETY-016 agent re-grant: `{caller}` is @agentCallable and calls `{callee}` \
+         — session keys cannot grant session keys (no delegation chains)"
+    )]
+    AgentReGrant {
+        /// The @agentCallable function that makes the grant call.
+        caller: String,
+        /// The grant function being called.
+        callee: String,
+    },
+
+    // ── SAFETY-017 — Kill-switch honored ──────────────────────────────────────
+    /// An agent-entry function bypasses the Warden gate — not all `@agentCallable`
+    /// paths are dominated by the kill-switch (`agents_paused`) check.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-017`.
+    #[error(
+        "SAFETY-017 agent gate bypassed: `{func}` is reachable by agents but does \
+         not carry the @agentCallable annotation — hand-rolled agent entries are rejected"
+    )]
+    AgentGateBypassed {
+        /// The function that is agent-accessible without the required annotation.
+        func: String,
+    },
+
+    // ── SAFETY-018 — Co-sign threshold integrity ──────────────────────────────
+    /// A co-sign-gated action can be satisfied by a session key or agent-controlled
+    /// key rather than the owner key, defeating the human-in-the-loop step-up.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-018`.
+    #[error(
+        "SAFETY-018 agent cosign forgeable: `{func}` performs a co-signed action \
+         but the co-signer is not verified to be the owner key — \
+         co-sign must verify against the owner, not a session key"
+    )]
+    AgentCosignForgeable {
+        /// The function with a forgeable co-sign.
+        func: String,
+    },
+
+    // ── SAFETY-019 — Deterministic anomaly inputs ─────────────────────────────
+    /// An anomaly or auto-revoke predicate reads a non-deterministic input
+    /// (external call, system time, RNG, off-chain data) — would fork consensus.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3-bis SAFETY-019`.
+    #[error(
+        "SAFETY-019 agent anomaly non-deterministic: `{func}` is an anomaly/auto-revoke \
+         predicate but reads non-deterministic input `{input}` — \
+         predicates must use committed on-chain state only"
+    )]
+    AgentAnomalyNonDeterministic {
+        /// The anomaly-predicate function with a non-deterministic input.
+        func: String,
+        /// Description of the non-deterministic input found.
+        ///
+        /// Named `input` (not `source`) to avoid conflict with `thiserror`'s
+        /// reserved `source` field name used for error chaining.
+        input: String,
+    },
+
     // ── Inconclusive ──────────────────────────────────────────────────────────
     /// Analysis is inconclusive for a sound rule: the contract cannot be
     /// *proven* safe, so it is **rejected** (soundness over completeness).
