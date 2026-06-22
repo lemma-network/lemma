@@ -239,3 +239,100 @@ let _ = self.grantAgentPolicy(agent)
         "@agentCallable calling grantAgentPolicy must emit AgentReGrant; got {violations:?}"
     );
 }
+
+// ─── MF-4: Reachability + Ident arm tests (CR Gate 1 fixes) ──────────────────
+
+#[test]
+fn safety015_indirect_policy_mutation_via_agent_path_is_flagged() {
+    // @agentCallable → helper() → grantAgent (without @onlyOwner).
+    // SAFETY-015 must detect this via transitive reachability (not just direct body).
+    let ast = typed_ast(
+        r#"contract C {
+state { owner: Address }
+init(owner: Address) {
+self.owner = owner
+}
+pub fn grantAgent(agent: Address) {
+let _ = agent
+}
+fn helper(agent: Address) {
+let _ = self.grantAgent(agent)
+}
+@agentCallable
+pub fn agentEntry(agent: Address) {
+let _ = self.helper(agent)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::AgentPolicySelfEscalation { func, .. } if func == "grantAgent")),
+        "transitive policy mutation via @agentCallable must emit AgentPolicySelfEscalation; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety016_transitive_grant_via_helper_is_flagged() {
+    // @agentCallable → helper() → grantAgent.
+    // SAFETY-016 must detect this via transitive reachability.
+    let ast = typed_ast(
+        r#"contract C {
+state { owner: Address }
+init(owner: Address) {
+self.owner = owner
+}
+@onlyOwner
+pub fn grantAgent(agent: Address) {
+let _ = agent
+}
+fn doGrant(agent: Address) {
+let _ = self.grantAgent(agent)
+}
+@agentCallable
+pub fn agentEntry(agent: Address) {
+let _ = self.doGrant(agent)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::AgentReGrant { caller, .. } if caller == "agentEntry")),
+        "transitive re-grant via helper must emit AgentReGrant; got {violations:?}"
+    );
+}
+
+#[test]
+fn safety016_bare_grant_call_ident_arm_is_flagged() {
+    // `grantAgent(agent)` — bare Ident call (not self.grantAgent), exercises Ident arm
+    // of extract_call_name.
+    let ast = typed_ast(
+        r#"contract C {
+state { owner: Address }
+init(owner: Address) {
+self.owner = owner
+}
+pub fn grantAgent(agent: Address) {
+let _ = agent
+}
+@agentCallable
+pub fn agentEntry(agent: Address) {
+let _ = grantAgent(agent)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = agent_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::AgentReGrant { caller, callee }
+                if caller == "agentEntry" && callee == "grantAgent")),
+        "bare grantAgent(agent) call (Ident arm) must emit AgentReGrant; got {violations:?}"
+    );
+}
