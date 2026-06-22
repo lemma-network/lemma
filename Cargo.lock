@@ -2443,6 +2443,7 @@ dependencies = [
  "dashmap",
  "lemma-core",
  "lemma-crypto",
+ "lemma-lang",
  "proptest",
  "rayon",
  "serde",

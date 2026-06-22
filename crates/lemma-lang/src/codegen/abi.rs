@@ -248,6 +248,80 @@ pub(crate) const IMPORT_ORDER: &[&str] = &[
 /// correct when new imports are appended.
 pub(crate) const HOST_IMPORT_COUNT: u32 = IMPORT_ORDER.len() as u32;
 
+// ── Host function index constants ─────────────────────────────────────────────
+//
+// These constants derive the WASM function index of each cross-contract call
+// host function from its position in IMPORT_ORDER. Using named constants here
+// instead of magic integers (AGENTS §3.3) ensures that if IMPORT_ORDER is ever
+// extended, the indices stay in sync automatically.
+//
+// The `position()` call is O(n) at runtime but n=17 — negligible. The compiler
+// may constant-fold these at compile time since IMPORT_ORDER is a `const`.
+
+/// WASM function index for `call_contract` — derived from IMPORT_ORDER position.
+///
+/// Replaces the magic literal `14` in cross-contract call lowering (AGENTS §3.3).
+/// If IMPORT_ORDER is reordered (an ABI break), this constant updates automatically.
+pub(crate) const CALL_CONTRACT_INDEX: u32 = {
+    let mut i = 0u32;
+    while i < IMPORT_ORDER.len() as u32 {
+        if const_str_eq(IMPORT_ORDER[i as usize], host_fn::CALL_CONTRACT) {
+            break;
+        }
+        i += 1;
+    }
+    i
+};
+
+/// WASM function index for `static_call` — derived from IMPORT_ORDER position.
+///
+/// Replaces the magic literal `15` in cross-contract call lowering (AGENTS §3.3).
+pub(crate) const STATIC_CALL_INDEX: u32 = {
+    let mut i = 0u32;
+    while i < IMPORT_ORDER.len() as u32 {
+        if const_str_eq(IMPORT_ORDER[i as usize], host_fn::STATIC_CALL) {
+            break;
+        }
+        i += 1;
+    }
+    i
+};
+
+/// WASM function index for `delegate_call` — derived from IMPORT_ORDER position.
+///
+/// Replaces the magic literal `16` in cross-contract call lowering (AGENTS §3.3).
+pub(crate) const DELEGATE_CALL_INDEX: u32 = {
+    let mut i = 0u32;
+    while i < IMPORT_ORDER.len() as u32 {
+        if const_str_eq(IMPORT_ORDER[i as usize], host_fn::DELEGATE_CALL) {
+            break;
+        }
+        i += 1;
+    }
+    i
+};
+
+/// Const-compatible byte-by-byte string equality helper.
+///
+/// Rust's `const fn` context does not support `==` on `&str` directly (as of
+/// stable Rust 1.78). This helper provides a const-evaluable comparison used
+/// only in the index constant initialisers above.
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 // ── ABI descriptor emission (P3·Step 6i) ─────────────────────────────────────
 
 use serde::Serialize;

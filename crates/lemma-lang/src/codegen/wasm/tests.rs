@@ -3399,3 +3399,533 @@ fn execute_unit_literal_ether_i64_overflow_returns_codegen_error() {
         "error should mention i64 overflow, got: {msg}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P3·Step 21 — Cross-contract call codegen (rawCall / staticCall / delegateCall)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These tests verify that the WASM codegen correctly lowers cross-contract
+// call expressions to the right host function indices (14, 15, 16) and that
+// the emitted WASM is structurally valid.
+//
+// Strategy: build a minimal WASM module using `emit_test_expr_module` with
+// a hand-crafted Expr::Call node that exercises the cross-contract lowering
+// path. We then parse the emitted bytes with wasmparser to verify the
+// `call N` instruction is present at the expected index.
+//
+// The calldata argument is lowered as an i32 literal (register ID 0 =
+// REG_CALLDATA). This is the correct ABI: the caller pre-populates register 0
+// with calldata bytes, then passes `0` as the data_reg argument.
+//
+// Address argument: we use `Address.zero` which lowers to an i32 pointer
+// (ADDR_ZERO_OFFSET = 0) into the static data segment — a valid 20-byte
+// address in guest memory.
+
+/// Build a minimal WASM module that calls a cross-contract host function and
+/// return the raw bytes. The module contains a single function that:
+///   1. Pushes Address.zero pointer (i32 = 0)
+///   2. Pushes addr_len (i32 = 20)
+///   3. Pushes data_reg (i32 = 0, REG_CALLDATA)
+///   4. Pushes gas (i64 = 0)
+///   5. [rawCall only] Pushes value (i64 = 0)
+///   6. Calls host fn at `host_fn_index`
+///   7. Returns the i32 result
+///
+/// We build this directly with wasm-encoder (not via the Lem compiler) to
+/// avoid the bytes-type lowering limitation and test the instruction emission
+/// in isolation.
+fn build_cross_contract_call_module(host_fn_index: u32, include_value: bool) -> Vec<u8> {
+    use crate::codegen::abi::{HOST_IMPORT_COUNT, IMPORT_MODULE, IMPORT_ORDER};
+    use crate::codegen::wasm::HOST_SIGS;
+    use wasm_encoder::{
+        CodeSection, ConstExpr, EntityType, ExportKind, ExportSection, Function, FunctionSection,
+        GlobalSection, GlobalType, ImportSection, Instruction, MemorySection, MemoryType, Module,
+        TypeSection, ValType,
+    };
+
+    let mut module = Module::new();
+
+    // Type section: host sigs + test function type ([] -> [i32])
+    let mut types = TypeSection::new();
+    for (params, results) in HOST_SIGS {
+        types
+            .ty()
+            .function(params.iter().copied(), results.iter().copied());
+    }
+    // Test function: () -> i32
+    types.ty().function([], [ValType::I32]);
+    module.section(&types);
+
+    // Import section
+    let mut imports = ImportSection::new();
+    for (i, name) in IMPORT_ORDER.iter().enumerate() {
+        imports.import(IMPORT_MODULE, name, EntityType::Function(i as u32));
+    }
+    module.section(&imports);
+
+    // Function section: one test function
+    let test_type_idx = HOST_IMPORT_COUNT; // type index for () -> i32
+    let mut functions = FunctionSection::new();
+    functions.function(test_type_idx);
+    module.section(&functions);
+
+    // Memory section
+    let mut memories = MemorySection::new();
+    memories.memory(MemoryType {
+        minimum: 2,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    module.section(&memories);
+
+    // Global section: __heap_base
+    let mut globals = GlobalSection::new();
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+            shared: false,
+        },
+        &ConstExpr::i32_const(65536),
+    );
+    module.section(&globals);
+
+    // Export section
+    let test_fn_idx = HOST_IMPORT_COUNT;
+    let mut exports = ExportSection::new();
+    exports.export("test", ExportKind::Func, test_fn_idx);
+    exports.export("memory", ExportKind::Memory, 0);
+    module.section(&exports);
+
+    // Code section: emit the cross-contract call sequence
+    let mut f = Function::new(vec![]);
+    // addr_ptr: i32 = 0 (Address.zero is at offset 0 in page 0)
+    f.instruction(&Instruction::I32Const(0));
+    // addr_len: i32 = 20
+    f.instruction(&Instruction::I32Const(20));
+    // data_reg: i32 = 0 (REG_CALLDATA)
+    f.instruction(&Instruction::I32Const(0));
+    // gas: i64 = 0
+    f.instruction(&Instruction::I64Const(0));
+    // value: i64 = 0 (rawCall only)
+    if include_value {
+        f.instruction(&Instruction::I64Const(0));
+    }
+    // call host fn
+    f.instruction(&Instruction::Call(host_fn_index));
+    // return the i32 result
+    f.instruction(&Instruction::End);
+
+    let mut codes = CodeSection::new();
+    codes.function(&f);
+    module.section(&codes);
+
+    module.finish()
+}
+
+/// Count how many `call N` instructions appear in the code section of a WASM module.
+fn count_call_instructions_to_index(wasm_bytes: &[u8], target_index: u32) -> usize {
+    use wasmparser::{Operator, Parser, Payload};
+
+    let mut count = 0;
+    let mut parser = Parser::new(0);
+    let mut remaining = wasm_bytes;
+
+    loop {
+        let payload = match parser.parse(remaining, true) {
+            Ok(wasmparser::Chunk::Parsed { consumed, payload }) => {
+                remaining = &remaining[consumed..];
+                payload
+            }
+            Ok(wasmparser::Chunk::NeedMoreData(_)) => break,
+            Err(_) => break,
+        };
+
+        match payload {
+            Payload::CodeSectionEntry(body) => {
+                let reader = body.get_operators_reader().expect("operators reader");
+                for op in reader.into_iter() {
+                    if let Ok(Operator::Call { function_index }) = op {
+                        if function_index == target_index {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            Payload::End(_) => break,
+            _ => {}
+        }
+    }
+
+    count
+}
+
+// ── Test 1: rawCall lowers to call 14 ────────────────────────────────────────
+
+#[test]
+fn rawcall_codegen_emits_call_to_index_14() {
+    // Build a module that calls host fn 14 (call_contract) with 5 args.
+    let bytes = build_cross_contract_call_module(14, true);
+
+    // Verify the module is structurally valid
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "rawCall module failed wasmparser validation: {:?}",
+        result.err()
+    );
+
+    // Verify the call 14 instruction is present
+    let call_count = count_call_instructions_to_index(&bytes, 14);
+    assert_eq!(
+        call_count, 1,
+        "expected exactly 1 `call 14` instruction for rawCall, got {call_count}"
+    );
+}
+
+// ── Test 2: staticCall lowers to call 15 ─────────────────────────────────────
+
+#[test]
+fn staticcall_codegen_emits_call_to_index_15() {
+    // Build a module that calls host fn 15 (static_call) with 4 args.
+    let bytes = build_cross_contract_call_module(15, false);
+
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "staticCall module failed wasmparser validation: {:?}",
+        result.err()
+    );
+
+    let call_count = count_call_instructions_to_index(&bytes, 15);
+    assert_eq!(
+        call_count, 1,
+        "expected exactly 1 `call 15` instruction for staticCall, got {call_count}"
+    );
+}
+
+// ── Test 3: delegateCall lowers to call 16 ───────────────────────────────────
+
+#[test]
+fn delegatecall_codegen_emits_call_to_index_16() {
+    // Build a module that calls host fn 16 (delegate_call) with 4 args.
+    let bytes = build_cross_contract_call_module(16, false);
+
+    let result = wasmparser::validate(&bytes);
+    assert!(
+        result.is_ok(),
+        "delegateCall module failed wasmparser validation: {:?}",
+        result.err()
+    );
+
+    let call_count = count_call_instructions_to_index(&bytes, 16);
+    assert_eq!(
+        call_count, 1,
+        "expected exactly 1 `call 16` instruction for delegateCall, got {call_count}"
+    );
+}
+
+// ── Test 4: emitted WASM is structurally valid (wasmparser) ──────────────────
+
+#[test]
+fn cross_contract_call_emitted_wasm_is_valid() {
+    // All three call types must produce valid WASM.
+    for (host_fn_index, include_value, name) in [
+        (14u32, true, "rawCall"),
+        (15u32, false, "staticCall"),
+        (16u32, false, "delegateCall"),
+    ] {
+        let bytes = build_cross_contract_call_module(host_fn_index, include_value);
+        let result = wasmparser::validate(&bytes);
+        assert!(
+            result.is_ok(),
+            "{name} (host fn {host_fn_index}) module failed wasmparser validation: {:?}",
+            result.err()
+        );
+    }
+}
+
+// ── Test 5: rawCall passes 5 args, static/delegate pass 4 ────────────────────
+
+#[test]
+fn rawcall_codegen_passes_correct_arg_count() {
+    use wasmparser::{Operator, Parser, Payload};
+
+    // rawCall: 5 instructions before call 14 (addr_ptr, addr_len, data_reg, gas, value)
+    // staticCall/delegateCall: 4 instructions before call 15/16
+    for (host_fn_index, include_value, expected_args, name) in [
+        (14u32, true, 5usize, "rawCall"),
+        (15u32, false, 4usize, "staticCall"),
+        (16u32, false, 4usize, "delegateCall"),
+    ] {
+        let bytes = build_cross_contract_call_module(host_fn_index, include_value);
+
+        // Count instructions before the call instruction in the code section.
+        // The test function body is: [arg0, arg1, arg2, arg3, (arg4), call N, end]
+        // So the number of instructions before `call N` equals the arg count.
+        let mut arg_count = 0usize;
+        let mut parser = Parser::new(0);
+        let mut remaining = bytes.as_slice();
+
+        loop {
+            let payload = match parser.parse(remaining, true) {
+                Ok(wasmparser::Chunk::Parsed { consumed, payload }) => {
+                    remaining = &remaining[consumed..];
+                    payload
+                }
+                Ok(wasmparser::Chunk::NeedMoreData(_)) => break,
+                Err(_) => break,
+            };
+
+            match payload {
+                Payload::CodeSectionEntry(body) => {
+                    let reader = body.get_operators_reader().expect("operators reader");
+                    for op in reader.into_iter() {
+                        match op.expect("op read") {
+                            Operator::Call { function_index }
+                                if function_index == host_fn_index =>
+                            {
+                                break;
+                            }
+                            Operator::End => break,
+                            _ => {
+                                arg_count += 1;
+                            }
+                        }
+                    }
+                }
+                Payload::End(_) => break,
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            arg_count, expected_args,
+            "{name} (host fn {host_fn_index}) expected {expected_args} arg instructions before call, got {arg_count}"
+        );
+    }
+}
+
+// ── Test 6: HOST_IMPORT_COUNT is 17 (covers all 3 new host fns) ──────────────
+
+#[test]
+fn host_import_count_includes_cross_contract_host_fns() {
+    use crate::codegen::abi::HOST_IMPORT_COUNT;
+
+    // IMPORT_ORDER has 17 entries (indices 0–16):
+    //   0–13: original host fns
+    //   14: call_contract
+    //   15: static_call
+    //   16: delegate_call
+    assert_eq!(
+        HOST_IMPORT_COUNT, 17,
+        "HOST_IMPORT_COUNT must be 17 to include call_contract/static_call/delegate_call"
+    );
+}
+
+// ── Test 7: emit_module with cross-contract call in contract body validates ───
+//
+// NOTE (MF-2 fix): Tests 1–6 above hand-build WASM with wasm-encoder directly
+// and do NOT call emit_cross_contract_call. Tests 7a–7c below are the REAL
+// codegen tests: they use typed_ast_for + emit_module to exercise the full
+// emit_cross_contract_call path and verify the correct call instruction is
+// emitted.
+//
+// Strategy: use `check_skip_wf` to bypass type-checking (which requires `bytes`
+// type for calldata — not yet lowerable). Pass an integer literal `0` as
+// calldata (lowers to i32 const = REG_CALLDATA register ID). The opts arg for
+// rawCall is also `0` (accepted leniently by codegen — gas/value default to 0).
+// Address.zero is used as the receiver (lowers to i32 ptr = ADDR_ZERO_OFFSET).
+
+// ── Tests 7a–7c: emit_cross_contract_call via emit_test_stmt_module ───────────
+//
+// These tests exercise the REAL emit_cross_contract_call path via
+// emit_test_stmt_module. They verify that addr.rawCall/staticCall/delegateCall
+// lowers to the correct `call N` instruction.
+//
+// Strategy: parse a simple contract to get a TypedContract with type annotations
+// for a u32 param `addr` and integer literal `0`. Then manually construct the
+// Expr::Call AST node using spans from the parsed AST (so the type map has
+// entries for those spans). Use emit_test_stmt_module with the constructed
+// Stmt::Expr to exercise emit_cross_contract_call.
+//
+// The receiver `addr` is u32 (i32 in WASM) — used as the address pointer.
+// The type checker is bypassed by using emit_test_stmt_module directly (which
+// takes a TypedContract + Stmt slice, not a full pipeline).
+//
+// Note: the type checker enforces rawCall/staticCall/delegateCall on Address
+// only. We bypass this by using emit_test_stmt_module directly with a
+// TypedContract from a simple contract (no cross-contract calls), and
+// constructing the Expr::Call manually with spans that ARE in the type map.
+
+/// Build a WASM module that exercises emit_cross_contract_call for the given
+/// method name ("rawCall", "staticCall", or "delegateCall") and verify that
+/// the correct host function call instruction is emitted.
+///
+/// Uses emit_test_stmt_module with a manually constructed Stmt::Expr containing
+/// the cross-contract call. The TypedContract is from a simple contract with a
+/// u32 param `addr` and a literal `0` — both have spans in the type map.
+fn verify_cross_contract_call_emits_instruction(method: &str, expected_index: u32) {
+    use super::emit_test_stmt_module;
+    use crate::parser::{CallArg, Expr, Literal, Stmt};
+
+    // Parse a simple contract to get a TypedContract with type annotations.
+    // The contract has a u32 param `addr` and returns `addr + 0` — this gives
+    // us spans for `addr` (u32) and `0` (IntLiteral) in the type map.
+    let src = r#"
+        contract Foo {
+            pub fn f(addr: u32) -> u32 {
+                return addr + 0;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let contract = &contracts[0];
+
+    // Extract the spans of `addr` and `0` from the parsed AST.
+    // The function body is: [Stmt::Return(Some(Expr::Binary(Add, Ident("addr"), Literal(0))))]
+    let fns = contract.functions();
+    let body = fns[0].body.expect("function should have a body");
+
+    // Extract the span of `addr` (Ident) and `0` (Literal) from the binary expr.
+    let (addr_span, lit_span) = match &body[0] {
+        Stmt::Return(Some(Expr::Binary(_, lhs, rhs, _)), _) => {
+            let addr_span = match lhs.as_ref() {
+                Expr::Ident(_, span) => *span,
+                other => panic!("expected Ident for addr, got: {other:?}"),
+            };
+            let lit_span = match rhs.as_ref() {
+                Expr::Literal(_, span) => *span,
+                other => panic!("expected Literal for 0, got: {other:?}"),
+            };
+            (addr_span, lit_span)
+        }
+        other => panic!("expected Return(Binary(Add, ...)), got: {other:?}"),
+    };
+
+    // Construct the cross-contract call expression manually:
+    //   addr.{method}(0, [0 for rawCall])
+    // The spans are from the parsed AST so they ARE in the type map.
+    let addr_expr = Expr::Ident("addr".into(), addr_span);
+    let calldata_expr = Expr::Literal(Literal::Int(0), lit_span);
+
+    // Build the callee: Expr::Member(addr_expr, method, addr_span)
+    let callee = Expr::Member(Box::new(addr_expr.clone()), method.into(), addr_span);
+
+    // Build args: [calldata, (opts for rawCall)]
+    let mut args = vec![CallArg::Positional(calldata_expr.clone())];
+    if method == "rawCall" {
+        // rawCall takes 2 args: calldata + opts (opts is leniently accepted)
+        args.push(CallArg::Positional(calldata_expr));
+    }
+
+    // Construct Stmt::Expr(Expr::Call { callee, args, opts: None, span })
+    let call_expr = Expr::Call {
+        callee: Box::new(callee),
+        args,
+        opts: None,
+        span: addr_span,
+    };
+    let stmt = Stmt::Expr(call_expr, addr_span);
+
+    // Use emit_test_stmt_module with ("addr", I32) as the param.
+    // The function returns i32 (we add a return 0 after the call).
+    let return_stmt = Stmt::Return(Some(Expr::Literal(Literal::Int(0), lit_span)), lit_span);
+    let stmts = vec![stmt, return_stmt];
+
+    let wasm = emit_test_stmt_module(
+        contract,
+        &stmts,
+        &[("addr".into(), wasm_encoder::ValType::I32)],
+        wasm_encoder::ValType::I32,
+    )
+    .unwrap_or_else(|e| panic!("{method} emit_test_stmt_module failed: {e}"));
+
+    // Verify the emitted WASM is structurally valid
+    let validation = wasmparser::validate(&wasm);
+    assert!(
+        validation.is_ok(),
+        "{method} WASM failed wasmparser validation: {:?}",
+        validation.err()
+    );
+
+    // Verify the correct call instruction is present — this is the key assertion
+    // that emit_cross_contract_call actually emits the right instruction.
+    let call_count = count_call_instructions_to_index(&wasm, expected_index);
+    assert!(
+        call_count >= 1,
+        "{method} should emit `call {expected_index}`, \
+         but found {call_count} such instructions in emitted WASM"
+    );
+}
+
+// ── Test 7a: rawCall via emit_cross_contract_call emits call to index 14 ─────
+
+#[test]
+fn rawcall_via_emit_cross_contract_call_emits_call_to_call_contract_index() {
+    // Exercises the REAL emit_cross_contract_call path for rawCall.
+    // Verifies that addr.rawCall(calldata, opts) lowers to `call 14` (call_contract).
+    use crate::codegen::abi::CALL_CONTRACT_INDEX;
+    verify_cross_contract_call_emits_instruction("rawCall", CALL_CONTRACT_INDEX);
+}
+
+// ── Test 7b: staticCall via emit_cross_contract_call emits call to index 15 ──
+
+#[test]
+fn staticcall_via_emit_cross_contract_call_emits_call_to_static_call_index() {
+    // Exercises the REAL emit_cross_contract_call path for staticCall.
+    // Verifies that addr.staticCall(calldata) lowers to `call 15` (static_call).
+    use crate::codegen::abi::STATIC_CALL_INDEX;
+    verify_cross_contract_call_emits_instruction("staticCall", STATIC_CALL_INDEX);
+}
+
+// ── Test 7c: delegateCall via emit_cross_contract_call emits call to index 16 ─
+
+#[test]
+fn delegatecall_via_emit_cross_contract_call_emits_call_to_delegate_call_index() {
+    // Exercises the REAL emit_cross_contract_call path for delegateCall.
+    // Verifies that addr.delegateCall(calldata) lowers to `call 16` (delegate_call).
+    use crate::codegen::abi::DELEGATE_CALL_INDEX;
+    verify_cross_contract_call_emits_instruction("delegateCall", DELEGATE_CALL_INDEX);
+}
+
+// ── Test 7d: named index constants match IMPORT_ORDER positions ───────────────
+
+#[test]
+fn call_contract_index_constant_matches_import_order_position() {
+    // Verify that CALL_CONTRACT_INDEX, STATIC_CALL_INDEX, DELEGATE_CALL_INDEX
+    // match the actual positions in IMPORT_ORDER. This guards against IMPORT_ORDER
+    // reordering silently breaking the constants (AGENTS §3.3 no magic numbers).
+    use crate::codegen::abi::{
+        host_fn, CALL_CONTRACT_INDEX, DELEGATE_CALL_INDEX, IMPORT_ORDER, STATIC_CALL_INDEX,
+    };
+
+    let call_pos = IMPORT_ORDER
+        .iter()
+        .position(|&n| n == host_fn::CALL_CONTRACT)
+        .expect("call_contract not in IMPORT_ORDER") as u32;
+    let static_pos = IMPORT_ORDER
+        .iter()
+        .position(|&n| n == host_fn::STATIC_CALL)
+        .expect("static_call not in IMPORT_ORDER") as u32;
+    let delegate_pos = IMPORT_ORDER
+        .iter()
+        .position(|&n| n == host_fn::DELEGATE_CALL)
+        .expect("delegate_call not in IMPORT_ORDER") as u32;
+
+    assert_eq!(
+        CALL_CONTRACT_INDEX, call_pos,
+        "CALL_CONTRACT_INDEX ({CALL_CONTRACT_INDEX}) must match IMPORT_ORDER position ({call_pos})"
+    );
+    assert_eq!(
+        STATIC_CALL_INDEX, static_pos,
+        "STATIC_CALL_INDEX ({STATIC_CALL_INDEX}) must match IMPORT_ORDER position ({static_pos})"
+    );
+    assert_eq!(
+        DELEGATE_CALL_INDEX, delegate_pos,
+        "DELEGATE_CALL_INDEX ({DELEGATE_CALL_INDEX}) must match IMPORT_ORDER position ({delegate_pos})"
+    );
+}

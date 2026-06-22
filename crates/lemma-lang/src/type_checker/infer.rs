@@ -472,6 +472,39 @@ impl<'a> Inferer<'a> {
                     arg_types.push(ty);
                 }
                 let callee_ty = self.infer_expr(callee)?;
+                // Address built-in call methods (P3·Step 21): validate receiver type and
+                // args before returning the result type.  Must run BEFORE the generic
+                // builtin shortcut below so that wrong-arg-type errors are not silently
+                // swallowed.
+                if let Expr::Member(receiver, method_name, _) = callee.as_ref() {
+                    match method_name.as_str() {
+                        "rawCall" | "staticCall" | "delegateCall" => {
+                            let receiver_ty = self.infer_expr(receiver)?;
+                            if receiver_ty == ResolvedType::AddressTy
+                                || receiver_ty == ResolvedType::Unknown
+                            {
+                                // Address receiver (or Unknown — deferred): validate args.
+                                return check_address_call(method_name, &arg_types, *span);
+                            }
+                            // Non-Address receiver: these methods are Address-only.
+                            return Err(type_err(
+                                TypeErrorKind::UnknownField {
+                                    ty: receiver_ty.display_name(),
+                                    field: method_name.clone(),
+                                },
+                                *span,
+                                format!(
+                                    "`{}` has no method `{}`; \
+                                     `rawCall`, `staticCall`, and `delegateCall` \
+                                     are built-in methods on `Address` only",
+                                    receiver_ty.display_name(),
+                                    method_name
+                                ),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
                 // Special case: if the callee is a Member expression and the member
                 // returned a non-Fn type (i.e. a builtin method's return type), treat
                 // that type as the call result directly.  This handles `arr.length`,
@@ -2451,6 +2484,25 @@ fn builtin_member_type(base_ty: &ResolvedType, name: &str) -> Option<ResolvedTyp
         ResolvedType::AddressTy => match name {
             "isZero" => Some(ResolvedType::Bool),
             "toHash" => Some(ResolvedType::HashTy),
+            // Cross-contract call built-ins (P3·Step 21, spec §16).
+            //
+            // All three return `Result<bytes, Error>`.  The error type is
+            // `Unknown` here — the concrete error type is resolved at codegen
+            // (the VM surfaces a generic call-failure error).  Argument-count
+            // and calldata-type validation is performed at the call site in
+            // `infer_address_call` (called from `Expr::Call` dispatch).
+            //
+            // `rawCall(calldata: bytes, opts: { value: u128, gas: u64 })`
+            // `staticCall(calldata: bytes)`
+            // `delegateCall(calldata: bytes)`
+            //
+            // Note: SAFETY-011 (analyzer/rules/delegate.rs) enforces the
+            // `#[allowDelegate]` restriction on `delegateCall` at safety-analysis
+            // time — the type-checker only validates argument types here.
+            "rawCall" | "staticCall" | "delegateCall" => Some(ResolvedType::Result_(
+                Box::new(ResolvedType::Bytes),
+                Box::new(ResolvedType::Unknown),
+            )),
             _ => None,
         },
         // P3-checker-14: built-in execution-context globals.
@@ -2473,6 +2525,147 @@ fn builtin_member_type(base_ty: &ResolvedType, name: &str) -> Option<ResolvedTyp
             _ => None,
         },
         _ => None,
+    }
+}
+
+// ─── Address built-in call validation ────────────────────────────────────────
+
+/// Validate and type-check a call to an `Address` built-in call method.
+///
+/// Called from `Expr::Call` dispatch when the receiver is `Address` and the
+/// method is one of `rawCall`, `staticCall`, or `delegateCall`.
+///
+/// ## Argument rules (spec §16)
+///
+/// - `rawCall(calldata: bytes, opts)` — 2 args required.
+///   `calldata` must be `bytes`.  `opts` is accepted as any type (lenient MVP:
+///   the struct `{ value: u128, gas: u64 }` is validated at codegen; strict
+///   field checking is deferred — see TODO below).
+///
+/// - `staticCall(calldata: bytes)` — 1 arg required.
+///   `calldata` must be `bytes`.
+///
+/// - `delegateCall(calldata: bytes)` — 1 arg required.
+///   `calldata` must be `bytes`.
+///   SAFETY-011 (`analyzer/rules/delegate.rs`) enforces `#[allowDelegate]`
+///   at safety-analysis time; the type-checker only validates arg types here.
+///
+/// ## Return type
+///
+/// All three return `Result<bytes, Error>` where the error type is `Unknown`
+/// (the VM surfaces a generic call-failure error; the concrete error type is
+/// resolved at codegen).
+///
+/// ## TODO (future strict checking)
+///
+/// The `opts` argument for `rawCall` should be validated as a struct with
+/// `value: u128` and `gas: u64` fields.  This requires struct-literal type
+/// inference (P3·Step 3d) to propagate field types into the opts position.
+/// Deferred to a follow-up subtask.
+fn check_address_call(
+    method: &str,
+    arg_types: &[ResolvedType],
+    span: Span,
+) -> Result<ResolvedType, LangError> {
+    // Return type shared by all three methods.
+    let result_bytes = ResolvedType::Result_(
+        Box::new(ResolvedType::Bytes),
+        Box::new(ResolvedType::Unknown),
+    );
+
+    match method {
+        "rawCall" => {
+            // rawCall(calldata: bytes, opts) — exactly 2 positional args.
+            if arg_types.len() != 2 {
+                return Err(type_err(
+                    TypeErrorKind::ArityMismatch {
+                        func: "rawCall".into(),
+                        expected: 2,
+                        found: arg_types.len(),
+                    },
+                    span,
+                    format!(
+                        "`Address.rawCall` expects 2 arguments (calldata: bytes, opts), got {}",
+                        arg_types.len()
+                    ),
+                ));
+            }
+            // First arg must be `bytes`.
+            validate_calldata_arg(&arg_types[0], "rawCall", span)?;
+            // Second arg (opts struct) is accepted leniently — see TODO above.
+            Ok(result_bytes)
+        }
+        "staticCall" => {
+            // staticCall(calldata: bytes) — exactly 1 positional arg.
+            if arg_types.len() != 1 {
+                return Err(type_err(
+                    TypeErrorKind::ArityMismatch {
+                        func: "staticCall".into(),
+                        expected: 1,
+                        found: arg_types.len(),
+                    },
+                    span,
+                    format!(
+                        "`Address.staticCall` expects 1 argument (calldata: bytes), got {}",
+                        arg_types.len()
+                    ),
+                ));
+            }
+            validate_calldata_arg(&arg_types[0], "staticCall", span)?;
+            Ok(result_bytes)
+        }
+        "delegateCall" => {
+            // delegateCall(calldata: bytes) — exactly 1 positional arg.
+            if arg_types.len() != 1 {
+                return Err(type_err(
+                    TypeErrorKind::ArityMismatch {
+                        func: "delegateCall".into(),
+                        expected: 1,
+                        found: arg_types.len(),
+                    },
+                    span,
+                    format!(
+                        "`Address.delegateCall` expects 1 argument (calldata: bytes), got {}",
+                        arg_types.len()
+                    ),
+                ));
+            }
+            validate_calldata_arg(&arg_types[0], "delegateCall", span)?;
+            Ok(result_bytes)
+        }
+        // Caller guarantees only the three known methods are dispatched here.
+        // This arm is unreachable in practice — the caller's match only
+        // dispatches "rawCall", "staticCall", "delegateCall".
+        _ => {
+            // Mathematically unreachable (AGENTS §4.2 exception): the caller
+            // only dispatches the three known Address call methods.
+            unreachable!(
+                "check_address_call called with unexpected method `{method}`; \
+                 caller must only dispatch rawCall/staticCall/delegateCall"
+            )
+        }
+    }
+}
+
+/// Validate that the first argument to an Address call method is `bytes`.
+///
+/// `bytes` is the only accepted calldata type.  `Unknown` is tolerated
+/// (deferred resolution — not an error at this stage).
+fn validate_calldata_arg(arg_ty: &ResolvedType, method: &str, span: Span) -> Result<(), LangError> {
+    match arg_ty {
+        ResolvedType::Bytes | ResolvedType::Unknown => Ok(()),
+        other => Err(type_err(
+            TypeErrorKind::TypeMismatch {
+                expected: "bytes".into(),
+                found: other.display_name(),
+            },
+            span,
+            format!(
+                "`Address.{}` calldata argument must be `bytes`, found `{}`",
+                method,
+                other.display_name()
+            ),
+        )),
     }
 }
 

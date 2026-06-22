@@ -36,6 +36,20 @@ use crate::visit::{walk_expr, Visitor};
 /// Returns one [`SafetyError::UnsafeDelegate`] per call site where the callee
 /// receiver is a state field (`self.<field>.<method>(...)`).
 /// Returns an empty `Vec` if the contract is clean.
+///
+/// ## Scope limitation (delegate-call-gate-1)
+///
+/// NOTE: SAFETY-011 currently catches `self.<field>.<method>()` proxy patterns.
+/// It does NOT yet enforce `#[allowDelegate]` on `Address::delegateCall()` built-in
+/// calls (i.e. `addr.delegateCall(data)` where `addr` is a local variable or param,
+/// not a state field). Spec §16 requires `#[allowDelegate]` annotation on the
+/// enclosing function for any delegateCall usage.
+///
+/// See living-notes Technical Debt: **delegate-call-gate-1**.
+/// Fix: add a SAFETY-011b rule arm in this file that detects
+/// `Expr::Call` where callee is `Expr::Member(_, "delegateCall")` and the
+/// receiver is NOT `self.<field>` (those are already caught above), then checks
+/// for `#[allowDelegate]` annotation on the enclosing function.
 #[must_use]
 pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     let mut checker = DelegateChecker {

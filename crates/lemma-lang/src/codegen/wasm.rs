@@ -56,14 +56,18 @@ use wasm_encoder::{
     Instruction, MemorySection, MemoryType, Module, TypeSection, ValType,
 };
 
-use crate::codegen::abi::{self, HOST_IMPORT_COUNT, IMPORT_MODULE, IMPORT_ORDER};
+use crate::codegen::abi::{
+    self, CALL_CONTRACT_INDEX, DELEGATE_CALL_INDEX, HOST_IMPORT_COUNT, IMPORT_MODULE, IMPORT_ORDER,
+    STATIC_CALL_INDEX,
+};
 use crate::codegen::metadata;
 use crate::codegen::types::{is_i64, is_signed, is_sub_word, wasm_valtype};
 use crate::error::LangError;
 use crate::lexer::token::Span;
 use crate::parser::expr_span;
 use crate::parser::{
-    AssignOp, BinaryOp, Expr, Literal, ModifierDef, Pattern, Stmt, UnaryOp, UnitKind, Visibility,
+    AssignOp, BinaryOp, CallArg, Expr, Literal, ModifierDef, Pattern, Stmt, UnaryOp, UnitKind,
+    Visibility,
 };
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::type_checker::types::{ResolvedType, SymbolSig};
@@ -105,6 +109,13 @@ pub(crate) const ADDR_NATIVE_OFFSET: u32 = 40;
 
 /// Number of active data segments emitted for Address constants.
 const ADDR_DATA_SEGMENT_COUNT: u32 = 3;
+
+/// Byte length of a Lemma `Address` value in guest linear memory.
+///
+/// All cross-contract call host functions receive the callee address as a
+/// (ptr: i32, len: i32) pair where `len` is always this constant.
+/// Named constant — no magic numbers (AGENTS §3.3).
+const ADDRESS_BYTE_LEN: u32 = 20;
 
 // ─── Unit-literal multipliers (P3·Step 6h) ───────────────────────────────────
 //
@@ -1093,6 +1104,7 @@ impl<'a> LowerCtx<'a> {
             }
 
             // Function calls: addr.isZero() / addr.isBurn() / addr.isContract() (P3·Step 6g)
+            // Cross-contract calls: addr.rawCall() / addr.staticCall() / addr.delegateCall() (P3·Step 21)
             Expr::Call { callee, args, .. } => {
                 if let Expr::Member(receiver, method, _) = callee.as_ref() {
                     // Address predicate methods: isZero, isBurn, isNativeLem
@@ -1119,6 +1131,97 @@ impl<'a> LowerCtx<'a> {
                                       (requires has_code host function — deferred)"
                                 .into(),
                         });
+                    }
+
+                    // ── Cross-contract calls (P3·Step 21) ─────────────────────────
+                    //
+                    // rawCall(calldata, opts)    → host fn index 14 (call_contract)
+                    // staticCall(calldata)       → host fn index 15 (static_call)
+                    // delegateCall(calldata)     → host fn index 16 (delegate_call)
+                    //
+                    // ABI (DB-A53 §4.5):
+                    //   call_contract(addr_ptr, addr_len, data_reg, gas, value) -> i32
+                    //   static_call  (addr_ptr, addr_len, data_reg, gas)        -> i32
+                    //   delegate_call(addr_ptr, addr_len, data_reg, gas)        -> i32
+                    //
+                    // The address is passed as a (ptr, len) pair into guest memory.
+                    // Calldata is written to a scratch register; the register ID is
+                    // passed as data_reg. The result register ID is returned as i32.
+                    match method.as_str() {
+                        "rawCall" => {
+                            // rawCall(calldata, opts) — exactly 2 positional args (spec §16).
+                            // args[0] = calldata (bytes — lowered as i32 register ID, MVP)
+                            // args[1] = opts struct literal { value: u128, gas: u64 }
+                            //
+                            // The type-checker enforces 2 args (check_address_call in infer.rs).
+                            // Codegen accepts the opts struct leniently for MVP: gas and value
+                            // default to 0 (the VM applies 63/64 gas forwarding automatically).
+                            // Full opts-struct field extraction is deferred (M6 scope).
+                            //
+                            // TODO(codegen): extract gas/value from opts struct literal when
+                            // struct-literal lowering is implemented (M6 / P3·Step 22).
+                            if args.is_empty() {
+                                return Err(LangError::Codegen {
+                                    message: "rawCall requires 2 arguments (calldata, opts)".into(),
+                                });
+                            }
+                            let calldata = call_arg_expr(&args[0])?;
+                            // opts (args[1]) is accepted leniently — gas and value default to 0.
+                            // The VM caps forwarded gas at 63/64 of remaining (08-EXECUTION_SPEC §2.4).
+                            return self.emit_cross_contract_call(
+                                receiver,
+                                calldata,
+                                None,                // gas: default 0 (VM applies 63/64 rule)
+                                None,                // value: default 0 (no value transfer)
+                                CALL_CONTRACT_INDEX, // call_contract host fn index (abi.rs)
+                            );
+                        }
+                        "staticCall" => {
+                            // staticCall(calldata) — exactly 1 positional arg (spec §16).
+                            // No value parameter (static calls cannot transfer value).
+                            if args.is_empty() {
+                                return Err(LangError::Codegen {
+                                    message: "staticCall requires 1 argument (calldata)".into(),
+                                });
+                            }
+                            let calldata = call_arg_expr(&args[0])?;
+                            return self.emit_cross_contract_call(
+                                receiver,
+                                calldata,
+                                None,              // gas: default 0 (VM applies 63/64 rule)
+                                None,              // no value for static calls
+                                STATIC_CALL_INDEX, // static_call host fn index (abi.rs)
+                            );
+                        }
+                        "delegateCall" => {
+                            // delegateCall(calldata) — exactly 1 positional arg (spec §16).
+                            // No value parameter (delegate calls run in caller's context).
+                            //
+                            // SAFETY: delegateCall is type-valid here. The #[allowDelegate]
+                            // annotation enforcement is intentionally deferred — SAFETY-011
+                            // catches self.<field>.<method>() proxy patterns but not the
+                            // explicit Address::delegateCall built-in.
+                            // TODO(safety): add SAFETY-011b rule for Address::delegateCall
+                            // without #[allowDelegate] annotation. Track: living-notes
+                            // Technical Debt (delegate-call-gate-1). Until then, delegateCall
+                            // is callable but the VM SAFETY-011 runtime contract
+                            // (dispatch_call CallMode::Delegate runs callee code in caller
+                            // context) is enforced.
+                            if args.is_empty() {
+                                return Err(LangError::Codegen {
+                                    message: "delegateCall requires 1 argument (calldata)".into(),
+                                });
+                            }
+                            let calldata = call_arg_expr(&args[0])?;
+                            return self.emit_cross_contract_call(
+                                receiver,
+                                calldata,
+                                None,                // gas: default 0 (VM applies 63/64 rule)
+                                None,                // no value for delegate calls
+                                DELEGATE_CALL_INDEX, // delegate_call host fn index (abi.rs)
+                            );
+                        }
+                        _ => {}
                     }
                 }
                 Err(LangError::Codegen {
@@ -1813,6 +1916,126 @@ impl<'a> LowerCtx<'a> {
         self.func.instruction(&Instruction::I32Eq);
         // AND with the previous result
         self.func.instruction(&Instruction::I32And);
+
+        Ok(())
+    }
+
+    // ── Cross-contract call lowering (P3·Step 21) ─────────────────────────
+
+    /// Emit WASM instructions for a cross-contract call.
+    ///
+    /// Shared helper for `rawCall`, `staticCall`, and `delegateCall` — all three
+    /// call types share the same address marshalling and register-channel pattern.
+    /// Only the host function index and the presence of a `value` parameter differ.
+    ///
+    /// ## ABI (DB-A53 §4.5)
+    ///
+    /// ```text
+    /// call_contract (index 14): (addr_ptr, addr_len, data_reg, gas, value) -> i32
+    /// static_call   (index 15): (addr_ptr, addr_len, data_reg, gas)        -> i32
+    /// delegate_call (index 16): (addr_ptr, addr_len, data_reg, gas)        -> i32
+    /// ```
+    ///
+    /// ## Lowering strategy
+    ///
+    /// 1. Lower `addr_expr` → i32 pointer to 20-byte address in guest memory.
+    ///    The address is already in memory (from `emit_address_constant` or a
+    ///    local variable holding a pointer). Push `addr_ptr: i32` + `addr_len: i32`.
+    /// 2. Lower `calldata_expr` → i32 register ID. The calldata expression is
+    ///    expected to evaluate to an i32 register ID that the host will read.
+    ///    Full bytes-type lowering is deferred (M6 scope); for now the caller
+    ///    passes a register ID literal (e.g. `0` for REG_CALLDATA).
+    /// 3. Push `gas: i64` — from `gas_expr` if provided, else 0 (no-gas default).
+    /// 4. For `rawCall` only: push `value: i64` — from `value_expr` if provided,
+    ///    else 0 (no-value transfer).
+    /// 5. Emit `Instruction::Call(host_fn_index)`.
+    /// 6. Result: the host fn returns an i32 register ID on the WASM stack.
+    ///
+    /// ## Address pointer convention
+    ///
+    /// `addr_expr` must evaluate to an i32 pointer into guest linear memory
+    /// where 20 address bytes reside. This matches the convention established
+    /// by `emit_address_constant` (P3·Step 6g) and the address predicate
+    /// comparison pattern.
+    ///
+    /// ## DRY (AGENTS §2)
+    ///
+    /// All three call types (`rawCall`, `staticCall`, `delegateCall`) use this
+    /// single helper. The only differences are:
+    /// - `host_fn_index`: 14, 15, or 16
+    /// - `value_expr`: `Some(expr)` for `rawCall`, `None` for static/delegate
+    fn emit_cross_contract_call(
+        &mut self,
+        addr_expr: &Expr,
+        calldata_expr: &Expr,
+        gas_expr: Option<&Expr>,
+        value_expr: Option<&Expr>,
+        host_fn_index: u32,
+    ) -> Result<(), LangError> {
+        // ── Step 1: Marshal address into guest memory ──────────────────────
+        //
+        // addr_expr evaluates to an i32 pointer to 20 address bytes in memory.
+        // Save to a temp local so we can push it as addr_ptr.
+        self.emit_expr(addr_expr)?;
+        let addr_ptr = self.alloc_temp_local(ValType::I32);
+        self.func.instruction(&Instruction::LocalSet(addr_ptr));
+
+        // Push addr_ptr: i32
+        self.func.instruction(&Instruction::LocalGet(addr_ptr));
+        // Push addr_len: i32 (always 20 bytes for an Address — AGENTS §7.1 no magic numbers)
+        self.func
+            .instruction(&Instruction::I32Const(ADDRESS_BYTE_LEN as i32));
+
+        // ── Step 2: Calldata register ──────────────────────────────────────
+        //
+        // The calldata expression is lowered as an i32 register ID.
+        // Full bytes-type lowering is deferred (M6 scope). For now, the
+        // calldata expression must evaluate to an i32 register ID that the
+        // host will read (e.g. `0` for REG_CALLDATA).
+        self.emit_expr(calldata_expr)?;
+        // data_reg: i32 is now on the WASM stack
+
+        // ── Step 3: Gas parameter ──────────────────────────────────────────
+        //
+        // gas_expr: i64 forwarded gas budget. Default 0 if not provided.
+        // The VM caps forwarded gas at 63/64 of remaining (08-EXECUTION_SPEC §2.4).
+        if let Some(gas) = gas_expr {
+            self.emit_expr(gas)?;
+        } else {
+            // Default: forward 0 gas (host uses 63/64 of remaining)
+            self.func.instruction(&Instruction::I64Const(0));
+        }
+
+        // ── Step 4: Value parameter (rawCall only) ─────────────────────────
+        //
+        // value_expr: i64 Drop amount to transfer. Only present for rawCall.
+        // staticCall and delegateCall have no value parameter (no value push).
+        //
+        // When value_expr is None for rawCall (CALL_CONTRACT_INDEX), we push
+        // i64.const 0 as the default (no value transfer). This is required because
+        // call_contract always takes a value parameter — omitting it would produce
+        // a WASM type-stack mismatch at validation time.
+        if let Some(value) = value_expr {
+            self.emit_expr(value)?;
+        } else if host_fn_index == CALL_CONTRACT_INDEX {
+            // rawCall requires a value parameter — default to 0 (no value transfer).
+            // The VM will not transfer any LEM to the callee.
+            self.func.instruction(&Instruction::I64Const(0));
+        }
+
+        // ── Step 5: Emit the host function call ────────────────────────────
+        //
+        // Stack at this point:
+        //   rawCall:      [addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64, value: i64]
+        //   staticCall:   [addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64]
+        //   delegateCall: [addr_ptr: i32, addr_len: i32, data_reg: i32, gas: i64]
+        self.func.instruction(&Instruction::Call(host_fn_index));
+
+        // ── Step 6: Result ─────────────────────────────────────────────────
+        //
+        // The host fn returns i32: result register ID on success, or a negative
+        // error sentinel on failure. The i32 is left on the WASM stack as the
+        // expression result.
 
         Ok(())
     }
@@ -2966,6 +3189,30 @@ pub(crate) fn emit_test_stmt_module(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Extract the `Expr` from a `CallArg`, returning an error for named args.
+///
+/// Cross-contract call lowering only supports positional arguments. Named
+/// arguments (e.g. `rawCall(data: calldata)`) are not yet supported in
+/// codegen — the type checker handles them, but lowering is deferred.
+///
+/// This is a free function (not a method) because it does not need `LowerCtx`
+/// state — it is a pure structural extraction (AGENTS §3.1 single responsibility).
+fn call_arg_expr(arg: &CallArg) -> Result<&Expr, LangError> {
+    match arg {
+        CallArg::Positional(expr) => Ok(expr),
+        CallArg::Named(name, _) => Err(LangError::Codegen {
+            message: format!(
+                "named argument '{name}' in cross-contract call not yet supported in codegen"
+            ),
+        }),
+        // Forward-compatibility for #[non_exhaustive]
+        #[allow(unreachable_patterns)]
+        _ => Err(LangError::Codegen {
+            message: "unknown CallArg variant in cross-contract call lowering".into(),
+        }),
+    }
+}
 
 /// Return the variant name of an `Expr` for error messages.
 ///

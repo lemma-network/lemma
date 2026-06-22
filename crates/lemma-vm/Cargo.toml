@@ -21,3 +21,4 @@ lemma-crypto = { path = "../lemma-crypto" }
 [dev-dependencies]
 proptest     = { workspace = true }
 wasm-encoder = { workspace = true }  # for building test WASM with custom sections
+lemma-lang   = { path = "../lemma-lang" }  # for full compiler pipeline E2E test (P3·Step 21 subtask_07)

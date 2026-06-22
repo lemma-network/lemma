@@ -2363,3 +2363,196 @@ fn structural_bound_accepts_type_with_all_required_methods() {
         "type with all required methods must pass structural bound check; got: {result:?}"
     );
 }
+
+// ─── P3·Step 21: Address built-in call methods ───────────────────────────────
+//
+// Tests for `rawCall`, `staticCall`, and `delegateCall` as built-in methods on
+// the `Address` type (spec §16).  All three return `Result<bytes, Error>`.
+
+#[test]
+fn rawcall_on_address_type_checks_successfully() {
+    // `addr.rawCall(data, opts)` where addr: Address, data: bytes → ok
+    let result = check_src(
+        r#"fn f(addr: Address, data: bytes, opts: u128) { let r = addr.rawCall(data, opts) }"#,
+    );
+    assert!(
+        result.is_ok(),
+        "addr.rawCall(data, opts) on Address should type-check; got: {result:?}"
+    );
+}
+
+#[test]
+fn staticcall_on_address_type_checks_successfully() {
+    // `addr.staticCall(data)` where addr: Address, data: bytes → ok
+    let result = check_src(r#"fn f(addr: Address, data: bytes) { let r = addr.staticCall(data) }"#);
+    assert!(
+        result.is_ok(),
+        "addr.staticCall(data) on Address should type-check; got: {result:?}"
+    );
+}
+
+#[test]
+fn delegatecall_on_address_type_checks_successfully() {
+    // `addr.delegateCall(data)` where addr: Address, data: bytes → ok
+    // Note: SAFETY-011 enforces #[allowDelegate] at safety-analysis time, not here.
+    let result =
+        check_src(r#"fn f(addr: Address, data: bytes) { let r = addr.delegateCall(data) }"#);
+    assert!(
+        result.is_ok(),
+        "addr.delegateCall(data) on Address should type-check; got: {result:?}"
+    );
+}
+
+#[test]
+fn rawcall_returns_result_bytes_type() {
+    // `addr.rawCall(data, opts)` → Result<bytes, _>
+    let typed = check_src(
+        r#"fn f(addr: Address, data: bytes, opts: u128) { let r = addr.rawCall(data, opts) }"#,
+    )
+    .unwrap_or_else(|e| panic!("check failed: {e:?}"));
+    let has_result_bytes = typed
+        .expr_types
+        .values()
+        .any(|t| matches!(t, ResolvedType::Result_(ok, _) if **ok == ResolvedType::Bytes));
+    assert!(
+        has_result_bytes,
+        "addr.rawCall should return Result<bytes, _>"
+    );
+}
+
+#[test]
+fn staticcall_returns_result_bytes_type() {
+    // `addr.staticCall(data)` → Result<bytes, _>
+    let typed = check_src(r#"fn f(addr: Address, data: bytes) { let r = addr.staticCall(data) }"#)
+        .unwrap_or_else(|e| panic!("check failed: {e:?}"));
+    let has_result_bytes = typed
+        .expr_types
+        .values()
+        .any(|t| matches!(t, ResolvedType::Result_(ok, _) if **ok == ResolvedType::Bytes));
+    assert!(
+        has_result_bytes,
+        "addr.staticCall should return Result<bytes, _>"
+    );
+}
+
+#[test]
+fn delegatecall_return_type_is_result() {
+    // `addr.delegateCall(data)` → Result<bytes, _>
+    let typed =
+        check_src(r#"fn f(addr: Address, data: bytes) { let r = addr.delegateCall(data) }"#)
+            .unwrap_or_else(|e| panic!("check failed: {e:?}"));
+    let has_result_bytes = typed
+        .expr_types
+        .values()
+        .any(|t| matches!(t, ResolvedType::Result_(ok, _) if **ok == ResolvedType::Bytes));
+    assert!(
+        has_result_bytes,
+        "addr.delegateCall should return Result<bytes, _>"
+    );
+}
+
+#[test]
+fn rawcall_with_wrong_calldata_type_produces_type_error() {
+    // `addr.rawCall(42u128, opts)` — calldata must be bytes, not u128
+    let result =
+        check_src(r#"fn f(addr: Address, opts: u128) { let r = addr.rawCall(42u128, opts) }"#);
+    assert!(
+        result.is_err(),
+        "rawCall with non-bytes calldata should produce a TypeError"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::TypeMismatch { .. }),
+            "expected TypeMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn staticcall_with_wrong_arg_count_produces_type_error() {
+    // `addr.staticCall()` — missing calldata arg
+    let result = check_src(r#"fn f(addr: Address) { let r = addr.staticCall() }"#);
+    assert!(
+        result.is_err(),
+        "staticCall with no args should produce an ArityMismatch error"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::ArityMismatch { .. }),
+            "expected ArityMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn rawcall_on_non_address_type_produces_type_error() {
+    // `42u64.rawCall(data, opts)` — receiver must be Address, not u64
+    let result =
+        check_src(r#"fn f(data: bytes, opts: u128) { let r = 42u64.rawCall(data, opts) }"#);
+    assert!(
+        result.is_err(),
+        "rawCall on non-Address receiver (u64) should produce a TypeError"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::UnknownField { .. }),
+            "expected UnknownField error for rawCall on non-Address, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn staticcall_on_non_address_type_produces_type_error() {
+    // `true.staticCall(data)` — receiver must be Address, not bool
+    let result = check_src(r#"fn f(data: bytes) { let r = true.staticCall(data) }"#);
+    assert!(
+        result.is_err(),
+        "staticCall on non-Address receiver (bool) should produce a TypeError"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::UnknownField { .. }),
+            "expected UnknownField error for staticCall on non-Address, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn rawcall_with_extra_args_produces_arity_error() {
+    // `addr.rawCall(data, opts, extra)` — too many args (expects 2)
+    let result = check_src(
+        r#"fn f(addr: Address, data: bytes, opts: u128, extra: u64) { let r = addr.rawCall(data, opts, extra) }"#,
+    );
+    assert!(
+        result.is_err(),
+        "rawCall with 3 args should produce an ArityMismatch error"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::ArityMismatch { .. }),
+            "expected ArityMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
+
+#[test]
+fn delegatecall_with_wrong_calldata_type_produces_type_error() {
+    // `addr.delegateCall(42u64)` — calldata must be bytes, not u64
+    let result = check_src(r#"fn f(addr: Address) { let r = addr.delegateCall(42u64) }"#);
+    assert!(
+        result.is_err(),
+        "delegateCall with non-bytes calldata should produce a TypeError"
+    );
+    if let Err(crate::error::LangError::Type(e)) = result {
+        assert!(
+            matches!(e.kind, TypeErrorKind::TypeMismatch { .. }),
+            "expected TypeMismatch, got {:?}",
+            e.kind
+        );
+    }
+}
