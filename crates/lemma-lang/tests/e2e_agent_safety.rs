@@ -299,9 +299,23 @@ fn e2e_agent_policy_as_return_type_compiles_cleanly() {
     // A contract that imports AgentPolicy from @std/agent and uses it as a
     // function return type in getPolicy.
     //
-    // Proves: AgentPolicy is usable in return-type position — the type checker
-    // resolves it to Named(id, []) and does not emit ReturnTypeMismatch or
+    // Proves: AgentPolicy resolves as a named type (not UndefinedType) in both
+    // return-type and struct-literal positions. The type checker produces
+    // `ResolvedType::Named(id, [])` and does not emit ReturnTypeMismatch or
     // UndefinedType errors.
+    //
+    // KNOWN LIMITATION (Technical Debt — @std-field-schema-1):
+    // `@std`-imported structs are registered with `SymbolKind::Struct` but carry
+    // NO `SymbolSig::Struct` (no field schema). The resolver's `register_import`
+    // path (resolver.rs:683-704) calls `alloc` + `define_type` only — it never
+    // calls `sigs.insert(SymbolSig::Struct(...))`. As a result, `infer_struct_lit`
+    // (infer.rs:1939-1975) finds `sigs.get(&struct_id) == None` and skips both
+    // UnknownField and MissingField validation loops.
+    //
+    // Consequence: `AgentPolicy { bogusField: 999 }` also compiles (see the
+    // companion test `e2e_agent_policy_field_validation_is_not_yet_enforced` below).
+    // Field-level validation for `@std` structs is deferred until the stdlib
+    // re-entrant parse path (mod.rs:89-91 `// TODO`) is implemented.
     //
     // Expected: full pipeline returns Ok(TypedAst).
     let _ = expect_clean(
@@ -322,4 +336,35 @@ return p
 }
 }"#,
     );
+}
+
+// ─── E2E Test 8: AgentPolicy field validation not yet enforced (known gap) ────
+
+#[test]
+fn e2e_agent_policy_field_validation_is_not_yet_enforced() {
+    // KNOWN LIMITATION PIN TEST (@std-field-schema-1):
+    // `@std`-imported structs carry no SymbolSig::Struct, so infer_struct_lit
+    // skips field validation. A wrong field name compiles today.
+    //
+    // This test pins the CURRENT behavior so that when field schemas are added
+    // for @std structs, this test flips to a failure and forces a reviewer
+    // to verify the field validation is now enforced correctly.
+    //
+    // When this test starts FAILING, it means field validation is implemented —
+    // delete this test and replace with a negative test asserting UnknownField.
+    let _ = expect_clean(
+        r#"import { AgentPolicy } from "@std/agent"
+
+contract PolicyReader {
+state { owner: Address }
+init(owner: Address) { self.owner = owner }
+pub fn getPolicy() -> AgentPolicy {
+    let p = AgentPolicy { expiryEpoch: 0, budgetTotal: 0, perTxCap: 0, perEpochCap: 0 }
+    return p
+}
+}"#,
+    );
+    // If AgentPolicy field validation were enforced, a struct literal with a wrong
+    // field name would emit UnknownField. It currently doesn't — @std structs have
+    // no field schema registered. Track: living-notes @std-field-schema-1.
 }

@@ -35,9 +35,17 @@ struct AutoRevoke {
 // KyaTier — the agent's identity-verification tier (§7).
 //
 // Counterparties in A2A interactions may require a minimum KyaTier.
-// Verified: full KYA onboarding completed.
-// Identified: basic onboarding completed.
-// None: unverified (default for new agents).
+// Variants are declared in ascending order: None < Identified < Verified.
+//
+// FORWARD DEPENDENCY (Step 13 / A2A §8):
+// `meets_counterparty_requirement(policy, payee)` requires `payee.kya_tier >= policy.required_tier`.
+// This is an ordered comparison over enum discriminants. Lem enums are currently pure tag
+// unions with no built-in Ord/discriminant comparison. Before Step 13 (VM enforcement) or
+// Step 16 (A2A commerce) can build this check, either:
+//   (a) Lem adds enum discriminant comparison (e.g. `KyaTier.ordinal()`), or
+//   (b) a `KyaTier.meetsMinimum(required: KyaTier) -> bool` method is added here, or
+//   (c) the check is encoded as a match expression in the VM (Rust-side Warden, not Lem).
+// Track: living-notes kya-tier-ordering-1 Technical Debt.
 enum KyaTier {
     None,
     Identified,
