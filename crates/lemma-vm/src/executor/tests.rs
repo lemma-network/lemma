@@ -47,6 +47,8 @@ fn test_block(sender: Address) -> BlockContext {
         // Placeholder — execute_call injects the real contract address (M3 fix).
         contract: sender,
         epoch: 0,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     }
 }
 
@@ -3043,6 +3045,8 @@ fn anomaly_hold_via_executor_produces_failed_receipt_and_increments_violation_co
         tx_origin: sender,
         contract: sender,
         epoch: 0,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     };
 
     let receipt = executor.execute_transaction(&spike_tx, block, &mut state);
@@ -3112,6 +3116,8 @@ fn kill_switch_via_executor_produces_failed_receipt_without_policy_write() {
         tx_origin: sender,
         contract: sender,
         epoch: 0,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     };
 
     let receipt = executor.execute_transaction(&tx, block, &mut state);
@@ -3214,6 +3220,8 @@ fn a2a_counterparty_rejected_via_executor_produces_failed_receipt_and_increments
         tx_origin: sender,
         contract: sender,
         epoch: 0,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     };
 
     let receipt = executor.execute_transaction(&tx, block, &mut state);
@@ -3310,6 +3318,8 @@ fn applied_agent_tx_receipt_contains_mandate_receipt_log_at_index_0() {
         tx_origin: sender,
         contract: sender,
         epoch: 3,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     };
 
     let receipt = executor.execute_transaction(&tx, block, &mut state);
@@ -3348,4 +3358,202 @@ fn applied_agent_tx_receipt_contains_mandate_receipt_log_at_index_0() {
         "value must match tx value"
     );
     assert!(!mr.cosigned, "no co-signature on this tx");
+}
+
+// ── Host-ABI versioning tests (P3·Step 20, DB-A58 L2) ────────────────────────
+
+/// Build a WASM binary with a `"lemma.meta"` custom section AND a `"call"` export.
+///
+/// Builds a complete valid WASM module from scratch using `wasm_encoder` with:
+/// - A `fn() -> ()` type, function, and `"call"` export.
+/// - A `"lemma.meta"` custom section containing the given `host_abi` value.
+///
+/// For deploy tests, the WASM must be valid enough to compile AND have the
+/// "lemma.meta" section for ABI version extraction.
+fn noop_wasm_with_host_abi(host_abi: u32) -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, CustomSection, ExportKind, ExportSection, Function, FunctionSection,
+        Instruction, Module, TypeSection,
+    };
+
+    // Build the "lemma.meta" JSON with the specified host_abi.
+    let json = format!(
+        "{{\"contract\":\"TestToken\",\"compiler\":\"lemma-lang/0.1.0\",\
+         \"functions\":[],\"host_abi\":{host_abi}}}"
+    );
+
+    let mut module = Module::new();
+
+    // Type section: one type — fn() -> ()
+    let mut types = TypeSection::new();
+    types.ty().function([], []);
+    module.section(&types);
+
+    // Function section: one function of type 0
+    let mut functions = FunctionSection::new();
+    functions.function(0);
+    module.section(&functions);
+
+    // Export section: export "call" as function 0
+    let mut exports = ExportSection::new();
+    exports.export("call", ExportKind::Func, 0);
+    module.section(&exports);
+
+    // Code section: one function body with only the required End instruction.
+    // WASM requires every function body to end with End.
+    let mut codes = CodeSection::new();
+    let mut f = Function::new(vec![]);
+    f.instruction(&Instruction::End);
+    codes.function(&f);
+    module.section(&codes);
+
+    // Custom section: "lemma.meta" with the host_abi JSON
+    module.section(&CustomSection {
+        name: std::borrow::Cow::Borrowed("lemma.meta"),
+        data: std::borrow::Cow::Owned(json.into_bytes()),
+    });
+
+    module.finish()
+}
+
+/// Build a WASM binary with a `"call"` export but NO `"lemma.meta"` section.
+///
+/// Simulates a contract compiled before P3·Step 20 (no host_abi field).
+fn noop_wasm_without_meta_section() -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
+        TypeSection,
+    };
+
+    let mut module = Module::new();
+
+    let mut types = TypeSection::new();
+    types.ty().function([], []);
+    module.section(&types);
+
+    let mut functions = FunctionSection::new();
+    functions.function(0);
+    module.section(&functions);
+
+    let mut exports = ExportSection::new();
+    exports.export("call", ExportKind::Func, 0);
+    module.section(&exports);
+
+    // Code section: one function body with only the required End instruction.
+    let mut codes = CodeSection::new();
+    let mut f = Function::new(vec![]);
+    f.instruction(&Instruction::End);
+    codes.function(&f);
+    module.section(&codes);
+
+    module.finish()
+}
+
+#[test]
+fn deploy_rejects_contract_with_unsupported_host_abi() {
+    // A contract declaring host_abi: 99 must be rejected at deploy time
+    // with a failed receipt. The rejection must happen BEFORE gas charges
+    // for storage (reject-before-charge, same as ContractTooLarge).
+    let executor = test_executor();
+    let sender = test_address(1);
+    let mut state = InMemoryStateView::new();
+
+    let wasm = noop_wasm_with_host_abi(99);
+    let deploy = deploy_tx(sender, wasm, 0, 500_000);
+    let receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+
+    assert!(
+        !receipt.success,
+        "deploy with unsupported host_abi must fail"
+    );
+    // Nonce still advances (failed tx still advances nonce per settlement contract).
+    assert_eq!(
+        state.nonce(&sender),
+        1,
+        "nonce advances even on failed deploy"
+    );
+    // No contract should be deployed.
+    let contract_addr = Address::from_deployer(&sender, 0);
+    assert!(
+        state.code(&contract_addr).is_none(),
+        "no contract must be stored after rejected deploy"
+    );
+}
+
+#[test]
+fn deploy_accepts_contract_with_absent_host_abi() {
+    // A contract with no "lemma.meta" section (pre-Step-20 format) must deploy
+    // successfully — backward compat: defaults to ABI v1.
+    let executor = test_executor();
+    let sender = test_address(2);
+    let mut state = InMemoryStateView::new();
+
+    let wasm = noop_wasm_without_meta_section();
+    let deploy = deploy_tx(sender, wasm, 0, 500_000);
+    let receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+
+    assert!(
+        receipt.success,
+        "deploy without host_abi field must succeed (backward compat default=1)"
+    );
+    let contract_addr = Address::from_deployer(&sender, 0);
+    assert!(
+        state.code(&contract_addr).is_some(),
+        "contract must be stored after successful deploy"
+    );
+}
+
+#[test]
+fn deploy_accepts_contract_with_host_abi_v1() {
+    // A contract explicitly declaring host_abi: 1 must deploy successfully.
+    let executor = test_executor();
+    let sender = test_address(3);
+    let mut state = InMemoryStateView::new();
+
+    let wasm = noop_wasm_with_host_abi(1);
+    let deploy = deploy_tx(sender, wasm, 0, 500_000);
+    let receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+
+    assert!(
+        receipt.success,
+        "deploy with host_abi=1 must succeed (v1 is supported)"
+    );
+    let contract_addr = Address::from_deployer(&sender, 0);
+    assert!(
+        state.code(&contract_addr).is_some(),
+        "contract must be stored after successful deploy"
+    );
+}
+
+#[test]
+fn call_dispatches_v1_for_known_contracts() {
+    // Deploy a v1 contract and call it — proves v1 dispatch works end-to-end.
+    let executor = test_executor();
+    let sender = test_address(4);
+    let mut state = InMemoryStateView::new();
+
+    // Deploy with explicit host_abi: 1.
+    let wasm = noop_wasm_with_host_abi(1);
+    let deploy = deploy_tx(sender, wasm, 0, 500_000);
+    let deploy_receipt = executor.execute_transaction(&deploy, test_block(sender), &mut state);
+    assert!(deploy_receipt.success, "deploy must succeed");
+
+    let contract_addr = Address::from_deployer(&sender, 0);
+
+    // Call the deployed contract — must succeed with v1 dispatch.
+    let call = call_tx(sender, contract_addr, 1, 500_000);
+    let call_receipt = executor.execute_transaction(&call, test_block(sender), &mut state);
+
+    assert!(
+        call_receipt.success,
+        "call to v1 contract must succeed (v1 dispatch works)"
+    );
+    assert!(
+        call_receipt.gas_used > 0,
+        "gas must be consumed on successful call"
+    );
+    assert!(
+        call_receipt.gas_used <= call.gas_limit,
+        "gas_used ≤ gas_limit"
+    );
 }

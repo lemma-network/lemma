@@ -260,6 +260,10 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
         }
     };
 
+    // Parse the callee's host-ABI version from its WASM meta section (DB-A58 L2).
+    // Defaults to 1 if absent (backward compat for pre-Step-20 contracts).
+    let callee_abi = crate::safety_manifest::parse_host_abi(&bytecode);
+
     // Compile callee module.
     let engine = caller.data().engine.clone();
     let module = match engine.compile_module(&bytecode) {
@@ -288,19 +292,23 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
     //
     // See CallMode doc comment and decisions-log DB-A59.
     let caller_contract = caller.data().block.contract;
+    // Clone the caller's BlockContext so we can use struct-update syntax without
+    // moving out of a shared reference. `active_features` is a BTreeSet (not Copy),
+    // so the spread `..caller.data().block` would fail without the clone.
+    let caller_block = caller.data().block.clone();
     let callee_block = match mode {
         CallMode::Normal | CallMode::Static => BlockContext {
             contract: addr,
             msg_sender: caller_contract,
-            ..caller.data().block
+            ..caller_block
         },
         CallMode::Delegate => BlockContext {
             // Storage namespace stays as the CALLER's address — callee writes land here.
             contract: caller_contract,
             // msg_sender is preserved from the caller's original context (not overridden
             // to the delegating contract). This is the key semantic difference from Normal.
-            msg_sender: caller.data().block.msg_sender,
-            ..caller.data().block
+            msg_sender: caller_block.msg_sender,
+            ..caller_block
         },
     };
     let callee_call_ctx = caller.data().call_ctx.clone();
@@ -315,8 +323,8 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
         calldata,
     );
 
-    // Run callee WASM.
-    let run_result = run_wasm_call(&engine, &module, callee_host);
+    // Run callee WASM with the callee's ABI version for correct linker dispatch (DB-A58 L2).
+    let run_result = run_wasm_call(callee_abi, &engine, &module, callee_host);
 
     match run_result {
         Ok((_gas_consumed, callee_after)) => {
@@ -377,11 +385,42 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
 
 // ── Linker builder ────────────────────────────────────────────────────────────
 
-/// Build a [`wasmtime::Linker`] with all 17 host functions registered.
+/// Build the correct host-function linker for the given host-ABI version.
+///
+/// Dispatches to the version-specific builder based on the ABI version
+/// embedded in the contract's `"lemma.meta"` custom section (DB-A58 L2).
+///
+/// # ABI versions
+///
+/// | Version | Host functions | Build step |
+/// |---------|---------------|------------|
+/// | 1       | Initial 17-fn set (P3·Step 6b-vm-2) | This node |
+/// | 2+      | Future — requires epoch feature-gate (P4·Step 12) | Not yet supported |
+///
+/// # Errors
+///
+/// Returns [`VmError::UnsupportedHostAbi`] if `abi > MAX_SUPPORTED_HOST_ABI`.
+pub fn build_linker_for_abi<S: ContractStateView + Clone + 'static>(
+    abi: u32,
+    engine: &LemmaEngine,
+) -> Result<wasmtime::Linker<HostState<S>>, VmError> {
+    match abi {
+        1 => build_linker_v1(engine),
+        _ => Err(VmError::UnsupportedHostAbi {
+            deployed_abi: abi,
+            max_supported: crate::MAX_SUPPORTED_HOST_ABI,
+        }),
+    }
+}
+
+/// Build a [`wasmtime::Linker`] with all 17 host functions registered (ABI v1).
 ///
 /// All host imports are registered under the `"lemma"` module name.
 /// Registration order matches the canonical import order from
 /// `lemma-lang/src/codegen/abi.rs::IMPORT_ORDER` (DB-A53 §4.5).
+///
+/// This is the ABI v1 implementation — the initial 17-fn set shipped in
+/// P3·Step 6b-vm-2. Called exclusively via [`build_linker_for_abi`].
 ///
 /// # Type parameter
 ///
@@ -395,7 +434,7 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
 ///
 /// Returns [`VmError::InstantiationFailed`] if any `func_wrap` call fails
 /// (extremely unlikely with correct WASM type signatures).
-pub fn build_linker<S: ContractStateView + Clone + 'static>(
+pub(crate) fn build_linker_v1<S: ContractStateView + Clone + 'static>(
     engine: &LemmaEngine,
 ) -> Result<wasmtime::Linker<HostState<S>>, VmError> {
     let mut linker: wasmtime::Linker<HostState<S>> = wasmtime::Linker::new(engine.inner());
@@ -786,7 +825,7 @@ pub fn build_linker<S: ContractStateView + Clone + 'static>(
     // NOTE: `_value` (value transfer in cross-contract calls) is deferred to subtask_05.
     // NOTE: This closure only runs when S = ScratchSnapshot (the production path).
     // The `S: Clone + 'static` bound is required to clone the state for the callee.
-    // build_linker is called with `S: ContractStateView + Clone + 'static` (see below).
+    // build_linker_v1 is called with `S: ContractStateView + Clone + 'static` via build_linker_for_abi (see above).
 
     linker
         .func_wrap(

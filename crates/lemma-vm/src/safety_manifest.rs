@@ -153,6 +153,38 @@ pub fn parse_safety_manifest(wasm_bytes: &[u8]) -> SafetyManifest {
     }
 }
 
+// ── Host-ABI version parser (P3·Step 20, DB-A58 L2) ──────────────────────────
+
+/// Parse the host-ABI version from a WASM module's `"lemma.meta"` custom section.
+///
+/// Returns `1` (the initial ABI) when:
+/// - the `"lemma.meta"` section is absent (pre-Step-20 compiled contract),
+/// - the `"host_abi"` field is missing from the JSON,
+/// - the JSON is malformed,
+/// - or the value is out of `u32` range.
+///
+/// This default ensures backward compatibility: contracts compiled before
+/// P3·Step 20 (which do not embed `host_abi`) continue to work with ABI v1.
+///
+/// Reuses [`crate::parallel::hints::find_lemma_meta_section`] to locate the
+/// custom section (DRY — AGENTS §2.4). No panic — all error paths return 1.
+///
+/// See `docs/17-VERSIONING_SPEC.md §3.2` and `DB-A58 L2`.
+pub(crate) fn parse_host_abi(wasm_bytes: &[u8]) -> u32 {
+    let Some(payload) = crate::parallel::hints::find_lemma_meta_section(wasm_bytes) else {
+        // No "lemma.meta" section — pre-Step-20 contract or non-Lem bytecode.
+        return 1;
+    };
+    let Ok(obj) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        // Malformed JSON — fail-safe default (old contracts expected to lack this field).
+        return 1;
+    };
+    obj.get("host_abi")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(1)
+}
+
 // ── Byte-value interpretation helpers ─────────────────────────────────────────
 
 /// Format a storage key as a hex string for error messages.

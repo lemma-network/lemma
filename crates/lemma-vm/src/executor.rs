@@ -494,6 +494,28 @@ impl Executor {
             Err(e) => return (Err(e), None),
         };
 
+        // 5b. HOST-ABI VERSION GATE (P3·Step 20, DB-A58 L2).
+        //
+        //     Extract and validate the host-ABI version from "lemma.meta".
+        //     Reject BEFORE any state writes or gas charges for storage:
+        //     the node cannot provide correct host-function semantics for a
+        //     contract compiled against an unsupported ABI version.
+        //
+        //     Placement: after compile (step 5) so the WASM is valid enough to
+        //     parse, but before content-addressed dedup (step 6) so no storage
+        //     gas is charged. Follows the reject-before-charge pattern used by
+        //     ContractTooLarge (step 1, line ~459).
+        let host_abi = crate::safety_manifest::parse_host_abi(&tx.data);
+        if host_abi > crate::MAX_SUPPORTED_HOST_ABI {
+            return (
+                Err(VmError::UnsupportedHostAbi {
+                    deployed_abi: host_abi,
+                    max_supported: crate::MAX_SUPPORTED_HOST_ABI,
+                }),
+                None,
+            );
+        }
+
         // 6. CONTENT-ADDRESSED DEDUP (DB-A23, 08-EXECUTION_SPEC §3.4(b/c)).
         //    Check whether this code_hash is already in the content store.
         //    First deployer: store bytecode + charge storage gas.
@@ -573,7 +595,7 @@ impl Executor {
         );
 
         let (init_consumed, init_host_after) =
-            match self.run_wasm_with_entry(&module, init_host, INIT_ENTRY_POINT) {
+            match self.run_wasm_with_entry(host_abi, &module, init_host, INIT_ENTRY_POINT) {
                 Ok(r) => r,
                 Err(e) => return (Err(e), None),
             };
@@ -692,6 +714,10 @@ impl Executor {
             }
         };
 
+        // Parse the contract's host-ABI version for dispatch (DB-A58 L2).
+        // Defaults to 1 if absent (backward compat for pre-Step-20 contracts).
+        let host_abi = crate::safety_manifest::parse_host_abi(&bytecode);
+
         // Cold/warm code access tracking (08-EXECUTION_SPEC §3.4(c), DB-A22).
         //
         // Compute the code_hash for this bytecode to determine cold vs warm.
@@ -773,7 +799,7 @@ impl Executor {
             tx.data.clone(), // calldata for input() host fn (DB-A53 §4.5)
         );
 
-        let (wasm_consumed, host_after) = match self.run_wasm(&module, host) {
+        let (wasm_consumed, host_after) = match self.run_wasm(host_abi, &module, host) {
             Ok(r) => r,
             Err(e) => return (Err(e), Some((contract_addr, manifest))),
         };
@@ -835,6 +861,7 @@ impl Executor {
     /// Maps wasmtime traps to [`VmError`] variants.
     fn run_wasm<S: ContractStateView + Clone + 'static>(
         &self,
+        abi: u32,
         module: &wasmtime::Module,
         host: HostState<S>,
     ) -> Result<(Gas, HostState<S>), VmError> {
@@ -849,8 +876,8 @@ impl Executor {
                 reason: format!("set_fuel failed: {e}"),
             })?;
 
-        // Build linker and instantiate.
-        let linker = linker::build_linker::<S>(&self.engine)?;
+        // Build linker for the contract's host-ABI version (DB-A58 L2).
+        let linker = linker::build_linker_for_abi::<S>(abi, &self.engine)?;
         let instance =
             linker
                 .instantiate(&mut store, module)
@@ -895,6 +922,7 @@ impl Executor {
     /// - [`VmError::TrapUnknown`] — any other WASM trap during init.
     fn run_wasm_with_entry<S: ContractStateView + Clone + 'static>(
         &self,
+        abi: u32,
         module: &wasmtime::Module,
         host: HostState<S>,
         entry_point: &str,
@@ -910,8 +938,8 @@ impl Executor {
                 reason: format!("set_fuel failed: {e}"),
             })?;
 
-        // Build linker and instantiate.
-        let linker = linker::build_linker::<S>(&self.engine)?;
+        // Build linker for the contract's host-ABI version (DB-A58 L2).
+        let linker = linker::build_linker_for_abi::<S>(abi, &self.engine)?;
         let instance =
             linker
                 .instantiate(&mut store, module)
@@ -1605,6 +1633,7 @@ impl<S: ContractStateView + Clone + 'static> CanonicalStateRead for S {
 ///
 /// Maps wasmtime traps to [`VmError`] variants.
 pub(crate) fn run_wasm_call<S: ContractStateView + Clone + 'static>(
+    abi: u32,
     engine: &LemmaEngine,
     module: &wasmtime::Module,
     host: HostState<S>,
@@ -1620,8 +1649,8 @@ pub(crate) fn run_wasm_call<S: ContractStateView + Clone + 'static>(
             reason: format!("run_wasm_call: set_fuel failed: {e}"),
         })?;
 
-    // Build linker and instantiate.
-    let linker = linker::build_linker::<S>(engine)?;
+    // Build linker for the callee's host-ABI version (DB-A58 L2).
+    let linker = linker::build_linker_for_abi::<S>(abi, engine)?;
     let instance =
         linker
             .instantiate(&mut store, module)

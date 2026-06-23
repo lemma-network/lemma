@@ -41,6 +41,12 @@ use crate::{
 /// All fields come from the block header or transaction — never from
 /// `SystemTime`, `rand`, or any non-deterministic source (AGENTS.md §7.1,
 /// 07-CONSENSUS_SPEC §5.1).
+///
+/// ## Fields added per step
+///
+/// - `height`, `timestamp`, `msg_sender`, `msg_value`, `tx_origin`, `contract` — baseline
+/// - `epoch` — P3·Step 13 (Warden policy enforcement)
+/// - `active_features` — P3·Step 20 (epoch feature-gate plumbing, DB-A63)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockContext {
     /// Current block height (from consensus — never `SystemTime`).
@@ -69,6 +75,19 @@ pub struct BlockContext {
     ///
     /// Added in P3·Step 13 (Warden policy enforcement).
     pub epoch: u64,
+
+    /// Active protocol feature gates at the current block's epoch boundary.
+    ///
+    /// Set by the node executor from the epoch config (P4·Step 12 will populate
+    /// this from the on-chain governance feature-gate registry). Until P4·Step 12
+    /// ships, this is always an empty `BTreeSet` — ABI v1 is the baseline.
+    ///
+    /// Used by the VM to gate activation of new host-ABI versions and other
+    /// epoch-boundary changes (docs/17-VERSIONING_SPEC.md §7.1.B).
+    ///
+    /// `BTreeSet` is mandatory — deterministic iteration order for consensus
+    /// (AGENTS §7.1). Never use `HashSet` here.
+    pub active_features: std::collections::BTreeSet<lemma_core::FeatureId>,
 }
 
 // ── CallContext ───────────────────────────────────────────────────────────────

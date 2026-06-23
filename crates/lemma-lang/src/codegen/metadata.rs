@@ -1,4 +1,4 @@
-//! `"lemma.meta"` WASM custom-section builder (P3·Step 6i, Step 18, Step 19).
+//! `"lemma.meta"` WASM custom-section builder (P3·Step 6i, Step 18, Step 19, Step 20).
 //!
 //! Builds the metadata payload embedded by `emit_module` as the
 //! `"lemma.meta"` custom section (last in the WASM binary per §5.5.2).
@@ -11,6 +11,7 @@
 //!   "contract": "TokenX",
 //!   "compiler": "lemma-lang/0.1.0",
 //!   "safety_ruleset": "1.0.0",
+//!   "host_abi": 1,
 //!   "functions": [
 //!     {
 //!       "name": "transfer",
@@ -65,6 +66,21 @@ const COMPILER_VERSION: &str = concat!("lemma-lang/", env!("CARGO_PKG_VERSION"))
 ///
 /// `1.0.0` = post-DB-A57 de-LARP (22 active rules: 001-012, 014-023, 025).
 const SAFETY_RULESET_VERSION: &str = "1.0.0";
+
+/// Host-ABI version embedded in every `"lemma.meta"` section (DB-A58 L2).
+///
+/// Identifies the host-function ABI version the contract was compiled against.
+/// The LemmaVM uses this to dispatch to the correct host-function implementation
+/// (see `docs/17-VERSIONING_SPEC.md §3`).
+///
+/// Versioning scheme: monotonic u32 integer.
+/// - `1` = initial 17-fn set (P3·Step 6b-vm-2).
+/// - Future bumps require epoch feature-gate activation before new contracts
+///   with the higher version can be deployed (P3·Step 20 + P4·Step 12).
+///
+/// `parse_host_abi()` in `lemma-vm` defaults to `1` if this field is absent
+/// (backward compatibility for pre-Step-20 compiled contracts).
+const HOST_ABI_VERSION: u32 = 1;
 
 // ── Serializable structures ───────────────────────────────────────────────────
 
@@ -140,6 +156,10 @@ struct ContractMetadata<'a> {
     compiler: &'static str,
     /// Safety-ruleset semver that verified this contract (DB-A58 L1).
     safety_ruleset: &'static str,
+    /// Host-ABI version this contract was compiled against (DB-A58 L2).
+    /// Parsed by the LemmaVM at deploy/call time to select the correct
+    /// host-function dispatch table.
+    host_abi: u32,
     /// Per-function state-access hints — one entry per public function.
     functions: Vec<FnMeta>,
     /// Safety constraints for the VM runtime honeypot invariant (DB-A51).
@@ -253,6 +273,7 @@ pub(crate) fn build_metadata(contract: &TypedContract<'_>) -> Vec<u8> {
         contract: contract.name(),
         compiler: COMPILER_VERSION,
         safety_ruleset: SAFETY_RULESET_VERSION,
+        host_abi: HOST_ABI_VERSION,
         functions,
         safety_constraints,
     };

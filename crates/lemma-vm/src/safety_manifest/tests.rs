@@ -1002,3 +1002,104 @@ fn ratchet_off_all_zero_multi_byte_is_falsy_no_violation() {
     // Disabling (truthy → falsy) is allowed.
     assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
+
+// ── parse_host_abi tests (P3·Step 20, DB-A58 L2) ─────────────────────────────
+
+use super::parse_host_abi;
+
+/// Build a minimal valid WASM module with a `"lemma.meta"` custom section
+/// containing the given JSON payload.
+///
+/// Reuses the same helper pattern as `wasm_with_meta_section` above (DRY).
+fn wasm_with_meta_json(json_bytes: &[u8]) -> Vec<u8> {
+    use wasm_encoder::{CustomSection, Module};
+    let mut module = Module::new();
+    module.section(&CustomSection {
+        name: std::borrow::Cow::Borrowed("lemma.meta"),
+        data: std::borrow::Cow::Borrowed(json_bytes),
+    });
+    module.finish()
+}
+
+#[test]
+fn parse_host_abi_defaults_to_1_for_empty_bytes() {
+    // Empty/invalid bytes → no "lemma.meta" section → default 1.
+    assert_eq!(parse_host_abi(&[]), 1);
+}
+
+#[test]
+fn parse_host_abi_defaults_to_1_for_garbage_bytes() {
+    // Random garbage → WASM parse error → default 1 (never panics).
+    assert_eq!(parse_host_abi(b"not valid wasm at all"), 1);
+}
+
+#[test]
+fn parse_host_abi_defaults_to_1_when_section_absent() {
+    // Valid WASM without "lemma.meta" → default 1 (backward compat).
+    let wasm = wasm_without_meta_section();
+    assert_eq!(parse_host_abi(&wasm), 1);
+}
+
+#[test]
+fn parse_host_abi_defaults_to_1_when_field_absent() {
+    // Valid WASM with "lemma.meta" but no "host_abi" field → default 1.
+    // This is the expected case for contracts compiled before P3·Step 20.
+    let json = b"{\"contract\":\"TestToken\",\"compiler\":\"lemma-lang/0.1.0\",\"functions\":[]}";
+    let wasm = wasm_with_meta_json(json);
+    assert_eq!(parse_host_abi(&wasm), 1);
+}
+
+#[test]
+fn parse_host_abi_defaults_to_1_for_malformed_json() {
+    // Valid WASM with "lemma.meta" containing invalid JSON → default 1.
+    let wasm = wasm_with_meta_json(b"not json at all");
+    assert_eq!(parse_host_abi(&wasm), 1);
+}
+
+#[test]
+fn parse_host_abi_reads_correct_value() {
+    // Valid WASM with "lemma.meta" containing {"host_abi": 1} → returns 1.
+    let json = b"{\"contract\":\"TestToken\",\"compiler\":\"lemma-lang/0.1.0\",\
+                  \"functions\":[],\"host_abi\":1}";
+    let wasm = wasm_with_meta_json(json);
+    assert_eq!(parse_host_abi(&wasm), 1);
+}
+
+#[test]
+fn parse_host_abi_reads_value_2() {
+    // Valid WASM with "lemma.meta" containing {"host_abi": 2} → returns 2.
+    // (Even though v2 is not yet supported, the parser must read it correctly
+    //  so the deploy gate can reject it with UnsupportedHostAbi.)
+    let json = b"{\"contract\":\"TestToken\",\"compiler\":\"lemma-lang/0.1.0\",\
+                  \"functions\":[],\"host_abi\":2}";
+    let wasm = wasm_with_meta_json(json);
+    assert_eq!(parse_host_abi(&wasm), 2);
+}
+
+#[test]
+fn parse_host_abi_rejects_out_of_range_value_with_default() {
+    // Value 9999999999 fits u64 but overflows u32 → u32::try_from fails → default 1.
+    // This tests the conservative/safe fallback for out-of-range values.
+    let json = b"{\"contract\":\"TestToken\",\"compiler\":\"lemma-lang/0.1.0\",\
+                  \"functions\":[],\"host_abi\":9999999999}";
+    let wasm = wasm_with_meta_json(json);
+    assert_eq!(parse_host_abi(&wasm), 1);
+}
+
+#[test]
+fn parse_host_abi_defaults_to_1_for_negative_value() {
+    // Negative JSON number → as_u64() returns None → default 1.
+    let json = b"{\"contract\":\"TestToken\",\"compiler\":\"lemma-lang/0.1.0\",\
+                  \"functions\":[],\"host_abi\":-1}";
+    let wasm = wasm_with_meta_json(json);
+    assert_eq!(parse_host_abi(&wasm), 1);
+}
+
+#[test]
+fn parse_host_abi_defaults_to_1_for_string_value() {
+    // String value for host_abi → as_u64() returns None → default 1.
+    let json = b"{\"contract\":\"TestToken\",\"compiler\":\"lemma-lang/0.1.0\",\
+                  \"functions\":[],\"host_abi\":\"v1\"}";
+    let wasm = wasm_with_meta_json(json);
+    assert_eq!(parse_host_abi(&wasm), 1);
+}

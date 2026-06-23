@@ -61,6 +61,8 @@ fn block() -> BlockContext {
         // Placeholder — execute_call injects the real contract address (M3 fix).
         contract: addr(0),
         epoch: 0,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     }
 }
 

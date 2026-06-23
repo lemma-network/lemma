@@ -86,6 +86,24 @@ pub enum VmError {
         limit: usize,
     },
 
+    /// The contract was compiled against a host-ABI version this node does not support.
+    ///
+    /// Rejected at deploy time: the node cannot provide the correct host-function
+    /// semantics for this contract. The deployer must use a node binary that
+    /// supports the required ABI version, or recompile against a lower version.
+    ///
+    /// Also returned at call time if a contract's stored ABI version is somehow
+    /// higher than `MAX_SUPPORTED_HOST_ABI` (should not occur after deploy validation).
+    ///
+    /// Charge the intrinsic gas only — no WASM execution was attempted.
+    #[error("unsupported host-ABI version: contract requires {deployed_abi}, node supports up to {max_supported}")]
+    UnsupportedHostAbi {
+        /// The host-ABI version the contract declares.
+        deployed_abi: u32,
+        /// The maximum version this node binary supports.
+        max_supported: u32,
+    },
+
     /// A post-execution state diff violated a safety constraint embedded in the
     /// contract's `"lemma.meta"` safety manifest (DB-A51 runtime honeypot invariant).
     ///

@@ -382,6 +382,8 @@ fn block_ctx() -> BlockContext {
         tx_origin: Address::zero(),
         contract: Address::zero(),
         epoch: 0,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     }
 }
 

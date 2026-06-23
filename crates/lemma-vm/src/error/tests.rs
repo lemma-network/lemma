@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn unsupported_host_abi_displays_versions() {
+    // Verify the Display output contains both the deployed and max-supported versions
+    // so operators can diagnose rejected deploys from receipts alone (DB-A58 L2).
+    let e = VmError::UnsupportedHostAbi {
+        deployed_abi: 99,
+        max_supported: 1,
+    };
+    let msg = e.to_string();
+    assert!(
+        msg.contains("99"),
+        "error message must contain the deployed ABI version (99); got: {msg}"
+    );
+    assert!(
+        msg.contains("1"),
+        "error message must contain the max supported version (1); got: {msg}"
+    );
+    assert!(
+        msg.contains("unsupported host-ABI"),
+        "error message must contain 'unsupported host-ABI'; got: {msg}"
+    );
+}
+
+#[test]
 fn compilation_failed_displays_reason() {
     let e = VmError::CompilationFailed {
         reason: "bad magic".to_string(),

@@ -156,6 +156,9 @@ pub fn execute_committed_block(
         // Epoch from the parent block header — deterministic (AGENTS §7.1).
         // Warden uses this for policy expiry checks (14-AGENT_LAYER §3).
         epoch: parent.header.epoch,
+        // P4·Step 12: populate from on-chain governance feature-gate registry.
+        // Until then, empty BTreeSet = ABI v1 baseline (no features active).
+        active_features: std::collections::BTreeSet::new(),
     };
 
     // Base state: read-only view of committed state from the parent block.

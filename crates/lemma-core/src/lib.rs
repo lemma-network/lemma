@@ -23,6 +23,7 @@
 //! | [`validator`] | [`Validator`], [`ValidatorStatus`], [`ConsensusKey`], [`Stake`], [`VotingPower`] |
 //! | [`validator_set`] | [`ValidatorSet`], [`Member`] — epoch committee |
 //! | [`epoch`] | [`Epoch`] — validator-set era |
+//! | [`feature_gate`] | [`FeatureId`], [`FEATURE_HOST_ABI_V2`] — epoch-boundary upgrade activation (P3·Step 20) |
 //!
 //! ## Build order
 //!
@@ -37,6 +38,8 @@ pub mod block;
 pub mod cert;
 pub mod epoch;
 pub mod error;
+/// Feature-gate types for epoch-boundary upgrade activation (P3·Step 20, DB-A63).
+pub mod feature_gate;
 pub mod genesis;
 pub mod hash;
 pub mod header;
@@ -56,6 +59,7 @@ pub use agent::{
     EpochRange, KyaTier, PolicyViolation, WardenOutcome, MAX_CATEGORIES,
 };
 pub use amount::{Amount, DRIPS_PER_LEM, DROPS_PER_DRIP, DROPS_PER_LEM};
+pub use feature_gate::{FeatureId, FEATURE_HOST_ABI_V2};
 pub use hash::Hash;
 pub use limits::MAX_CONTRACT_WASM_SIZE;
 pub use signature::Signature;

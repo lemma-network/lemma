@@ -371,3 +371,39 @@ init() {}
         "plain Token (not TaxToken) must NOT produce FeeCap constraint; got {constraints:?}"
     );
 }
+
+// ─── build_metadata — host_abi field (P3·Step 20, DB-A58 L2) ─────────────────
+
+#[test]
+fn build_metadata_contains_host_abi_field() {
+    // Every compiled contract must carry host_abi in its meta section (DB-A58 L2).
+    let typed = typed_ast_for("contract Foo {}");
+    let contracts = typed.contracts();
+    let bytes = build_metadata(&contracts[0]);
+    let obj: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    assert!(
+        obj.get("host_abi").is_some(),
+        "meta.json missing 'host_abi' field"
+    );
+}
+
+#[test]
+fn build_metadata_host_abi_equals_constant() {
+    // host_abi must equal HOST_ABI_VERSION (1) — the initial 17-fn set (P3·Step 6b-vm-2).
+    let typed = typed_ast_for("contract Foo {}");
+    let contracts = typed.contracts();
+    let bytes = build_metadata(&contracts[0]);
+    let obj: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    let host_abi = obj["host_abi"].as_u64().expect("host_abi must be a number");
+    assert_eq!(host_abi, 1, "host_abi must equal HOST_ABI_VERSION (1)");
+}
+
+#[test]
+fn build_metadata_host_abi_is_deterministic() {
+    // Identical source → byte-identical host_abi (AGENTS §7.1 determinism).
+    let typed = typed_ast_for("contract Foo {}");
+    let contracts = typed.contracts();
+    let a = build_metadata(&contracts[0]);
+    let b = build_metadata(&contracts[0]);
+    assert_eq!(a, b, "build_metadata must be deterministic");
+}

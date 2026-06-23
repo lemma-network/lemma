@@ -36,6 +36,8 @@ fn test_block(sender: Address) -> BlockContext {
         // M3: storage ops use block.contract, not block.msg_sender.
         contract: sender,
         epoch: 0,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     }
 }
 
@@ -488,6 +490,8 @@ fn make_host_with_context(
         tx_origin: msg_sender,
         contract,
         epoch: 0,
+        // P3·Step 20: empty = ABI v1 baseline (P4·Step 12 populates from governance).
+        active_features: std::collections::BTreeSet::new(),
     };
     HostState::new(
         FuelMeter::new(Gas::new(budget)),

@@ -53,3 +53,13 @@ pub use parallel::{
 pub use runtime::{deterministic_config, LemmaEngine, MAX_CALL_DEPTH, MAX_WASM_STACK};
 pub use safety_manifest::{parse_safety_manifest, SafetyConstraint, SafetyManifest};
 pub use state::{ContractStateView, InMemoryStateView};
+
+// ── Host-ABI versioning (P3·Step 20, DB-A58 L2) ──────────────────────────────
+
+/// Maximum host-ABI version supported by this node binary.
+///
+/// Contracts compiled against a higher version cannot be deployed or called.
+/// Bumped only when a new ABI version ships AND the corresponding epoch
+/// feature gate (P4·Step 12) has been activated. Current: ABI v1 = initial
+/// 17-fn set (P3·Step 6b-vm-2, docs/17-VERSIONING_SPEC.md §3).
+pub(crate) const MAX_SUPPORTED_HOST_ABI: u32 = 1;
