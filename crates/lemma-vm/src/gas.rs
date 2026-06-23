@@ -205,6 +205,22 @@ pub struct GasSchedule {
     /// safety manifest. Covers the state-diff scan against the manifest.
     /// Devnet placeholder — benchmark-tune before mainnet.
     pub invariant_check: Gas,
+
+    // ── Warden policy enforcement (P3·Step 13) ───────────────────────────────
+    /// Flat cost for the Warden pre-application policy check on session-key
+    /// transactions (14-AGENT_LAYER §3).
+    ///
+    /// Charged once per agent transaction, BEFORE `warden_check` runs
+    /// (charge-before-execute, AGENTS §7.5). Covers the full Warden pipeline:
+    /// - Steps 13–16: policy state read, all checks, counter write, A2A registry read.
+    /// - Step 17: `build_mandate_receipt_log` (1 policy re-read, 1 blake3, 2 serde_json
+    ///   serializes). This post-check work is absorbed into the same 7_500 envelope.
+    ///
+    /// **Devnet placeholder — benchmark-tune before mainnet.** The 7_500 figure covers
+    /// the observed work in testing but has not been formally profiled. Steps 13–17
+    /// are the current maximum scope; the value must be revisited when A2A reputation
+    /// lookup (Phase 4) or Veil shielded receipts (§10) are added.
+    pub warden_check: Gas,
 }
 
 impl GasSchedule {
@@ -269,6 +285,12 @@ impl GasSchedule {
             // Flat cost for post-execution honeypot invariant scan (DB-A51).
             // Cheap — small state-diff scan, not execution. Benchmark-tune before mainnet.
             invariant_check: Gas(5_000),
+
+            // Warden policy enforcement (P3·Step 13)
+            // Covers: 1 state read (policy), validation logic, 1 state write (counters).
+            // Similar to storage_read_cold + storage_write_update ≈ 7 100.
+            // Rounded to 7 500 for buffer. Benchmark-tune before mainnet.
+            warden_check: Gas(7_500),
         }
     }
 }

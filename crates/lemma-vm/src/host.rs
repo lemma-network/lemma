@@ -60,6 +60,15 @@ pub struct BlockContext {
     /// storage is being accessed. See decisions-log DB-A53 §4.5 and
     /// 08-EXECUTION_SPEC §4.5.
     pub contract: Address,
+
+    /// Current epoch number (validator-set era, from consensus).
+    ///
+    /// Used by Warden for policy expiry checks and per-epoch counter resets
+    /// (14-AGENT_LAYER §3). Sourced from the parent block header's epoch
+    /// field — deterministic, never from `SystemTime` (AGENTS §7.1).
+    ///
+    /// Added in P3·Step 13 (Warden policy enforcement).
+    pub epoch: u64,
 }
 
 // ── CallContext ───────────────────────────────────────────────────────────────

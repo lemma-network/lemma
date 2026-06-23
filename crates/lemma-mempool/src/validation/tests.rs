@@ -135,6 +135,8 @@ fn validate_rejects_zero_gas_limit() {
         tx_type: TxType::Transfer,
         data: vec![],
         signature: Signature::Unsigned,
+        session_key: None,
+        owner_cosignature: None,
     };
     sign_transaction(&mut tx, &kp).expect("signing must succeed with gas_limit=0");
     let err = validate_transaction(&tx, &kp.public_key(), &state, &default_ctx())

@@ -603,6 +603,8 @@ fn transaction_validate_rejects_zero_gas_limit_on_deserialized_transaction() {
         tx_type: TxType::Transfer,
         data: vec![],
         signature: Signature::Unsigned,
+        session_key: None,
+        owner_cosignature: None,
     };
     assert_eq!(tx.validate().unwrap_err(), TransactionError::ZeroGasLimit);
 }
@@ -621,6 +623,8 @@ fn transaction_validate_rejects_missing_recipient_on_deserialized_transaction() 
         tx_type: TxType::Transfer,
         data: vec![],
         signature: Signature::Unsigned,
+        session_key: None,
+        owner_cosignature: None,
     };
     assert!(matches!(
         tx.validate().unwrap_err(),
@@ -642,6 +646,8 @@ fn transaction_validate_rejects_unexpected_recipient_on_deserialized_transaction
         tx_type: TxType::ContractDeploy,
         data: vec![0x60, 0x80],
         signature: Signature::Unsigned,
+        session_key: None,
+        owner_cosignature: None,
     };
     assert_eq!(
         tx.validate().unwrap_err(),

@@ -5,6 +5,7 @@ edition = "2021"
 description = "LemmaVM: WASM execution, gas metering, host functions, Flux parallel execution"
 
 [dependencies]
+blake3       = { workspace = true }
 thiserror    = { workspace = true }
 wasmtime     = { workspace = true }
 wasmparser   = { workspace = true }  # for "lemma.meta" custom section parsing (B5-3b)

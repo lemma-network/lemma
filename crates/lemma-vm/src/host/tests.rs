@@ -35,6 +35,7 @@ fn test_block(sender: Address) -> BlockContext {
         // In host tests, contract == sender (single-frame, no cross-contract calls).
         // M3: storage ops use block.contract, not block.msg_sender.
         contract: sender,
+        epoch: 0,
     }
 }
 
@@ -486,6 +487,7 @@ fn make_host_with_context(
         msg_value: Amount::zero(),
         tx_origin: msg_sender,
         contract,
+        epoch: 0,
     };
     HostState::new(
         FuelMeter::new(Gas::new(budget)),

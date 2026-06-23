@@ -153,6 +153,9 @@ pub fn execute_committed_block(
         tx_origin: proposer,
         // contract is set per-call by execute_call (M3 fix); proposer is a safe placeholder.
         contract: proposer,
+        // Epoch from the parent block header — deterministic (AGENTS §7.1).
+        // Warden uses this for policy expiry checks (14-AGENT_LAYER §3).
+        epoch: parent.header.epoch,
     };
 
     // Base state: read-only view of committed state from the parent block.

@@ -451,6 +451,8 @@ async fn dispatch_handles_transaction_received_without_error() {
         data: vec![],
         signature: Signature::Unsigned,
         tx_type: TxType::Transfer,
+        session_key: None,
+        owner_cosignature: None,
     };
     // D·15d: TransactionReceived now carries sender_pubkey.
     // Zero-bytes key — admission will fail sig verify (non-fatal, just logged).
@@ -458,7 +460,7 @@ async fn dispatch_handles_transaction_received_without_error() {
     event_tx
         .send(NetworkEvent::TransactionReceived {
             from: libp2p::PeerId::random(),
-            tx,
+            tx: Box::new(tx),
             sender_pubkey,
         })
         .await

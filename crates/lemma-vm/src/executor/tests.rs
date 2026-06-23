@@ -3,10 +3,14 @@
 //! All tests follow the naming convention `{action}_{condition}_{outcome}`
 //! (AGENTS.md §11.3). Tests live in a separate submodule file (AGENTS.md §11.2).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use lemma_core::{
     address::Address,
+    agent::{
+        Action, ActionMask, AgentIdentity, AgentPolicy, AllowList, AnomalyConfig, AnomalyHistory,
+        CategoryCaps, KyaTier,
+    },
     amount::Amount,
     hash::Hash,
     signature::Signature,
@@ -42,6 +46,7 @@ fn test_block(sender: Address) -> BlockContext {
         tx_origin: sender,
         // Placeholder — execute_call injects the real contract address (M3 fix).
         contract: sender,
+        epoch: 0,
     }
 }
 
@@ -2933,4 +2938,414 @@ fn static_call_callee_reentrancy_still_prevented() {
         receipt.success,
         "outer call must succeed even when static_call reentrancy is rejected (returns -1 sentinel)"
     );
+}
+
+// ── Warden integration tests (P3·Step 15) ────────────────────────────────────
+//
+// These tests exercise the full executor path: warden_check → AnomalyHold →
+// executor Err arm → handle_violation → dead-man's switch increment.
+// Closes the seam gap identified in CR-S15-6.
+
+/// Helper: build a minimal agent policy with anomaly detection enabled
+/// and a committed baseline (has_history=true).
+fn anomaly_agent_policy(session_key: &[u8], per_tx_cap: Amount) -> AgentPolicy {
+    AgentPolicy {
+        session_key: session_key.to_vec(),
+        expiry_epoch: 100,
+        budget_total: Amount::from_drop(1_000_000_000),
+        per_tx_cap,
+        per_epoch_cap: Amount::from_drop(500_000_000),
+        allowed_targets: AllowList::any(),
+        allowed_actions: ActionMask::from_actions(&[
+            Action::Transfer,
+            Action::ContractCall,
+            Action::ContractDeploy,
+            Action::Stake,
+            Action::Unstake,
+            Action::GovernanceVote,
+        ]),
+        spent_total: Amount::zero(),
+        spent_this_epoch: Amount::zero(),
+        last_epoch: 0,
+        refill_per_epoch: Amount::zero(),
+        budget_ceiling: None,
+        categories: CategoryCaps::new(),
+        active_window: None,
+        cosign_threshold: None,
+        auto_revoke: lemma_core::agent::AutoRevoke {
+            max_violations_per_epoch: 5,
+            violations_this_epoch: 0,
+        },
+        kya_tier: KyaTier::None,
+        anomaly: AnomalyConfig {
+            enabled: true,
+            spike_ratio: 500, // 5× avg
+            burst_ratio: 300,
+        },
+        history: AnomalyHistory {
+            avg_value_ema: Amount::from_drop(100), // baseline
+            tx_count_this_epoch: 0,
+            avg_tx_count_ema: 4,
+            has_history: true,
+            seen_targets: BTreeSet::new(),
+        },
+        required_kya_tier: KyaTier::None,
+        min_counterparty_reputation: 0,
+    }
+}
+
+#[test]
+fn anomaly_hold_via_executor_produces_failed_receipt_and_increments_violation_counter() {
+    // Full executor path: spike tx → AnomalyHold → Err → handle_violation →
+    // dead-man's switch increments. Verifies the seam between warden_check
+    // and handle_violation (CR-S15-6).
+    let sender = test_address(1);
+    let recipient = test_address(2);
+    let session_key_bytes = vec![0xAB, 0xCD, 0xEF, 0x01];
+
+    let per_tx_cap = Amount::from_drop(10_000);
+    let policy = anomaly_agent_policy(&session_key_bytes, per_tx_cap);
+
+    let mut state = InMemoryStateView::new();
+    // Fund sender so the transfer can be checked for funds (executor debits
+    // value before warden but warden is pre-application — order is warden first
+    // in our impl; fund generously to isolate the warden trigger).
+    state.set_balance(&sender, Amount::from_drop(1_000_000_000));
+    // Set nonce.
+    state.set_nonce(&sender, 0);
+
+    // Write policy into state.
+    crate::warden::write_policy(&mut state, &sender, &session_key_bytes, &policy);
+
+    // Build a spike tx: value = 501 Drop (> 5× avg(100 Drop)=500 Drop).
+    let mut spike_tx = Transaction::new(
+        Hash::zero(),
+        sender,
+        Some(recipient),
+        0,
+        1,
+        Amount::from_drop(501),
+        500_000,
+        Amount::from_drop(1_000_000_000),
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("valid tx");
+    spike_tx.session_key = Some(session_key_bytes.clone());
+
+    let executor = test_executor();
+    let block = BlockContext {
+        height: 1,
+        timestamp: 1_000_000,
+        msg_sender: sender,
+        msg_value: Amount::zero(),
+        tx_origin: sender,
+        contract: sender,
+        epoch: 0,
+    };
+
+    let receipt = executor.execute_transaction(&spike_tx, block, &mut state);
+
+    // Receipt must be a failure (AnomalyHold held the tx).
+    assert!(
+        !receipt.success,
+        "AnomalyHold must produce a failed receipt via executor"
+    );
+    // H2 invariant (08-EXECUTION_SPEC §5): failed receipt must have empty logs.
+    // mandate_log is NOT captured for AnomalyHold (the path returns before Applied).
+    assert!(
+        receipt.logs.is_empty(),
+        "AnomalyHold failed receipt must have empty logs (H2 invariant — no mandate receipt)"
+    );
+
+    // Dead-man's switch must have been incremented via handle_violation.
+    let updated_policy =
+        crate::warden::read_policy(&state, &sender, &session_key_bytes).expect("policy must exist");
+    assert_eq!(
+        updated_policy.auto_revoke.violations_this_epoch, 1,
+        "handle_violation must increment violations_this_epoch for AnomalyHold"
+    );
+}
+
+#[test]
+fn kill_switch_via_executor_produces_failed_receipt_without_policy_write() {
+    // Full executor path: kill switch active → AgentsPaused → Err →
+    // executor skips handle_violation → dead-man's switch NOT incremented.
+    let sender = test_address(1);
+    let recipient = test_address(2);
+    let session_key_bytes = vec![0xAB, 0xCD, 0xEF, 0x01];
+
+    let policy = anomaly_agent_policy(&session_key_bytes, Amount::from_drop(10_000));
+
+    let mut state = InMemoryStateView::new();
+    state.set_balance(&sender, Amount::from_drop(1_000_000_000));
+    state.set_nonce(&sender, 0);
+
+    // Write the policy.
+    crate::warden::write_policy(&mut state, &sender, &session_key_bytes, &policy);
+    // Pause the owner.
+    crate::warden::write_owner_paused(&mut state, &sender, true);
+
+    let mut tx = Transaction::new(
+        Hash::zero(),
+        sender,
+        Some(recipient),
+        0,
+        1,
+        Amount::from_drop(100),
+        500_000,
+        Amount::from_drop(1_000_000_000),
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("valid tx");
+    tx.session_key = Some(session_key_bytes.clone());
+
+    let executor = test_executor();
+    let block = BlockContext {
+        height: 1,
+        timestamp: 1_000_000,
+        msg_sender: sender,
+        msg_value: Amount::zero(),
+        tx_origin: sender,
+        contract: sender,
+        epoch: 0,
+    };
+
+    let receipt = executor.execute_transaction(&tx, block, &mut state);
+
+    assert!(
+        !receipt.success,
+        "AgentsPaused must produce a failed receipt"
+    );
+    // H2 invariant: no mandate log on a non-Applied outcome.
+    assert!(
+        receipt.logs.is_empty(),
+        "AgentsPaused failed receipt must have empty logs (H2 invariant)"
+    );
+
+    // Dead-man's switch must NOT be incremented for AgentsPaused.
+    let updated_policy =
+        crate::warden::read_policy(&state, &sender, &session_key_bytes).expect("policy");
+    assert_eq!(
+        updated_policy.auto_revoke.violations_this_epoch, 0,
+        "AgentsPaused must NOT increment dead-man's switch (kill switch skips handle_violation)"
+    );
+}
+
+#[test]
+fn a2a_counterparty_rejected_via_executor_produces_failed_receipt_and_increments_violation_counter()
+{
+    // Full executor path: registered payee + tier too low → CounterpartyRejected
+    // → Err arm → handle_violation → dead-man's switch incremented.
+    // Closes the A2A executor seam (mirrors CR-S15-6 pattern for Step 16).
+    let sender = test_address(1);
+    let payee = test_address(2);
+    let session_key_bytes = vec![0xAB, 0xCD, 0xEF, 0x02];
+
+    // Build policy: requires Verified, payee will be Identified (below bar).
+    let policy = AgentPolicy {
+        session_key: session_key_bytes.clone(),
+        expiry_epoch: 100,
+        budget_total: Amount::from_drop(1_000_000_000),
+        per_tx_cap: Amount::from_drop(10_000),
+        per_epoch_cap: Amount::from_drop(500_000_000),
+        spent_total: Amount::zero(),
+        spent_this_epoch: Amount::zero(),
+        last_epoch: 0,
+        refill_per_epoch: Amount::zero(),
+        budget_ceiling: None,
+        categories: CategoryCaps::new(),
+        active_window: None,
+        cosign_threshold: None,
+        allowed_targets: AllowList::any(),
+        allowed_actions: ActionMask::all(), // includes PayAgent
+        auto_revoke: lemma_core::agent::AutoRevoke {
+            max_violations_per_epoch: 5,
+            violations_this_epoch: 0,
+        },
+        kya_tier: KyaTier::None,
+        anomaly: AnomalyConfig::default(),
+        history: AnomalyHistory::default(),
+        required_kya_tier: KyaTier::Verified, // ← requires Verified
+        min_counterparty_reputation: 0,
+    };
+
+    let mut state = InMemoryStateView::new();
+    state.set_balance(&sender, Amount::from_drop(1_000_000_000));
+    state.set_nonce(&sender, 0);
+    crate::warden::write_policy(&mut state, &sender, &session_key_bytes, &policy);
+
+    // Register payee as Identified (below Verified → will be rejected).
+    crate::agent_registry::write_agent_identity(
+        &mut state,
+        &payee,
+        &AgentIdentity {
+            owner: sender,
+            kya_tier: KyaTier::Identified,
+            reputation_score: 90,
+        },
+    );
+
+    let mut tx = Transaction::new(
+        Hash::zero(),
+        sender,
+        Some(payee),
+        0,
+        1,
+        Amount::from_drop(100),
+        500_000,
+        Amount::from_drop(1_000_000_000),
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("valid tx");
+    tx.session_key = Some(session_key_bytes.clone());
+
+    let executor = test_executor();
+    let block = BlockContext {
+        height: 1,
+        timestamp: 1_000_000,
+        msg_sender: sender,
+        msg_value: Amount::zero(),
+        tx_origin: sender,
+        contract: sender,
+        epoch: 0,
+    };
+
+    let receipt = executor.execute_transaction(&tx, block, &mut state);
+
+    assert!(
+        !receipt.success,
+        "CounterpartyRejected must produce a failed receipt"
+    );
+    // H2 invariant: no mandate log for a violation receipt.
+    assert!(
+        receipt.logs.is_empty(),
+        "CounterpartyRejected failed receipt must have empty logs (H2 invariant)"
+    );
+
+    let updated_policy =
+        crate::warden::read_policy(&state, &sender, &session_key_bytes).expect("policy");
+    assert_eq!(
+        updated_policy.auto_revoke.violations_this_epoch, 1,
+        "handle_violation must increment violations_this_epoch for CounterpartyRejected"
+    );
+}
+
+// ── Mandate Receipt end-to-end (P3·Step 17) ──────────────────────────────────
+
+#[test]
+fn applied_agent_tx_receipt_contains_mandate_receipt_log_at_index_0() {
+    // Full executor path: agent tx → warden Applied → mandate receipt log at
+    // receipt.logs[0] with correct address, topic, and deserializable data.
+    use lemma_core::agent::{MandateReceipt, MANDATE_RECEIPT_EVENT_SIG};
+    use lemma_core::hash::Hash;
+
+    let sender = test_address(1);
+    let recipient = test_address(2);
+    let session_key_bytes = vec![0xAA, 0xBB, 0xEE, 0x03];
+
+    // Basic policy — no A2A requirements, no anomaly detection.
+    let policy = AgentPolicy {
+        session_key: session_key_bytes.clone(),
+        expiry_epoch: 100,
+        budget_total: Amount::from_drop(1_000_000),
+        per_tx_cap: Amount::from_drop(10_000),
+        per_epoch_cap: Amount::from_drop(500_000),
+        spent_total: Amount::zero(),
+        spent_this_epoch: Amount::zero(),
+        last_epoch: 0,
+        refill_per_epoch: Amount::zero(),
+        budget_ceiling: None,
+        categories: CategoryCaps::new(),
+        active_window: None,
+        cosign_threshold: None,
+        allowed_targets: AllowList::any(),
+        allowed_actions: ActionMask::all(),
+        auto_revoke: lemma_core::agent::AutoRevoke::default(),
+        kya_tier: KyaTier::None,
+        anomaly: AnomalyConfig::default(),
+        history: AnomalyHistory {
+            avg_value_ema: Amount::zero(),
+            tx_count_this_epoch: 0,
+            avg_tx_count_ema: 0,
+            has_history: false,
+            seen_targets: BTreeSet::new(),
+        },
+        required_kya_tier: KyaTier::None,
+        min_counterparty_reputation: 0,
+    };
+
+    let mut state = InMemoryStateView::new();
+    state.set_balance(&sender, Amount::from_drop(1_000_000));
+    state.set_nonce(&sender, 0);
+    crate::warden::write_policy(&mut state, &sender, &session_key_bytes, &policy);
+
+    let mut tx = Transaction::new(
+        Hash::zero(),
+        sender,
+        Some(recipient),
+        0,
+        1,
+        Amount::from_drop(500),
+        500_000,
+        Amount::from_drop(1_000_000_000),
+        TxType::Transfer,
+        vec![],
+        Signature::Unsigned,
+    )
+    .expect("valid tx");
+    tx.session_key = Some(session_key_bytes.clone());
+
+    let executor = test_executor();
+    let block = BlockContext {
+        height: 1,
+        timestamp: 1_000_000,
+        msg_sender: sender,
+        msg_value: Amount::zero(),
+        tx_origin: sender,
+        contract: sender,
+        epoch: 3,
+    };
+
+    let receipt = executor.execute_transaction(&tx, block, &mut state);
+
+    assert!(receipt.success, "transfer must succeed");
+    assert!(
+        !receipt.logs.is_empty(),
+        "receipt.logs must contain at least the mandate receipt log"
+    );
+
+    // logs[0] must be the mandate receipt (prepended before contract logs).
+    let mandate_log = &receipt.logs[0];
+    assert_eq!(
+        mandate_log.address,
+        lemma_core::address::Address::warden(),
+        "mandate log address must be Address::warden()"
+    );
+    assert_eq!(mandate_log.topics.len(), 1, "must have one topic");
+    let expected_topic = {
+        let h = blake3::hash(MANDATE_RECEIPT_EVENT_SIG);
+        Hash::from_bytes(*h.as_bytes())
+    };
+    assert_eq!(
+        mandate_log.topics[0], expected_topic,
+        "topic[0] must be the MandateReceipt event signature hash"
+    );
+
+    // data must deserialize as a valid MandateReceipt with correct fields.
+    let mr: MandateReceipt =
+        serde_json::from_slice(&mandate_log.data).expect("data must be valid MandateReceipt JSON");
+    assert_eq!(mr.owner, sender, "owner must be tx sender");
+    assert_eq!(mr.epoch, 3, "epoch must match block epoch");
+    assert_eq!(
+        mr.value,
+        Amount::from_drop(500),
+        "value must match tx value"
+    );
+    assert!(!mr.cosigned, "no co-signature on this tx");
 }

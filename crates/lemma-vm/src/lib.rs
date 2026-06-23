@@ -13,6 +13,7 @@
 //! | `executor` | Single-tx execution + panic-free settlement (B4) |
 //! | `parallel` | Flux: Block-STM parallel executor (B5) + compiler hints (B5-3b) |
 //! | `safety_manifest` | [`SafetyManifest`] + [`SafetyConstraint`] — runtime honeypot invariants (P3·Step 18) |
+//! | `warden`   | Warden policy enforcement for agent txs (P3·Step 13, 14-AGENT_LAYER §3) |
 //!
 //! ## Determinism contract
 //!
@@ -29,6 +30,7 @@
 //! `TransactionReceipt`, never a node halt (08-EXECUTION_SPEC §5,
 //! AGENTS.md §9.3 "no panics in the settlement path").
 
+pub mod agent_registry;
 pub mod error;
 pub mod executor;
 pub mod gas;
@@ -37,6 +39,7 @@ pub mod parallel;
 pub mod runtime;
 pub mod safety_manifest;
 pub mod state;
+pub mod warden;
 
 pub use error::VmError;
 pub use executor::Executor;

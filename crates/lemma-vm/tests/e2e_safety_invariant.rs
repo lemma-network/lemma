@@ -381,6 +381,7 @@ fn block_ctx() -> BlockContext {
         msg_value: Amount::zero(),
         tx_origin: Address::zero(),
         contract: Address::zero(),
+        epoch: 0,
     }
 }
 

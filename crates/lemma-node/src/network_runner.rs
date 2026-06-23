@@ -276,7 +276,7 @@ async fn handle_network_event(
             sender_pubkey,
         } => {
             // Deref Box<ConsensusKey> → ConsensusKey for the handler.
-            handle_transaction_received(from, tx, *sender_pubkey, db, mempool).await;
+            handle_transaction_received(from, *tx, *sender_pubkey, db, mempool).await;
         }
 
         // ── Inbound DAG proposal — decode + sig-verify + forward (D·15b-1) ───

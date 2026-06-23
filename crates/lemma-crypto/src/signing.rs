@@ -54,6 +54,11 @@ use crate::{
 ///
 /// `chain_id` is included, binding the signature to a specific chain and
 /// preventing replay attacks across networks.
+///
+/// `session_key` is included (P3·Step 13) so that an agent transaction's
+/// session key selector is authenticated. Without it, a relay/mempool node
+/// could attach, strip, or swap the session key field to bypass Warden
+/// or point the tx at a different, more permissive policy.
 #[derive(Serialize)]
 struct TxSigningBody<'a> {
     sender: &'a Address,
@@ -65,6 +70,10 @@ struct TxSigningBody<'a> {
     gas_price: &'a Amount,
     tx_type: TxType,
     data: &'a [u8],
+    /// Session key public key bytes for agent transactions (P3·Step 13).
+    /// `None` for owner-signed transactions. Bound into the signed body so
+    /// that the session key selector cannot be tampered with.
+    session_key: &'a Option<Vec<u8>>,
 }
 
 impl<'a> TxSigningBody<'a> {
@@ -79,6 +88,7 @@ impl<'a> TxSigningBody<'a> {
             gas_price: &tx.gas_price,
             tx_type: tx.tx_type,
             data: &tx.data,
+            session_key: &tx.session_key,
         }
     }
 }

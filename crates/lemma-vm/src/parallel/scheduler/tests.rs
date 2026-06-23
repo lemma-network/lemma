@@ -36,6 +36,7 @@ fn block() -> BlockContext {
         tx_origin: addr(0),
         // Placeholder — execute_call injects the real contract address (M3 fix).
         contract: addr(0),
+        epoch: 0,
     }
 }
 

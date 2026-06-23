@@ -186,6 +186,140 @@ impl Executor {
         // Create scratch overlay — all writes buffer here until commit/discard.
         let mut scratch = ScratchState::new(state);
 
+        // ── Warden pre-application check (P3·Step 13, 14-AGENT_LAYER §3) ────
+        //
+        // If this transaction is signed by a session key (agent tx), validate
+        // it against the agent's on-chain policy before execution. Counter
+        // updates go into the scratch overlay — they are committed/discarded
+        // atomically with the transaction (spec §3 line 201: "only on full
+        // success; reverts roll these back with the tx").
+        // Mandate receipt log produced by Warden for applied agent txs (§11, Step 17).
+        // Built after warden_check returns Applied; prepended to contract logs in settle().
+        // None for non-agent txs or when warden_check is not reached.
+        let mut mandate_log: Option<Log> = None;
+
+        if let Some(ref session_key) = tx.session_key {
+            // Charge Warden gas before the check (charge-before-execute, AGENTS §7.5).
+            if let Err(e) = meter.charge(self.schedule.warden_check) {
+                let inner = scratch.discard();
+                let current_nonce = inner.nonce(&tx.sender);
+                inner.set_nonce(&tx.sender, current_nonce.saturating_add(1));
+                warn!(
+                    tx_hash = %tx.hash,
+                    error = %e,
+                    "warden: OOG on warden_check gas — producing failed receipt"
+                );
+                return TransactionReceipt::new(tx.hash, false, tx.gas_limit, vec![]);
+            }
+
+            match crate::warden::warden_check(tx, session_key, block.epoch, &mut scratch) {
+                Ok(lemma_core::agent::WardenOutcome::Applied) => {
+                    // Policy checks passed, counters updated in scratch.
+                    // Build the AP2-aligned Mandate Receipt log (§11, Step 17) — emitted
+                    // on every applied agent tx as a non-repudiable audit trail.
+                    let action = crate::warden::classify_action(tx);
+                    mandate_log = crate::warden::build_mandate_receipt_log(
+                        tx,
+                        session_key,
+                        block.epoch,
+                        action,
+                        &scratch,
+                    );
+                    // Proceed to execution.
+                }
+
+                Ok(lemma_core::agent::WardenOutcome::PendingOwnerCosign) => {
+                    // Co-sign step-up: tx value ≥ cosign_threshold but no owner
+                    // co-signature present (14 §2.3.4, P3·Step 14).
+                    //
+                    // This is NOT a PolicyViolation — do NOT call handle_violation.
+                    // The epoch-reset counters written by warden_check are already
+                    // in scratch and will be discarded here with the scratch state.
+                    // The owner resubmits with Transaction::owner_cosignature set.
+                    let inner = scratch.discard();
+                    let current_nonce = inner.nonce(&tx.sender);
+                    inner.set_nonce(&tx.sender, current_nonce.saturating_add(1));
+
+                    warn!(
+                        tx_hash = %tx.hash,
+                        "warden: co-sign required — producing failed receipt (not a violation)"
+                    );
+
+                    let used =
+                        gas_used(Gas::new(tx.gas_limit), meter.remaining()).unwrap_or(Gas::ZERO);
+                    return TransactionReceipt::new(
+                        tx.hash,
+                        false,
+                        used.as_u64().min(tx.gas_limit),
+                        vec![],
+                    );
+                }
+
+                Ok(_) => {
+                    // Future WardenOutcome variants (#[non_exhaustive]).
+                    // Fail-CLOSED: unknown outcomes discard scratch + fail receipt.
+                    // An unknown outcome could be a hold/pending state from a
+                    // future step (e.g. AnomalyHold). Treating it as pass-through
+                    // would apply a held tx — a security regression (L3 CR fix).
+                    let inner = scratch.discard();
+                    let current_nonce = inner.nonce(&tx.sender);
+                    inner.set_nonce(&tx.sender, current_nonce.saturating_add(1));
+                    warn!(
+                        tx_hash = %tx.hash,
+                        "warden: unknown WardenOutcome — failing closed (non-violation)"
+                    );
+                    let used =
+                        gas_used(Gas::new(tx.gas_limit), meter.remaining()).unwrap_or(Gas::ZERO);
+                    return TransactionReceipt::new(
+                        tx.hash,
+                        false,
+                        used.as_u64().min(tx.gas_limit),
+                        vec![],
+                    );
+                }
+
+                Err(violation) => {
+                    // Policy violation: discard scratch (no partial state from failed
+                    // checks), advance nonce, then run dead-man's switch on inner.
+                    //
+                    // ORDERING: handle_violation MUST be called on `inner` (after
+                    // discard), NOT on `scratch`. scratch.discard() throws away all
+                    // scratch writes — if handle_violation wrote to scratch the
+                    // violation counter would be silently lost. Writing to `inner`
+                    // ensures the counter persists to canonical state regardless of
+                    // the failed tx. (Found by executor integration test CR-S15-6.)
+                    //
+                    // Exception: AgentsPaused is an owner-level emergency freeze,
+                    // NOT a per-policy misbehavior. Penalizing the dead-man's switch
+                    // would auto-revoke innocent policies and make it harder to unpause.
+                    // AnomalyHold DOES count (§9.1: "dead-man's switch counter
+                    // increments") — it falls through to handle_violation as usual.
+                    let inner = scratch.discard();
+                    let current_nonce = inner.nonce(&tx.sender);
+
+                    if violation != lemma_core::agent::PolicyViolation::AgentsPaused {
+                        crate::warden::handle_violation(tx, session_key, block.epoch, inner);
+                    }
+                    inner.set_nonce(&tx.sender, current_nonce.saturating_add(1));
+
+                    warn!(
+                        tx_hash = %tx.hash,
+                        violation = %violation,
+                        "warden: policy violation — producing failed receipt"
+                    );
+
+                    let used =
+                        gas_used(Gas::new(tx.gas_limit), meter.remaining()).unwrap_or(Gas::ZERO);
+                    return TransactionReceipt::new(
+                        tx.hash,
+                        false,
+                        used.as_u64().min(tx.gas_limit),
+                        vec![],
+                    );
+                }
+            }
+        }
+
         // Dispatch to the appropriate execution path.
         //
         // Each path returns `(Result<Vec<Log>, VmError>, Option<(Address, SafetyManifest)>)`.
@@ -209,7 +343,7 @@ impl Executor {
             ),
         };
 
-        self.settle(tx, result, manifest, scratch, meter)
+        self.settle(tx, result, manifest, mandate_log, scratch, meter)
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -829,6 +963,7 @@ impl Executor {
         tx: &Transaction,
         result: Result<Vec<Log>, VmError>,
         manifest: Option<(Address, SafetyManifest)>,
+        mandate_log: Option<Log>,
         scratch: ScratchState<'_, S>,
         meter: FuelMeter,
     ) -> TransactionReceipt {
@@ -891,7 +1026,18 @@ impl Executor {
 
                 // No violation — commit scratch writes to canonical state and advance nonce.
                 scratch.commit_with_nonce(&tx.sender);
-                TransactionReceipt::new(tx.hash, true, gas_used_clamped, logs)
+
+                // Prepend the Mandate Receipt log (§11, Step 17) before contract logs.
+                // Mandate receipt is first so it is always at index 0 in the logs vec,
+                // making it reliably filterable by the explorer/SDK.
+                // Absent for non-agent txs (mandate_log = None).
+                let mut all_logs = Vec::with_capacity(logs.len() + 1);
+                if let Some(ml) = mandate_log {
+                    all_logs.push(ml);
+                }
+                all_logs.extend(logs);
+
+                TransactionReceipt::new(tx.hash, true, gas_used_clamped, all_logs)
             }
             Err(err) => {
                 // Failure: discard scratch (no partial writes reach canonical state).

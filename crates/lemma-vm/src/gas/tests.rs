@@ -132,6 +132,7 @@ fn devnet_schedule_has_no_zero_costs() {
         context_query,
         memory_copy_per_byte,
         invariant_check,
+        warden_check,
     } = GasSchedule::devnet();
 
     for (name, cost) in [
@@ -161,6 +162,7 @@ fn devnet_schedule_has_no_zero_costs() {
         ("context_query", context_query),
         ("memory_copy_per_byte", memory_copy_per_byte),
         ("invariant_check", invariant_check),
+        ("warden_check", warden_check),
     ] {
         assert!(
             cost > Gas::ZERO,

@@ -246,6 +246,36 @@ pub struct Transaction {
     pub data: Vec<u8>,
     /// Authorization — must be [`Signature::Hybrid`] for mempool acceptance.
     pub signature: Signature,
+
+    /// Session key public key bytes, if this transaction is signed by an
+    /// agent's session key (14-AGENT_LAYER §2).
+    ///
+    /// When `Some`, the Warden policy enforcement system checks the transaction
+    /// against the agent's on-chain policy before execution:
+    /// - `sender` = the owner address (funds, nonce)
+    /// - `session_key` = the public key that signed (not the owner's primary key)
+    /// - Policy is looked up by `(sender, session_key)` in Warden state
+    ///
+    /// When `None`, the transaction is a normal owner-signed transaction and
+    /// Warden is not invoked.
+    ///
+    /// Added in P3·Step 13 (Warden policy enforcement).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<Vec<u8>>,
+
+    /// Owner co-signature for co-sign step-up (14 §2.3.4, P3·Step 14).
+    ///
+    /// Required when `tx.value >= policy.cosign_threshold`. The owner signs
+    /// the transaction hash with their primary key; this field carries the
+    /// resulting signature bytes. Cryptographic verification is the mempool's
+    /// responsibility (same as the primary signature) — Warden only checks
+    /// presence (`has_owner_cosignature()`).
+    ///
+    /// NOT included in `TxSigningBody` — it is a counter-signature that
+    /// endorses the already-signed transaction hash, not a field of the
+    /// body being signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_cosignature: Option<Vec<u8>>,
 }
 
 impl Transaction {
@@ -288,6 +318,8 @@ impl Transaction {
             tx_type,
             data,
             signature,
+            session_key: None,
+            owner_cosignature: None,
         };
         tx.validate()?;
         Ok(tx)
@@ -337,6 +369,20 @@ impl Transaction {
     #[must_use]
     pub fn is_contract_deploy(&self) -> bool {
         self.tx_type.is_contract_deploy()
+    }
+
+    /// Returns `true` if the transaction carries an owner co-signature.
+    ///
+    /// Used by Warden's co-sign step-up check (14 §2.3.4, P3·Step 14):
+    /// when `tx.value >= policy.cosign_threshold`, the transaction must carry
+    /// the owner's co-signature for autonomous execution. Without it, Warden
+    /// returns `Ok(WardenOutcome::PendingOwnerCosign)`.
+    ///
+    /// Cryptographic correctness of the co-signature is the mempool's
+    /// responsibility — Warden only checks presence.
+    #[must_use]
+    pub fn has_owner_cosignature(&self) -> bool {
+        self.owner_cosignature.is_some()
     }
 }
 

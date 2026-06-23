@@ -406,7 +406,9 @@ pub enum GossipMessage {
     /// before calling `verify_transaction` (AGENTS §8 build-order constraint).
     NewTransaction {
         /// The pending transaction.
-        tx: Transaction,
+        /// Boxed to avoid large_enum_variant (Transaction grew with session_key
+        /// field in P3·Step 13; Box keeps enum size constant).
+        tx: Box<Transaction>,
         /// Hybrid Ed25519 + ML-DSA-65 public key of `tx.sender`.
         /// Boxed to avoid large_enum_variant (ConsensusKey is ~1984 bytes).
         sender_pubkey: Box<lemma_core::validator::ConsensusKey>,

@@ -163,7 +163,7 @@ fn for_message_routes_new_block_to_blocks_topic() {
 fn for_message_routes_new_transaction_to_tx_topic() {
     let topics = GossipTopics::new();
     let msg = GossipMessage::NewTransaction {
-        tx: test_tx(),
+        tx: Box::new(test_tx()),
         sender_pubkey: Box::new(test_consensus_key()),
     };
 
@@ -188,7 +188,7 @@ fn for_message_routing_is_consistent_with_gossip_message_topic_string() {
     assert_eq!(topics.for_message(&block_msg).hash(), expected_block_hash);
 
     let tx_msg = GossipMessage::NewTransaction {
-        tx: test_tx(),
+        tx: Box::new(test_tx()),
         sender_pubkey: Box::new(test_consensus_key()),
     };
     let tx_topic_str = tx_msg.topic();
@@ -295,7 +295,7 @@ fn publish_transaction_error_contains_tx_topic_name() {
     subscribe_all(&mut gs, &topics).expect("subscribe must succeed");
 
     let msg = GossipMessage::NewTransaction {
-        tx: test_tx(),
+        tx: Box::new(test_tx()),
         sender_pubkey: Box::new(test_consensus_key()),
     };
     let Err(NetworkError::Publish { topic, .. }) = publish(&mut gs, &topics, &msg) else {
@@ -320,7 +320,7 @@ fn decode_incoming_valid_block_bytes_returns_correct_message() {
 #[test]
 fn decode_incoming_valid_tx_bytes_returns_correct_message() {
     let original = GossipMessage::NewTransaction {
-        tx: test_tx(),
+        tx: Box::new(test_tx()),
         sender_pubkey: Box::new(test_consensus_key()),
     };
     let bytes = original.encode().expect("encode must succeed");

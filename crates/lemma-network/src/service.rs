@@ -209,7 +209,9 @@ pub enum NetworkEvent {
         /// The peer that forwarded the transaction.
         from: PeerId,
         /// The decoded transaction.
-        tx: Transaction,
+        /// Boxed to avoid large_enum_variant (Transaction grew with agent
+        /// fields in P3·Steps 13+14; Box keeps enum size constant).
+        tx: Box<Transaction>,
         /// Hybrid Ed25519 + ML-DSA-65 public key of `tx.sender`.
         /// Boxed to avoid large_enum_variant (ConsensusKey is ~1984 bytes).
         sender_pubkey: Box<lemma_core::validator::ConsensusKey>,
@@ -776,6 +778,7 @@ impl NetworkService {
 
             Ok(GossipMessage::NewTransaction { tx, sender_pubkey }) => {
                 // sender_pubkey is Box<ConsensusKey> from GossipMessage, flows into NetworkEvent.
+                // Both GossipMessage and NetworkEvent now use Box<Transaction>; pass directly.
                 self.emit(NetworkEvent::TransactionReceived {
                     from,
                     tx,
@@ -930,7 +933,10 @@ impl NetworkService {
             }
 
             NetworkCommand::BroadcastTransaction { tx, sender_pubkey } => {
-                let msg = GossipMessage::NewTransaction { tx, sender_pubkey };
+                let msg = GossipMessage::NewTransaction {
+                    tx: Box::new(tx),
+                    sender_pubkey,
+                };
                 if let Err(e) = gossip::publish(
                     self.swarm.behaviour_mut().gossipsub_mut(),
                     &self.topics,

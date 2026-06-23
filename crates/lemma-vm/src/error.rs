@@ -114,6 +114,15 @@ pub enum VmError {
         available: Amount,
     },
 
+    /// A Warden policy check failed — the agent transaction violates its
+    /// on-chain policy (14-AGENT_LAYER §3, P3·Step 13).
+    ///
+    /// The transaction is reverted — scratch writes are discarded, nonce is
+    /// advanced, gas is charged. The `violation` field carries the specific
+    /// reason (from [`lemma_core::PolicyViolation`]).
+    #[error("agent policy violation: {violation}")]
+    PolicyViolation { violation: String },
+
     /// A parameter passed to a host function or the executor is invalid.
     ///
     /// Examples: zero gas limit, entry-point name too long, calldata exceeds limit.

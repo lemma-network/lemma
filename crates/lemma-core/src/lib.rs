@@ -31,6 +31,7 @@
 // ── Modules ──────────────────────────────────────────────────────────────────
 
 pub mod address;
+pub mod agent;
 pub mod amount;
 pub mod block;
 pub mod cert;
@@ -50,6 +51,10 @@ pub mod validator_set;
 // Re-exports are ordered: primitives → errors → blockchain types (alpha within group).
 
 pub use address::{Address, AddressType, HRP_DEVNET, HRP_MAINNET, HRP_TESTNET};
+pub use agent::{
+    Action, ActionMask, AgentPolicy, AllowList, AutoRevoke, CategoryBudget, CategoryCaps,
+    EpochRange, KyaTier, PolicyViolation, WardenOutcome, MAX_CATEGORIES,
+};
 pub use amount::{Amount, DRIPS_PER_LEM, DROPS_PER_DRIP, DROPS_PER_LEM};
 pub use hash::Hash;
 pub use limits::MAX_CONTRACT_WASM_SIZE;

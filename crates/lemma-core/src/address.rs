@@ -192,6 +192,21 @@ impl Address {
         Address(bytes)
     }
 
+    /// Reserved system address for Warden agent policy storage (P3·Step 13).
+    ///
+    /// Policies are stored as serialized bytes under this address's storage
+    /// namespace, keyed by `warden:policy: ++ owner ++ session_key`.
+    /// Mirrors the registry pattern (DB-A54).
+    ///
+    /// Encodes with `AddressType::Contract` → `lem1c...` (mainnet).
+    pub fn warden() -> Self {
+        // blake3(b"lemma:system:warden")[0..20] — mirrors registry() pattern.
+        let hash = blake3::hash(b"lemma:system:warden");
+        let mut bytes = [0u8; 20];
+        bytes.copy_from_slice(&hash.as_bytes()[..20]);
+        Address(bytes)
+    }
+
     // ── Raw construction ─────────────────────────────────────────────────────
 
     /// Create an `Address` directly from a raw 20-byte array.

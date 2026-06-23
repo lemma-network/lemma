@@ -317,7 +317,7 @@ fn gossip_new_block_routes_to_blocks_topic() {
 #[test]
 fn gossip_new_transaction_routes_to_tx_topic() {
     let msg = GossipMessage::NewTransaction {
-        tx: test_tx(),
+        tx: Box::new(test_tx()),
         sender_pubkey: Box::new(test_consensus_key()),
     };
     assert_eq!(msg.topic(), config::TOPIC_TX);
@@ -330,7 +330,7 @@ fn gossip_message_topic_is_versioned() {
         .topic()
         .ends_with("/1"));
     assert!(GossipMessage::NewTransaction {
-        tx: test_tx(),
+        tx: Box::new(test_tx()),
         sender_pubkey: Box::new(test_consensus_key()),
     }
     .topic()
@@ -350,7 +350,7 @@ fn gossip_new_block_encode_decode_roundtrip() {
 #[test]
 fn gossip_new_transaction_encode_decode_roundtrip() {
     let original = GossipMessage::NewTransaction {
-        tx: test_tx(),
+        tx: Box::new(test_tx()),
         sender_pubkey: Box::new(test_consensus_key()),
     };
     let bytes = original.encode().expect("encode must succeed");
@@ -404,7 +404,7 @@ fn gossip_new_block_debug_contains_variant_name() {
 #[test]
 fn gossip_new_transaction_debug_contains_variant_name() {
     let msg = GossipMessage::NewTransaction {
-        tx: test_tx(),
+        tx: Box::new(test_tx()),
         sender_pubkey: Box::new(test_consensus_key()),
     };
     assert!(format!("{msg:?}").contains("NewTransaction"));
