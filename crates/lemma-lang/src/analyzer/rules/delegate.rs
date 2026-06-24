@@ -1,8 +1,21 @@
 //! SAFETY-011 — Delegate Restriction rule.
 //!
-//! Detects external calls where the receiver is a state field
-//! (`self.<field>.<method>(...)`), which would execute arbitrary external code
-//! through a runtime-chosen delegate target (the proxy/upgradeable pattern).
+//! Two enforcement arms, both rejecting "execution of code from an address
+//! chosen at runtime in the caller's storage context"
+//! (`09-SAFETY_ANALYZER_SPEC §3 SAFETY-011`):
+//!
+//! 1. **SAFETY-011 (proxy pattern)** — external calls where the receiver is a
+//!    state field (`self.<field>.<method>(...)`), a runtime-chosen delegate
+//!    target (the proxy/upgradeable pattern). Always rejected
+//!    ([`SafetyError::UnsafeDelegate`]).
+//!
+//! 2. **SAFETY-011b (`delegateCall` built-in gate)** — the explicit
+//!    `addr.delegateCall(calldata)` built-in (where `addr` is a local/param,
+//!    not a state field). `delegateCall` executes the callee's code in the
+//!    *caller's* storage context — the single most dangerous primitive. Spec
+//!    `03-LANGUAGE_SPEC §16` requires the enclosing function to opt in via
+//!    `#[allowDelegate]`; absent that annotation it is rejected
+//!    ([`SafetyError::UngatedDelegateCall`]).
 //!
 //! ## Collection method allow-list
 //!
@@ -31,32 +44,43 @@ use crate::visit::{walk_expr, Visitor};
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-/// Check a contract for SAFETY-011 unsafe delegate violations.
+/// The annotation that opts a function into the `delegateCall` built-in
+/// (`03-LANGUAGE_SPEC §16`).  Recognized in both `#[allowDelegate]` and
+/// `@allowDelegate` form (both parse to `Annotation { name: "allowDelegate" }`).
+const ALLOW_DELEGATE_ANNOTATION: &str = "allowDelegate";
+
+/// The built-in `Address` method that delegates execution into the caller's
+/// storage context (`03-LANGUAGE_SPEC §16`).
+const DELEGATE_CALL_METHOD: &str = "delegateCall";
+
+/// Check a contract for SAFETY-011 unsafe-delegate violations (both arms).
 ///
-/// Returns one [`SafetyError::UnsafeDelegate`] per call site where the callee
-/// receiver is a state field (`self.<field>.<method>(...)`).
+/// Returns:
+/// - one [`SafetyError::UnsafeDelegate`] per `self.<field>.<method>(...)` proxy
+///   call site (SAFETY-011), and
+/// - one [`SafetyError::UngatedDelegateCall`] per explicit
+///   `addr.delegateCall(data)` built-in call site in a function NOT annotated
+///   `#[allowDelegate]` (SAFETY-011b).
+///
 /// Returns an empty `Vec` if the contract is clean.
 ///
-/// ## Scope limitation (delegate-call-gate-1)
-///
-/// NOTE: SAFETY-011 currently catches `self.<field>.<method>()` proxy patterns.
-/// It does NOT yet enforce `#[allowDelegate]` on `Address::delegateCall()` built-in
-/// calls (i.e. `addr.delegateCall(data)` where `addr` is a local variable or param,
-/// not a state field). Spec §16 requires `#[allowDelegate]` annotation on the
-/// enclosing function for any delegateCall usage.
-///
-/// See living-notes Technical Debt: **delegate-call-gate-1**.
-/// Fix: add a SAFETY-011b rule arm in this file that detects
-/// `Expr::Call` where callee is `Expr::Member(_, "delegateCall")` and the
-/// receiver is NOT `self.<field>` (those are already caught above), then checks
-/// for `#[allowDelegate]` annotation on the enclosing function.
+/// The `#[allowDelegate]` gate is evaluated per enclosing function — the
+/// annotation is read from each [`crate::type_checker::typed_contract::ContractFunction`]
+/// before its body is walked.  See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-011`.
 #[must_use]
 pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
     let mut checker = DelegateChecker {
         violations: Vec::new(),
+        current_fn: "",
+        allows_delegate: false,
     };
     for func in contract.functions() {
         if let Some(body) = func.body {
+            checker.current_fn = func.name;
+            checker.allows_delegate = func
+                .annotations
+                .iter()
+                .any(|a| a.name == ALLOW_DELEGATE_ANNOTATION);
             checker.visit_stmts(body);
         }
     }
@@ -65,17 +89,35 @@ pub(crate) fn check(contract: &TypedContract<'_>) -> Vec<SafetyError> {
 
 // ─── Visitor impl ─────────────────────────────────────────────────────────────
 
-/// Accumulates SAFETY-011 delegate call violations.
-struct DelegateChecker {
+/// Accumulates SAFETY-011 / SAFETY-011b delegate violations.
+///
+/// `current_fn` / `allows_delegate` carry the enclosing-function context needed
+/// by the SAFETY-011b gate; they are reset per function in [`check`].
+struct DelegateChecker<'a> {
     violations: Vec<SafetyError>,
+    /// Name of the function whose body is currently being walked.
+    current_fn: &'a str,
+    /// Whether the enclosing function carries `#[allowDelegate]`.
+    allows_delegate: bool,
 }
 
-impl Visitor for DelegateChecker {
+impl Visitor for DelegateChecker<'_> {
     fn visit_expr(&mut self, expr: &Expr) {
         if let Expr::Call { callee, span, .. } = expr {
+            // SAFETY-011 — runtime-chosen proxy target via a state field.
             if is_self_field_call(callee) {
                 self.violations
                     .push(SafetyError::UnsafeDelegate { call_site: *span });
+            }
+            // SAFETY-011b — explicit `addr.delegateCall(data)` built-in on a
+            // non-`self.<field>` receiver requires `#[allowDelegate]`.  (The
+            // `self.<field>.delegateCall` shape is already rejected by the arm
+            // above, so it is excluded here to avoid a double report.)
+            else if is_ungated_delegate_call(callee) && !self.allows_delegate {
+                self.violations.push(SafetyError::UngatedDelegateCall {
+                    func: self.current_fn.to_string(),
+                    call_site: *span,
+                });
             }
         }
         walk_expr(self, expr);
@@ -163,6 +205,44 @@ fn is_self_field_call(callee: &Expr) -> bool {
         }
     }
     false
+}
+
+/// Returns `true` if `callee` is the explicit `delegateCall` built-in invoked on
+/// a receiver that is NOT `self.<field>` (those are already handled by
+/// [`is_self_field_call`]).
+///
+/// Pattern (SAFETY-011b):
+/// ```text
+/// callee   = Expr::Member(receiver, "delegateCall", _)
+/// receiver ≠ self.<field>          // i.e. a local var / param, e.g. `library`
+/// ```
+///
+/// This is the explicit `addr.delegateCall(calldata)` form recognized by the
+/// type checker (`infer.rs` — `Address` built-in method) and lowered by codegen
+/// to host fn 16. Spec §16 requires `#[allowDelegate]` on the enclosing function;
+/// the caller emits [`SafetyError::UngatedDelegateCall`] when that annotation is
+/// absent.
+fn is_ungated_delegate_call(callee: &Expr) -> bool {
+    if let Expr::Member(receiver, method, _) = callee {
+        if method == DELEGATE_CALL_METHOD {
+            // Exclude the `self.<field>.delegateCall` shape — already SAFETY-011.
+            return !is_self_field_receiver(receiver);
+        }
+    }
+    false
+}
+
+/// Returns `true` if `receiver` is the `self.<field>` access pattern
+/// (`Expr::Member(Expr::Ident("self"), field, _)`).
+///
+/// Used to keep SAFETY-011 (proxy pattern) and SAFETY-011b (built-in gate)
+/// mutually exclusive — a `self.<field>.delegateCall(...)` site is reported once,
+/// by SAFETY-011.
+fn is_self_field_receiver(receiver: &Expr) -> bool {
+    matches!(
+        receiver,
+        Expr::Member(obj, _, _) if matches!(obj.as_ref(), Expr::Ident(name, _) if name == "self")
+    )
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

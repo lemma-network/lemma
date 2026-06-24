@@ -17,7 +17,8 @@
 //! avoids the dispatch complexity (6e) while verifying that expressions lower
 //! correctly.
 
-use crate::codegen::wasm::emit_module;
+use crate::codegen::wasm::{detect_selector_collisions, emit_module};
+use crate::error::LangError;
 use crate::parser::Stmt;
 use crate::type_checker::TypedAst;
 use crate::{parse, tokenize};
@@ -77,6 +78,111 @@ fn emit_module_produces_deterministic_output() {
     assert_eq!(
         first, second,
         "emit_module is not deterministic: outputs differ between calls"
+    );
+}
+
+// ─── detect_selector_collisions — L-2 collision detection ────────────────────
+//
+// Real 4-byte blake3 selector collisions occur with probability ~2^-32 per pair,
+// so we cannot cheaply author two Lem function signatures that collide. Instead
+// we unit-test the collision-detection helper directly with forced-equal
+// selectors — the helper is the single guard `emit_module` calls (DRY), so
+// testing it proves the compile-time rejection path.
+
+#[test]
+fn detect_selector_collisions_rejects_duplicate_selectors() {
+    // Two functions forced to share selector 0x0000002a → must be rejected.
+    let forced = [("transfer", 0x0000_002a_u32), ("withdraw", 0x0000_002a_u32)];
+    let err = detect_selector_collisions(&forced).expect_err("collision must be rejected");
+    match err {
+        LangError::Codegen { message } => {
+            assert!(
+                message.contains("selector collision"),
+                "message must name the collision: {message}"
+            );
+            assert!(
+                message.contains("transfer()") && message.contains("withdraw()"),
+                "message must name both colliding functions: {message}"
+            );
+            assert!(
+                message.contains("0x0000002a"),
+                "message must include the shared selector as 0x........: {message}"
+            );
+        }
+        other => panic!("expected LangError::Codegen, got {other:?}"),
+    }
+}
+
+#[test]
+fn detect_selector_collisions_accepts_distinct_selectors() {
+    // Distinct selectors → no error (the normal multi-function case).
+    let distinct = [
+        ("alpha", 0x0000_0001_u32),
+        ("beta", 0x0000_0002_u32),
+        ("gamma", 0x0000_0003_u32),
+    ];
+    assert!(
+        detect_selector_collisions(&distinct).is_ok(),
+        "distinct selectors must not collide"
+    );
+}
+
+#[test]
+fn detect_selector_collisions_accepts_empty_set() {
+    // A contract with no dispatchable functions cannot collide.
+    assert!(
+        detect_selector_collisions(&[]).is_ok(),
+        "empty selector set must not collide"
+    );
+}
+
+#[test]
+fn detect_selector_collisions_reports_first_seen_function_deterministically() {
+    // The collision is reported against the FIRST function in declaration order
+    // (deterministic — AGENTS §7.1), regardless of how many follow.
+    let forced = [
+        ("first", 0x0000_00ff_u32),
+        ("second", 0x0000_00ff_u32),
+        ("third", 0x0000_00ff_u32),
+    ];
+    let err = detect_selector_collisions(&forced).expect_err("collision must be rejected");
+    let LangError::Codegen { message } = err else {
+        panic!("expected LangError::Codegen");
+    };
+    // "first" is declared before "second", so the first detected pair is
+    // (first, second) — "third" is never reached.
+    assert!(
+        message.contains("first()") && message.contains("second()"),
+        "must report the first colliding pair in declaration order: {message}"
+    );
+}
+
+#[test]
+fn emit_module_accepts_normal_multi_function_contract() {
+    // A normal contract with multiple distinct functions compiles with no
+    // collision error (the happy path the collision guard must not break).
+    // Uses the proven u32-state/param lowering path so the test exercises the
+    // collision guard, not unrelated unsupported-type lowering gaps.
+    let src = r#"
+        contract Math {
+            state { value: u32 }
+            pub fn set(x: u32) {
+                self.value = x;
+            }
+            pub fn add(y: u32) {
+                self.value = self.value + y;
+            }
+            pub fn get() -> u32 {
+                return self.value;
+            }
+        }
+    "#;
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let bytes = emit_module(&contracts[0]).expect("multi-function emit must succeed");
+    assert!(
+        wasmparser::validate(&bytes).is_ok(),
+        "multi-function contract must emit valid WASM"
     );
 }
 

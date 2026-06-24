@@ -128,6 +128,21 @@ fn display_unsafe_delegate_contains_rule_tag() {
 }
 
 #[test]
+fn display_ungated_delegate_call_shows_function_and_rule_tag() {
+    let e = SafetyError::UngatedDelegateCall {
+        func: "run".to_string(),
+        call_site: zero_span(),
+    };
+    let msg = e.to_string();
+    assert!(msg.contains("SAFETY-011"), "missing rule tag: {msg}");
+    assert!(msg.contains("run"), "missing func name: {msg}");
+    assert!(
+        msg.contains("allowDelegate"),
+        "message must mention the required annotation: {msg}"
+    );
+}
+
+#[test]
 fn display_unchecked_arithmetic_shows_operator() {
     let e = SafetyError::UncheckedArithmetic {
         op: "+".to_string(),

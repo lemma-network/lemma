@@ -69,10 +69,16 @@ pub struct QuorumCert {
     /// Block height this certificate covers.
     pub height: u64,
 
-    /// Blake3 digest of the certified [`BlockHeader`](crate::BlockHeader).
+    /// Blake3 canonical digest of the certified
+    /// [`BlockHeader`](crate::BlockHeader), computed via
+    /// [`BlockHeader::digest`](crate::BlockHeader::digest).
     ///
-    /// Set by `lemma-crypto::hash(header)` — `lemma-consensus` does not
-    /// compute it directly (sig injection pattern, B3-2).
+    /// This is the hand-framed canonical digest (explicit field order,
+    /// big-endian integers, length-prefixed `extra_data`) — NOT a serde/bincode
+    /// hash. It is the value validators sign at commit time
+    /// (`docs/12-NETWORK_SYNC_SPEC §3.2`, contract `qc.header_digest ==
+    /// header.digest()`). `lemma-consensus` does not compute it directly
+    /// (sig injection pattern, B3-2).
     pub header_digest: Hash,
 
     /// Per-signer signatures, keyed by validator operator address.

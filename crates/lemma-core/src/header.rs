@@ -7,7 +7,8 @@
 //! 4. Validate gas accounting (`gas_limit`, `gas_used`, `base_fee`).
 //!
 //! The full transaction list lives in [`Block`](crate::Block).
-//! Headers are hashed by `lemma-crypto` to produce block hashes.
+//! The canonical header commitment is [`BlockHeader::digest`] — a hand-framed
+//! Blake3 digest signed by validators to form a [`QuorumCert`](crate::QuorumCert).
 //!
 //! # Determinism
 //!
@@ -23,7 +24,9 @@ use crate::{address::Address, amount::Amount, error::BlockError, hash::Hash};
 
 /// Metadata for a single block — everything except the transaction list.
 ///
-/// Hashed by `lemma-crypto::hash_header` to produce the canonical block hash.
+/// The canonical header commitment is [`BlockHeader::digest`] — a hand-framed
+/// Blake3 digest that ≥ 2f+1 validators sign to form a
+/// [`QuorumCert`](crate::QuorumCert) (`docs/12-NETWORK_SYNC_SPEC §3.2`).
 /// All root hashes (`transactions_root`, `state_root`, `receipts_root`) are
 /// Blake3-based Merkle roots computed by `lemma-storage`.
 ///
@@ -250,6 +253,72 @@ impl BlockHeader {
     pub fn gas_remaining(&self) -> u64 {
         // validate() ensures gas_used <= gas_limit, so this cannot underflow.
         self.gas_limit - self.gas_used
+    }
+
+    /// Compute the canonical Blake3 digest of this header.
+    ///
+    /// This is the **consensus finality anchor**: the value ≥ 2f+1 validators
+    /// sign at commit time to form the [`QuorumCert`](crate::QuorumCert)
+    /// (`docs/12-NETWORK_SYNC_SPEC §3.2`, contract `qc.header_digest ==
+    /// header.digest()`). The block producer and every verifier (and any
+    /// future light client / SDK / multi-signer) MUST compute the digest with
+    /// this method — there is exactly one canonical recipe (AGENTS.md §2.2).
+    ///
+    /// # Why manual framing (not serde)
+    ///
+    /// Field bytes are streamed by hand — explicit order, big-endian integer
+    /// encoding, and a length prefix before every variable-length field — for
+    /// the same reason [`DagBlock`'s digest](../../lemma_consensus/dag/block)
+    /// is hand-framed: **cross-version byte stability**. A serde-based digest
+    /// (`serde_json`/`bincode`) silently depends on serializer internals
+    /// (JSON key ordering, struct field order, tag encoding); the day the
+    /// struct gains a map/float/`#[serde(flatten)]` field the digest could
+    /// shift and fork the network. Manual framing binds the digest to the
+    /// logical field set, not the serializer (AGENTS.md §7.1 determinism).
+    ///
+    /// # Field order (fixed, all fields bound)
+    ///
+    /// `height` → `timestamp` → `parent_hash` → `transactions_root` →
+    /// `state_root` → `receipts_root` → `proposer` → `epoch` →
+    /// `protocol_version` → `dag_round` → `dag_anchor` → `validators_hash` →
+    /// `next_validators_hash` → `gas_limit` → `gas_used` → `base_fee` →
+    /// `extra_data` (length-prefixed). `protocol_version` is included so the
+    /// version is bound into the cert (added P3·Step 23, docs/17-VERSIONING_SPEC §7.2).
+    ///
+    /// Integers are big-endian; `Hash`/`Address` contribute their raw bytes;
+    /// `base_fee` contributes its inner `u128` (Drop) as big-endian; the only
+    /// variable-length field, `extra_data`, is preceded by its length as a
+    /// `u64` big-endian so concatenations cannot alias (e.g. `[]`+`[a,b]` vs
+    /// `[a]`+`[b]`).
+    #[must_use]
+    pub fn digest(&self) -> Hash {
+        let mut h = blake3::Hasher::new();
+
+        // Scalar fields — big-endian for cross-platform determinism (AGENTS.md §7.1).
+        h.update(&self.height.to_be_bytes());
+        h.update(&self.timestamp.to_be_bytes());
+        h.update(self.parent_hash.as_bytes());
+        h.update(self.transactions_root.as_bytes());
+        h.update(self.state_root.as_bytes());
+        h.update(self.receipts_root.as_bytes());
+        h.update(self.proposer.as_bytes());
+        h.update(&self.epoch.to_be_bytes());
+        h.update(&self.protocol_version.to_be_bytes());
+        h.update(&self.dag_round.to_be_bytes());
+        h.update(self.dag_anchor.as_bytes());
+        h.update(self.validators_hash.as_bytes());
+        h.update(self.next_validators_hash.as_bytes());
+        h.update(&self.gas_limit.to_be_bytes());
+        h.update(&self.gas_used.to_be_bytes());
+        // base_fee — canonical fixed-width encoding of the inner u128 Drop value
+        // (same recipe as ValidatorSet::hash in validator_set.rs).
+        h.update(&self.base_fee.as_drop().to_be_bytes());
+
+        // extra_data — length prefix prevents concatenation ambiguity.
+        h.update(&(self.extra_data.len() as u64).to_be_bytes());
+        h.update(&self.extra_data);
+
+        Hash::from_bytes(*h.finalize().as_bytes())
     }
 }
 

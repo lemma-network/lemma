@@ -111,8 +111,8 @@ fn make_single_vset(kp: &KeyPair) -> ValidatorSet {
 
 /// Build a block with a valid QuorumCert signed by `kp`.
 ///
-/// The QC covers `serde_json::to_vec(header)` → `hash_bytes` — the same
-/// digest as `build_block_from_commit` (D·15b-3).
+/// The QC covers the canonical `BlockHeader::digest()` — the same digest as
+/// `build_block_from_commit` (D·15b-3; docs/12-NETWORK_SYNC_SPEC §3.2).
 fn make_block_with_valid_qc(height: u64, parent_hash: Hash, kp: &KeyPair) -> Block {
     let vh = Hash::from_bytes([0xBB; 32]);
     let header = BlockHeader::new(
@@ -136,9 +136,9 @@ fn make_block_with_valid_qc(height: u64, parent_hash: Hash, kp: &KeyPair) -> Blo
     )
     .expect("header");
 
-    // Compute header_digest the same way build_block_from_commit does.
-    let header_bytes = serde_json::to_vec(&header).expect("header json");
-    let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+    // Compute header_digest the same way build_block_from_commit does:
+    // the canonical BlockHeader::digest() (docs/12-NETWORK_SYNC_SPEC §3.2).
+    let header_digest = header.digest();
 
     // Sign the digest with the keypair.
     let sig = kp.sign_to_lemma(header_digest.as_bytes());
@@ -345,8 +345,7 @@ fn certified_verifier_rejects_block_with_empty_signers() {
     .expect("header");
 
     // Compute the correct header_digest so the cert passes digest check.
-    let header_bytes = serde_json::to_vec(&header).expect("json");
-    let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+    let header_digest = header.digest();
 
     // Empty signers — no stake accumulated.
     let qc = QuorumCert::new(1, header_digest, BTreeMap::new());
@@ -692,8 +691,7 @@ async fn apply_synced_block_returns_invalid_qc_on_bad_cert() {
         vec![],
     )
     .expect("header");
-    let header_bytes = serde_json::to_vec(&header).expect("json");
-    let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+    let header_digest = header.digest();
     let qc = QuorumCert::new(1, header_digest, BTreeMap::new());
     let block = Block::new(header, vec![], vec![], Some(qc)).expect("block");
 

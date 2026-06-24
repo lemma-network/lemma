@@ -375,28 +375,56 @@ struct FunctionDescriptor {
 /// ## Error handling
 ///
 /// If a function's selector cannot be computed (missing symbol — should not
-/// occur for well-formed programs), that function is silently skipped rather
-/// than failing the whole build. The selector computation is best-effort here;
-/// codegen's dispatch emit catches genuine failures at compile time.
+/// occur for well-formed programs), the error is **propagated**, never skipped.
+/// `emit_module` computes the same selectors for its dispatch table, so the ABI
+/// function set and the dispatch function set must always agree on which
+/// functions exist — silently skipping one here (the old behaviour) could make
+/// the ABI and the live dispatch table disagree (L-2 asymmetry bug). Selector
+/// *collisions* across the dispatchable set are caught earlier by
+/// `detect_selector_collisions` in `emit_module`.
+///
+/// # Errors
+///
+/// Returns [`crate::error::LangError::Codegen`] if any public function's
+/// selector cannot be computed.
 // consumer: codegen/wasm.rs "lemma.abi" custom-section embed (P3·Step 6i)
-pub(crate) fn build_abi(contract: &TypedContract<'_>) -> Vec<u8> {
+pub(crate) fn build_abi(contract: &TypedContract<'_>) -> Result<Vec<u8>, crate::error::LangError> {
     let mut descriptors: Vec<FunctionDescriptor> = Vec::new();
 
+    // Selector set guard: a standalone build_abi caller (ABI-only tooling) must
+    // also reject colliding selectors, not just the emit_module pipeline (L-2, 🔵-1).
+    let mut seen_selectors: std::collections::BTreeMap<u32, String> =
+        std::collections::BTreeMap::new();
+
     for func in contract.functions() {
-        // Include only externally-callable functions.
+        // Include only externally-callable functions WITH a body. This filter
+        // MUST be character-for-character identical to emit_module's dispatch
+        // filter (wasm.rs) — a body-less `pub fn` (interface signature) would
+        // otherwise land in the ABI but not the dispatch table (L-2 asymmetry).
         // Modifiers, private helpers, and receive/fallback specials are
         // dispatched differently (not via the selector mechanism).
         if !matches!(func.visibility, Visibility::Pub | Visibility::External) {
             continue;
         }
+        if func.body.is_none() {
+            continue;
+        }
 
         // Compute 4-byte selector (blake3 over canonical signature string).
-        let selector = match compute_selector(&func, contract) {
-            Ok(s) => s,
-            // Best-effort: skip if selector is not computable.
-            // This should not occur for well-formed, type-checked contracts.
-            Err(_) => continue,
-        };
+        // Propagate on failure — the ABI function set MUST match the dispatch
+        // function set that emit_module builds from the same selectors (L-2).
+        let selector = compute_selector(&func, contract)?;
+
+        // Reject duplicate selectors at the ABI layer too (L-2, idempotent with
+        // emit_module's detect_selector_collisions).
+        if let Some(prev) = seen_selectors.insert(selector, func.name.to_string()) {
+            return Err(crate::error::LangError::Codegen {
+                message: format!(
+                    "selector collision between {prev}() and {}() (selector {selector:#010x})",
+                    func.name
+                ),
+            });
+        }
 
         // Resolve parameter names + canonical types from the symbol arena.
         // The FnSig carries (name: String, ty: ResolvedType, has_default: bool).
@@ -434,7 +462,7 @@ pub(crate) fn build_abi(contract: &TypedContract<'_>) -> Vec<u8> {
     // (structs with String/u32/Vec fields). unwrap_or_default returns empty
     // on the impossible error (serde_json only fails for non-serializable types
     // or recursive references, which our types don't have).
-    serde_json::to_vec(&descriptors).unwrap_or_default()
+    Ok(serde_json::to_vec(&descriptors).unwrap_or_default())
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

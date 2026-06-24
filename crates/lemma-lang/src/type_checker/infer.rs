@@ -2496,9 +2496,10 @@ fn builtin_member_type(base_ty: &ResolvedType, name: &str) -> Option<ResolvedTyp
             // `staticCall(calldata: bytes)`
             // `delegateCall(calldata: bytes)`
             //
-            // Note: SAFETY-011 (analyzer/rules/delegate.rs) enforces the
-            // `#[allowDelegate]` restriction on `delegateCall` at safety-analysis
-            // time — the type-checker only validates argument types here.
+            // Note: SAFETY-011b (analyzer/rules/delegate.rs) enforces the
+            // `#[allowDelegate]` restriction on the `delegateCall` built-in at
+            // safety-analysis time (SAFETY-011 covers the `self.<field>` proxy
+            // arm) — the type-checker only validates argument types here.
             "rawCall" | "staticCall" | "delegateCall" => Some(ResolvedType::Result_(
                 Box::new(ResolvedType::Bytes),
                 Box::new(ResolvedType::Unknown),

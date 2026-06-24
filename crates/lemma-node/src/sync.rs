@@ -313,15 +313,11 @@ impl BlockVerifier for CertifiedVerifier {
         };
 
         // ── Step 3: Recompute header_digest ───────────────────────────────────
-        // Same as build_block_from_commit (D·15b-3): serde_json + hash_bytes.
-        // serde_json is used (not bincode) because it is the same serializer
-        // used for DagBlock gossip — keeping the digest deterministic across
-        // the stack without introducing a second serialization format.
-        let header_bytes =
-            serde_json::to_vec(&block.header).map_err(|e| VerifyError::Serialization {
-                reason: e.to_string(),
-            })?;
-        let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+        // Canonical header digest via BlockHeader::digest() — the SAME recipe
+        // the producer uses in build_block_from_commit (DB-A15b). One canonical
+        // method, hand-framed Blake3 (AGENTS.md §2.2; docs/12-NETWORK_SYNC_SPEC
+        // §3.2, contract `qc.header_digest == header.digest()`). See header.rs.
+        let header_digest = block.header.digest();
 
         // ── Step 4: Build sig_results via hybrid sig verification (B3-2) ──────
         // Verify each signer's hybrid sig over header_digest.

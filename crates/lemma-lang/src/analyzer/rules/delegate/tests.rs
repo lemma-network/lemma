@@ -268,6 +268,151 @@ let _ = self.externalContract.execute(data)
     );
 }
 
+// ─── SAFETY-011b — delegateCall built-in #[allowDelegate] gate ────────────────
+
+#[test]
+fn delegate_call_builtin_without_annotation_rejected() {
+    // addr.delegateCall(data) on a local param WITHOUT #[allowDelegate] → reject.
+    let ast = typed_ast(
+        r#"contract C {
+state { x: u128 = 0 }
+pub fn run(lib: Address, data: bytes) {
+let _ = lib.delegateCall(data)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, SafetyError::UngatedDelegateCall { func, .. } if func == "run")),
+        "addr.delegateCall without #[allowDelegate] must produce UngatedDelegateCall for `run`; got {violations:?}"
+    );
+}
+
+#[test]
+fn delegate_call_builtin_with_annotation_passes() {
+    // addr.delegateCall(data) WITH #[allowDelegate] → pass.
+    let ast = typed_ast(
+        r#"contract C {
+state { x: u128 = 0 }
+#[allowDelegate]
+pub fn run(lib: Address, data: bytes) {
+let _ = lib.delegateCall(data)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "addr.delegateCall WITH #[allowDelegate] must pass SAFETY-011b; got {violations:?}"
+    );
+}
+
+#[test]
+fn delegate_call_builtin_with_at_annotation_passes() {
+    // @allowDelegate (the @-form) is the same annotation name → also opts in.
+    let ast = typed_ast(
+        r#"contract C {
+state { x: u128 = 0 }
+@allowDelegate
+pub fn run(lib: Address, data: bytes) {
+let _ = lib.delegateCall(data)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "addr.delegateCall WITH @allowDelegate must pass SAFETY-011b; got {violations:?}"
+    );
+}
+
+#[test]
+fn allow_delegate_is_scoped_to_its_function() {
+    // #[allowDelegate] on `safe` must NOT exempt `unsafe_fn` — the gate is
+    // per-function. `unsafe_fn` still rejects.
+    let ast = typed_ast(
+        r#"contract C {
+state { x: u128 = 0 }
+#[allowDelegate]
+pub fn safe(lib: Address, data: bytes) {
+let _ = lib.delegateCall(data)
+}
+pub fn unsafe_fn(lib: Address, data: bytes) {
+let _ = lib.delegateCall(data)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "exactly one UngatedDelegateCall expected (only `unsafe_fn`); got {violations:?}"
+    );
+    assert!(
+        violations.iter().any(
+            |v| matches!(v, SafetyError::UngatedDelegateCall { func, .. } if func == "unsafe_fn")
+        ),
+        "the violation must name `unsafe_fn`; got {violations:?}"
+    );
+}
+
+#[test]
+fn self_field_delegate_call_reported_once_as_safety_011() {
+    // self.lib.delegateCall(data) — receiver IS self.<field>, so this is the
+    // proxy pattern (SAFETY-011 UnsafeDelegate), reported ONCE — not also as
+    // SAFETY-011b. No #[allowDelegate], to prove the arms don't double-fire.
+    let ast = typed_ast(
+        r#"contract C {
+state { lib: Address }
+init(lib: Address) {
+self.lib = lib
+}
+pub fn run(data: bytes) {
+let _ = self.lib.delegateCall(data)
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert_eq!(
+        violations.len(),
+        1,
+        "self.<field>.delegateCall must be reported exactly once; got {violations:?}"
+    );
+    assert!(
+        matches!(violations[0], SafetyError::UnsafeDelegate { .. }),
+        "self.<field>.delegateCall must be SAFETY-011 UnsafeDelegate (not 011b); got {violations:?}"
+    );
+}
+
+#[test]
+fn non_delegate_local_call_with_annotation_still_clean() {
+    // A function carrying #[allowDelegate] that makes a NON-delegate external
+    // call (oracle.getPrice()) must not spuriously fire either arm.
+    let ast = typed_ast(
+        r#"contract C {
+state { price: u128 = 0 }
+#[allowDelegate]
+pub fn updatePrice(oracle: Address) {
+let p = oracle.getPrice()
+self.price = p
+}
+}"#,
+    );
+    let contracts = ast.contracts();
+    let violations = delegate_check(&contracts[0]);
+    assert!(
+        violations.is_empty(),
+        "non-delegate call under #[allowDelegate] must stay clean; got {violations:?}"
+    );
+}
+
 // ─── Cross-rule interaction tests (P3·Step 4g) ────────────────────────────────
 
 #[test]

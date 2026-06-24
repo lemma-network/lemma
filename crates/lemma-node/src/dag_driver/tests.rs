@@ -369,8 +369,8 @@ fn build_block_from_commit_fails_on_uninitialised_chain() {
 // ── D·15b-3: QC assembly at commit time ──────────────────────────────────────
 
 /// D·15b-3: `build_block_from_commit` returns a `Block` with `quorum_cert = Some(qc)`
-/// where `qc.height == block.height()`, `qc.header_digest` is the Blake3 of the
-/// serialized header, and `qc.signer_count() == 1` (Phase 2 single-validator).
+/// where `qc.height == block.height()`, `qc.header_digest` is the canonical
+/// `BlockHeader::digest()`, and `qc.signer_count() == 1` (Phase 2 single-validator).
 #[test]
 fn build_block_from_commit_sets_quorum_cert() {
     // Arrange: keypair-derived proposer (QC signer must match proposer).
@@ -397,14 +397,11 @@ fn build_block_from_commit_sets_quorum_cert() {
         "qc.height must equal block.height()"
     );
 
-    // header_digest = Blake3(serde_json::to_vec(header)).
-    let expected_digest = {
-        let header_bytes = serde_json::to_vec(&block.header).expect("header serialization");
-        lemma_crypto::hash_bytes(&header_bytes)
-    };
+    // header_digest = canonical BlockHeader::digest() (docs/12-NETWORK_SYNC_SPEC §3.2).
+    let expected_digest = block.header.digest();
     assert_eq!(
         qc.header_digest, expected_digest,
-        "qc.header_digest must equal Blake3(serde_json(header))"
+        "qc.header_digest must equal block.header.digest()"
     );
 
     // Exactly one signer (Phase 2: 100% stake).
@@ -463,6 +460,38 @@ fn build_block_from_commit_quorum_cert_signature_verifiable() {
     let hybrid = HybridSignature { classical, quantum };
     verify(&pk, qc.header_digest.as_bytes(), &hybrid)
         .expect("QC signature must verify against header_digest using proposer's public key");
+}
+
+/// F-6 / C-1: produce == verify == canonical method.
+///
+/// The digest the PRODUCER embeds in the QC (`build_block_from_commit`,
+/// dag_driver.rs) must equal what the VERIFIER recomputes (`sync.rs` step 3),
+/// and both must equal the single canonical `BlockHeader::digest()`. This
+/// closes the fork-risk of a producer/verifier serialization split
+/// (docs/12-NETWORK_SYNC_SPEC §3.2 contract `qc.header_digest == header.digest()`).
+#[test]
+fn build_block_from_commit_digest_matches_canonical_method() {
+    let kp = test_kp();
+    let proposer = *kp.address();
+    let (_dir, db) = fresh_chain(proposer);
+    let chain = lemma_storage::ChainStore::new(&db);
+    let commit = make_commit(1, 3, proposer);
+
+    let (block, _hash) =
+        build_block_from_commit(&commit, &chain, proposer, Arc::clone(&db), vec![], &kp).unwrap();
+
+    let qc = block
+        .quorum_cert
+        .as_ref()
+        .expect("block must have quorum_cert");
+
+    // Producer-embedded digest == canonical method (verifier's recipe).
+    assert_eq!(
+        qc.header_digest,
+        block.header.digest(),
+        "produced QC digest must equal BlockHeader::digest() — producer and \
+         verifier must share one canonical recipe (AGENTS.md §2.2)"
+    );
 }
 
 // ── Integration: run_dag_driver produces chain blocks ────────────────────────

@@ -38,8 +38,9 @@ use crate::stake::StakeAggregator;
 pub enum CertError {
     /// The certificate covers a different header digest than expected.
     ///
-    /// `qc.header_digest` must match the Blake3 digest of the header being
-    /// certified (`lemma-crypto::hash(header)`, injected by caller).
+    /// `qc.header_digest` must match the Blake3 canonical digest of the header
+    /// being certified — `BlockHeader::digest()` (hand-framed, NOT serde/bincode;
+    /// `docs/12-NETWORK_SYNC_SPEC §3.2`), injected by the caller.
     #[error("certificate digest mismatch: cert covers {got}, expected {expected}")]
     DigestMismatch {
         /// The digest the caller expected the cert to cover.

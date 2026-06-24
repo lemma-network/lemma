@@ -284,6 +284,46 @@ pub(crate) fn compute_selector(
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
+/// Detect 4-byte function-selector collisions within a single contract (L-2).
+///
+/// Two dispatchable functions whose [`compute_selector`] outputs are equal would
+/// make the second one (in declaration order) silently unreachable on a deployed,
+/// immutable contract — the dispatch if/else chain and the ABI descriptor both
+/// route the selector to whichever function appears first. On an immutable
+/// contract this is irreversible and silent (the Solidity selector-clash class),
+/// so it is rejected at **compile time** rather than allowed to ship.
+///
+/// `selectors` is `(function_name, selector)` in dispatch/declaration order. The
+/// caller derives each selector via [`compute_selector`] (the single canonical
+/// derivation — AGENTS §2 DRY); this helper only checks for duplicates.
+///
+/// # Determinism (AGENTS §7.1)
+///
+/// Uses a `BTreeMap` (not `HashMap`) and reports the collision against the
+/// first-seen function in declaration order, so the same input always yields the
+/// same error message across validators.
+///
+/// # Errors
+///
+/// Returns [`LangError::Codegen`] naming both colliding functions and the shared
+/// selector (as `0x........`) the first time two selectors are found equal.
+pub(crate) fn detect_selector_collisions(selectors: &[(&str, u32)]) -> Result<(), LangError> {
+    // BTreeMap<selector, first-seen function name> — deterministic iteration and
+    // deterministic first-seen reporting (declaration order is the input order).
+    let mut seen: BTreeMap<u32, &str> = BTreeMap::new();
+    for &(name, selector) in selectors {
+        if let Some(&first) = seen.get(&selector) {
+            return Err(LangError::Codegen {
+                message: format!(
+                    "selector collision between {first}() and {name}() (selector {selector:#010x})"
+                ),
+            });
+        }
+        seen.insert(selector, name);
+    }
+    Ok(())
+}
+
 /// Canonical type name for selector signature computation and ABI descriptors.
 ///
 /// Maps `ResolvedType` to a stable string used in the blake3 hash input
@@ -432,6 +472,17 @@ pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangE
         let sel = compute_selector(f, contract)?;
         selectors.push((sel, i));
     }
+
+    // Reject selector collisions at compile time (L-2). Two functions whose
+    // 4-byte selectors collide would make the second silently unreachable on a
+    // deployed immutable contract. Check before building the dispatch table and
+    // the ABI so both always describe the exact same function set.
+    let selector_names: Vec<(&str, u32)> = pub_fns
+        .iter()
+        .zip(selectors.iter())
+        .map(|(f, (sel, _))| (f.name, *sel))
+        .collect();
+    detect_selector_collisions(&selector_names)?;
 
     // Collect state fields for storage key computation.
     let state_fields = contract.state_fields();
@@ -603,7 +654,7 @@ pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangE
     //   state-access hints (B5-3 part-a). Consumed by LemmaVM at deploy time
     //   to pre-seed the Flux dependency graph and Express eligibility check
     //   (P3·Step 7).
-    let abi_bytes = abi::build_abi(contract);
+    let abi_bytes = abi::build_abi(contract)?;
     module.section(&CustomSection {
         name: "lemma.abi".into(),
         data: std::borrow::Cow::Owned(abi_bytes),
@@ -1197,16 +1248,12 @@ impl<'a> LowerCtx<'a> {
                             // delegateCall(calldata) — exactly 1 positional arg (spec §16).
                             // No value parameter (delegate calls run in caller's context).
                             //
-                            // SAFETY: delegateCall is type-valid here. The #[allowDelegate]
-                            // annotation enforcement is intentionally deferred — SAFETY-011
-                            // catches self.<field>.<method>() proxy patterns but not the
-                            // explicit Address::delegateCall built-in.
-                            // TODO(safety): add SAFETY-011b rule for Address::delegateCall
-                            // without #[allowDelegate] annotation. Track: living-notes
-                            // Technical Debt (delegate-call-gate-1). Until then, delegateCall
-                            // is callable but the VM SAFETY-011 runtime contract
-                            // (dispatch_call CallMode::Delegate runs callee code in caller
-                            // context) is enforced.
+                            // SAFETY: delegateCall is type-valid here. SAFETY-011b
+                            // (analyzer/rules/delegate.rs) enforces the #[allowDelegate]
+                            // annotation at compile time — a call site reaching codegen has
+                            // already passed that gate. At runtime the VM SAFETY-011 contract
+                            // (dispatch_call CallMode::Delegate runs callee code in the
+                            // caller's context) is enforced.
                             if args.is_empty() {
                                 return Err(LangError::Codegen {
                                     message: "delegateCall requires 1 argument (calldata)".into(),

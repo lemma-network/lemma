@@ -351,7 +351,7 @@ fn build_abi_empty_contract_returns_empty_json_array() {
     // A contract with no public functions produces a valid empty JSON array.
     let typed = typed_ast_for("contract Foo {}");
     let contracts = typed.contracts();
-    let abi_bytes = build_abi(&contracts[0]);
+    let abi_bytes = build_abi(&contracts[0]).expect("build_abi failed");
     let json: serde_json::Value =
         serde_json::from_slice(&abi_bytes).expect("build_abi must return valid JSON");
     assert!(json.is_array(), "ABI JSON must be an array, got: {json}");
@@ -367,7 +367,7 @@ fn build_abi_includes_public_function() {
     // A public function appears in the ABI with correct name and param types.
     let typed = typed_ast_for("contract C { pub fn transfer(to: Address, amount: u128) { } }");
     let contracts = typed.contracts();
-    let abi_bytes = build_abi(&contracts[0]);
+    let abi_bytes = build_abi(&contracts[0]).expect("build_abi failed");
     let json: serde_json::Value = serde_json::from_slice(&abi_bytes).expect("valid JSON");
     let fns = json.as_array().expect("array");
     assert_eq!(fns.len(), 1, "expected exactly 1 public function");
@@ -389,7 +389,7 @@ fn build_abi_excludes_private_function() {
     // Private functions must NOT appear in the ABI.
     let typed = typed_ast_for("contract C { fn internal_helper() { } pub fn visible() { } }");
     let contracts = typed.contracts();
-    let abi_bytes = build_abi(&contracts[0]);
+    let abi_bytes = build_abi(&contracts[0]).expect("build_abi failed");
     let json: serde_json::Value = serde_json::from_slice(&abi_bytes).expect("valid JSON");
     let fns = json.as_array().expect("array");
 
@@ -408,7 +408,7 @@ fn build_abi_return_type_is_present() {
         "contract C { pub fn get_balance(owner: Address) -> u128 { return 0u128; } }",
     );
     let contracts = typed.contracts();
-    let abi_bytes = build_abi(&contracts[0]);
+    let abi_bytes = build_abi(&contracts[0]).expect("build_abi failed");
     let json: serde_json::Value = serde_json::from_slice(&abi_bytes).expect("valid JSON");
     let fns = json.as_array().expect("array");
     assert_eq!(fns.len(), 1);
@@ -420,7 +420,60 @@ fn build_abi_is_deterministic() {
     // Two calls on the same contract must produce byte-identical JSON (AGENTS §7.1).
     let typed = typed_ast_for("contract C { pub fn f(x: u64) -> bool { return true; } }");
     let contracts = typed.contracts();
-    let first = build_abi(&contracts[0]);
-    let second = build_abi(&contracts[0]);
+    let first = build_abi(&contracts[0]).expect("build_abi failed");
+    let second = build_abi(&contracts[0]).expect("build_abi failed");
     assert_eq!(first, second, "build_abi must be deterministic");
+}
+
+// ─── ABI ↔ dispatch parity (L-2) ──────────────────────────────────────────────
+
+#[test]
+fn build_abi_function_set_matches_dispatch_function_set() {
+    // The ABI function set (build_abi) and the dispatch function set (the pub/
+    // external functions with bodies that emit_module builds its dispatch table
+    // from) must always agree — the L-2 asymmetry bug was build_abi silently
+    // skipping a function that emit_module kept. This parity test compares the
+    // two name sets directly for a multi-function contract.
+    use crate::parser::Visibility;
+    use std::collections::BTreeSet;
+
+    let src = "contract C { \
+        pub fn alpha(a: u64) { } \
+        pub fn beta(b: Address) { } \
+        external fn gamma(c: bool) { } \
+        fn private_helper() { } \
+    }";
+    let typed = typed_ast_for(src);
+    let contracts = typed.contracts();
+    let contract = &contracts[0];
+
+    // ABI function set — names emitted into the lemma.abi custom section.
+    let abi_bytes = build_abi(contract).expect("build_abi failed");
+    let json: serde_json::Value = serde_json::from_slice(&abi_bytes).expect("valid JSON");
+    let abi_names: BTreeSet<String> = json
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|f| f["name"].as_str().expect("name string").to_owned())
+        .collect();
+
+    // Dispatch function set — pub/external functions with bodies (the exact
+    // filter emit_module uses to build its selector dispatch table).
+    let dispatch_names: BTreeSet<String> = contract
+        .functions()
+        .iter()
+        .filter(|f| matches!(f.visibility, Visibility::Pub | Visibility::External))
+        .filter(|f| f.body.is_some())
+        .map(|f| f.name.to_owned())
+        .collect();
+
+    assert_eq!(
+        abi_names, dispatch_names,
+        "ABI function set must equal dispatch function set (L-2 parity)"
+    );
+    assert_eq!(
+        abi_names.len(),
+        3,
+        "expected exactly 3 externally-callable functions (alpha, beta, gamma)"
+    );
 }

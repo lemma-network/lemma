@@ -175,6 +175,30 @@ pub enum SafetyError {
         call_site: Span,
     },
 
+    // ── SAFETY-011b — Ungated delegateCall built-in ───────────────────────────
+    /// An explicit `Address::delegateCall(calldata)` built-in call occurs in a
+    /// function that is NOT annotated `#[allowDelegate]`.  `delegateCall`
+    /// executes the callee's code in the *caller's* storage context (arbitrary
+    /// code in your storage) — spec §16 requires the enclosing function to opt
+    /// in via `#[allowDelegate]`.
+    ///
+    /// Distinct from [`SafetyError::UnsafeDelegate`] (the `self.<field>.<method>()`
+    /// runtime-chosen proxy pattern): this variant covers the explicit built-in
+    /// `addr.delegateCall(data)` where `addr` is a local/param, not a state field.
+    ///
+    /// See `09-SAFETY_ANALYZER_SPEC §3 SAFETY-011` and `03-LANGUAGE_SPEC §16`.
+    #[error(
+        "SAFETY-011 ungated delegateCall: `delegateCall` at this site runs arbitrary \
+         code in the contract's storage context but `{func}` is not annotated \
+         #[allowDelegate] — add #[allowDelegate] to opt in"
+    )]
+    UngatedDelegateCall {
+        /// The enclosing function that lacks the `#[allowDelegate]` annotation.
+        func: String,
+        /// Source location of the offending `delegateCall` site.
+        call_site: Span,
+    },
+
     // ── SAFETY-012 — Integer Safety ───────────────────────────────────────────
     /// Unchecked arithmetic inside an `unchecked {}` block flows into a
     /// value-bearing quantity (balance, totalSupply, or a value transfer).

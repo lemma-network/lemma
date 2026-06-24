@@ -207,10 +207,10 @@ pub fn build_dag_block(
 /// ## QC assembly (DB-A15b)
 ///
 /// After the `BlockHeader` is fully constructed (all roots set), the proposer
-/// signs `Blake3(serde_json::to_vec(header))` to produce the commit-certificate.
-/// `serde_json` is used (not bincode) because it is the same serializer used for
-/// gossip — keeping the digest deterministic across the stack without introducing
-/// a second serialization format for headers.
+/// signs the canonical `BlockHeader::digest()` (hand-framed Blake3 — explicit
+/// field order, big-endian ints, length-prefixed `extra_data`; NOT serde) to
+/// produce the commit-certificate (`docs/12-NETWORK_SYNC_SPEC §3.2`, contract
+/// `qc.header_digest == header.digest()`, DB-A66).
 ///
 /// Phase 2: 1 signer (100% stake) → satisfies 2f+1 trivially.
 /// Phase 3+: accumulate 2f+1 signers via commit-ack gossip (not yet implemented).
@@ -228,7 +228,7 @@ pub fn build_dag_block(
 /// - [`NodeError::Block`] — `BlockHeader` or `Block` construction failed.
 /// - [`NodeError::Core`] — base-fee arithmetic overflow.
 /// - [`NodeError::Storage`] — world-state write failed during execution.
-/// - [`NodeError::Serialization`] — header JSON encoding or block hash encoding failed.
+/// - [`NodeError::Serialization`] — block hash encoding failed.
 pub fn build_block_from_commit(
     commit: &Commit,
     chain: &ChainStore<'_>,
@@ -292,15 +292,14 @@ pub fn build_block_from_commit(
     // The QC is assembled AFTER the header is fully constructed (all roots set)
     // so the digest covers the final, canonical header bytes.
     //
-    // serde_json is used (not bincode) because it is the same serializer used
-    // for DagBlock gossip — keeping the digest deterministic across the stack
-    // without introducing a second serialization format for headers.
+    // The canonical header digest is BlockHeader::digest() — a hand-framed
+    // Blake3 digest (docs/12-NETWORK_SYNC_SPEC §3.2, contract
+    // `qc.header_digest == header.digest()`). One recipe, shared by producer
+    // and every verifier (AGENTS.md §2.2). NOT serde — see header.rs.
     //
     // Phase 2: single signer (100% stake in single-validator mode) satisfies
     // 2f+1 trivially. Phase 3+: collect 2f+1 signers via commit-ack gossip.
-    let header_bytes = serde_json::to_vec(&header)
-        .map_err(|e| NodeError::Serialization(format!("header serialization: {e}")))?;
-    let header_digest = lemma_crypto::hash_bytes(&header_bytes);
+    let header_digest = header.digest();
     let header_sig = keypair.sign_to_lemma(header_digest.as_bytes());
 
     let mut signers = BTreeMap::new();

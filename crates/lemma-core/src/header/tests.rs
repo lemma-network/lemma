@@ -629,16 +629,141 @@ fn protocol_version_is_serialized() {
 #[test]
 fn protocol_version_affects_digest() {
     // Two headers identical except protocol_version must produce different
-    // serialized bytes — and therefore different hashes when fed to any
-    // deterministic hash function (e.g. Blake3 in lemma-crypto).
+    // canonical digests — protocol_version is bound into BlockHeader::digest()
+    // (docs/17-VERSIONING_SPEC §7.2; P3·Step 23).
     let h1 = genesis_header();
     let mut h2 = genesis_header();
     h2.protocol_version = 2;
-
-    let bytes1 = serde_json::to_vec(&h1).unwrap();
-    let bytes2 = serde_json::to_vec(&h2).unwrap();
     assert_ne!(
-        bytes1, bytes2,
-        "different protocol_version must produce different serialized bytes"
+        h1.digest(),
+        h2.digest(),
+        "different protocol_version must produce different canonical digest"
+    );
+}
+
+// ── digest() — canonical header commitment (docs/12-NETWORK_SYNC_SPEC §3.2) ───
+
+#[test]
+fn digest_is_deterministic_for_same_header() {
+    // Same header → same digest across two independent computations.
+    let h = block_1_header();
+    assert_eq!(
+        h.digest(),
+        h.digest(),
+        "digest must be deterministic for identical input"
+    );
+    // And a freshly constructed equal header yields the same digest.
+    assert_eq!(block_1_header().digest(), h.digest());
+}
+
+#[test]
+fn digest_is_nonzero_for_genesis() {
+    // Sanity: the hand-framed Blake3 digest is not the zero hash.
+    assert!(!genesis_header().digest().is_zero());
+}
+
+#[test]
+fn digest_changes_when_any_field_changes() {
+    // Mutate EACH field in turn (incl. protocol_version) and assert the digest
+    // diverges from the baseline — proves every field is bound into the digest.
+    let base = block_1_header();
+    let base_digest = base.digest();
+
+    // Each closure produces a header that differs from `base` in exactly one
+    // field. Distinct sentinel values are chosen to be unequal to the base.
+    type FieldMutator = fn(&mut BlockHeader);
+    let mutators: Vec<(&str, FieldMutator)> = vec![
+        ("height", |h| h.height = h.height.wrapping_add(1)),
+        ("timestamp", |h| h.timestamp = h.timestamp.wrapping_add(1)),
+        ("parent_hash", |h| {
+            h.parent_hash = Hash::from_bytes([0x77u8; 32])
+        }),
+        ("transactions_root", |h| {
+            h.transactions_root = Hash::from_bytes([0x78u8; 32])
+        }),
+        ("state_root", |h| {
+            h.state_root = Hash::from_bytes([0x79u8; 32])
+        }),
+        ("receipts_root", |h| {
+            h.receipts_root = Hash::from_bytes([0x7Au8; 32])
+        }),
+        ("proposer", |h| h.proposer = Address::burn()),
+        ("epoch", |h| h.epoch = h.epoch.wrapping_add(1)),
+        ("protocol_version", |h| {
+            h.protocol_version = h.protocol_version.wrapping_add(1)
+        }),
+        ("dag_round", |h| h.dag_round = h.dag_round.wrapping_add(1)),
+        ("dag_anchor", |h| {
+            h.dag_anchor = Hash::from_bytes([0x7Bu8; 32])
+        }),
+        ("validators_hash", |h| {
+            h.validators_hash = Hash::from_bytes([0x7Cu8; 32])
+        }),
+        ("next_validators_hash", |h| {
+            h.next_validators_hash = Hash::from_bytes([0x7Du8; 32])
+        }),
+        // gas fields kept valid (gas_used <= gas_limit) so digest() never
+        // depends on validate(); digest() hashes raw fields regardless.
+        ("gas_limit", |h| h.gas_limit = h.gas_limit.wrapping_add(1)),
+        ("gas_used", |h| h.gas_used = h.gas_used.wrapping_add(1)),
+        ("base_fee", |h| {
+            h.base_fee = Amount::from_drop(h.base_fee.as_drop() + 1)
+        }),
+        ("extra_data", |h| h.extra_data = vec![0xEEu8]),
+    ];
+
+    for (field, mutate) in mutators {
+        let mut mutated = base.clone();
+        mutate(&mut mutated);
+        assert_ne!(
+            mutated.digest(),
+            base_digest,
+            "mutating `{field}` must change the canonical digest"
+        );
+    }
+}
+
+#[test]
+fn digest_distinguishes_extra_data_length_boundary() {
+    // The length-prefix on extra_data must prevent concatenation ambiguity:
+    // two headers whose extra_data differ only in framing must differ.
+    let mut a = genesis_header();
+    let mut b = genesis_header();
+    a.extra_data = vec![0x01, 0x02];
+    b.extra_data = vec![0x01, 0x02, 0x03];
+    assert_ne!(a.digest(), b.digest());
+
+    // Empty vs single-zero-byte extra_data must also differ (length prefix).
+    let mut c = genesis_header();
+    let mut d = genesis_header();
+    c.extra_data = vec![];
+    d.extra_data = vec![0x00];
+    assert_ne!(c.digest(), d.digest());
+}
+
+#[test]
+fn digest_golden_vector_for_genesis_header() {
+    // BYTE-STABILITY GOLDEN VECTOR. This pins the canonical digest of a fixed
+    // genesis-like header. If this value changes, the header digest framing
+    // changed — which is a CONSENSUS-BREAKING, network-forking change. Such a
+    // change is only acceptable as a deliberate pre-mainnet re-baseline
+    // (docs/17-VERSIONING_SPEC §7.2); update this vector intentionally, never
+    // to "make the test pass".
+    //
+    // Canonical 17-field byte layout (so an independent impl — e.g. a TS/Py
+    // light client — can re-derive this vector by hand, NOT by trusting the Rust
+    // impl that produced it). All ints big-endian; hashes/addresses raw bytes:
+    //   height u64 BE | timestamp u64 BE | parent_hash 32B | transactions_root 32B
+    //   | state_root 32B | receipts_root 32B | proposer 20B (Address = [u8;20])
+    //   | epoch u64 BE | protocol_version u32 BE | dag_round u64 BE | dag_anchor 32B
+    //   | validators_hash 32B | next_validators_hash 32B | gas_limit u64 BE
+    //   | gas_used u64 BE | base_fee u128 BE (inner Drop) | extra_data: len u64 BE
+    //   then bytes. blake3 over the concatenation.
+    let h = genesis_header();
+    let expected = "7bf2709f1d4669e48d085adb6a777fed18d138a0113f643aff08a7c1d260d557";
+    assert_eq!(
+        h.digest().to_hex(),
+        expected,
+        "genesis header digest must be byte-stable"
     );
 }
