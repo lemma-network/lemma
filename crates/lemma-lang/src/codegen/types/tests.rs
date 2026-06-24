@@ -66,13 +66,26 @@ fn wasm_valtype_maps_int_literal_to_i32() {
     );
 }
 
-// ─── wasm_valtype — unsupported types ────────────────────────────────────────
+// ─── wasm_valtype — u128 (i64-pair) ──────────────────────────────────────────
 
 #[test]
-fn wasm_valtype_rejects_u128() {
-    let result = wasm_valtype(&ResolvedType::U128);
-    assert!(result.is_err());
+fn wasm_valtype_maps_u128_to_i64() {
+    // u128 is represented as an i64-pair (lo, hi). Each half is I64.
+    assert_eq!(wasm_valtype(&ResolvedType::U128).unwrap(), ValType::I64);
 }
+
+// ─── wasm_valtype — Address (i32 pointer) ────────────────────────────────────
+
+#[test]
+fn wasm_valtype_maps_address_to_i32() {
+    // Address is a 20-byte value in linear memory, passed as i32 pointer.
+    assert_eq!(
+        wasm_valtype(&ResolvedType::AddressTy).unwrap(),
+        ValType::I32
+    );
+}
+
+// ─── wasm_valtype — unsupported types ────────────────────────────────────────
 
 #[test]
 fn wasm_valtype_rejects_u256() {
@@ -99,15 +112,55 @@ fn wasm_valtype_rejects_string() {
 }
 
 #[test]
-fn wasm_valtype_rejects_address() {
-    let result = wasm_valtype(&ResolvedType::AddressTy);
-    assert!(result.is_err());
-}
-
-#[test]
 fn wasm_valtype_rejects_bytes() {
     let result = wasm_valtype(&ResolvedType::Bytes);
     assert!(result.is_err());
+}
+
+// ─── local_count ─────────────────────────────────────────────────────────────
+
+#[test]
+fn local_count_returns_2_for_u128() {
+    assert_eq!(super::local_count(&ResolvedType::U128), 2);
+}
+
+#[test]
+fn local_count_returns_1_for_u64() {
+    assert_eq!(super::local_count(&ResolvedType::U64), 1);
+}
+
+#[test]
+fn local_count_returns_1_for_address() {
+    assert_eq!(super::local_count(&ResolvedType::AddressTy), 1);
+}
+
+#[test]
+fn local_count_returns_1_for_i32() {
+    assert_eq!(super::local_count(&ResolvedType::I32), 1);
+}
+
+// ─── is_u128 ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn is_u128_returns_true_for_u128() {
+    assert!(super::is_u128(&ResolvedType::U128));
+}
+
+#[test]
+fn is_u128_returns_false_for_u64() {
+    assert!(!super::is_u128(&ResolvedType::U64));
+}
+
+// ─── is_address ──────────────────────────────────────────────────────────────
+
+#[test]
+fn is_address_returns_true_for_address() {
+    assert!(super::is_address(&ResolvedType::AddressTy));
+}
+
+#[test]
+fn is_address_returns_false_for_u32() {
+    assert!(!super::is_address(&ResolvedType::U32));
 }
 
 // ─── is_i64 ──────────────────────────────────────────────────────────────────

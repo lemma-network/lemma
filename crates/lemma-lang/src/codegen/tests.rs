@@ -64,3 +64,108 @@ fn compile_produces_deterministic_output_for_same_contract() {
         "compile is not deterministic: outputs differ"
     );
 }
+
+// ─── u128 + Address codegen (subtask_08) ─────────────────────────────────────
+
+#[test]
+fn compile_accepts_u128_state_field() {
+    // A contract with a u128 state field should compile through the full pipeline.
+    let typed = typed_ast_for(
+        "contract Counter {
+            state { total: u128 }
+            pub fn getTotal() -> u128 {
+                return self.total
+            }
+        }",
+    );
+    let contracts = typed.contracts();
+    let result = compile(&contracts[0]);
+    assert!(result.is_ok(), "compile failed: {:?}", result.err());
+    let bytes = result.unwrap();
+    assert_eq!(&bytes[..4], b"\0asm", "WASM magic header missing");
+}
+
+#[test]
+fn compile_accepts_address_param() {
+    // A contract with an Address parameter should compile.
+    let typed = typed_ast_for(
+        "contract Vault {
+            state { owner: Address }
+            pub fn setOwner(addr: Address) {
+                self.owner = addr
+            }
+        }",
+    );
+    let contracts = typed.contracts();
+    let result = compile(&contracts[0]);
+    assert!(result.is_ok(), "compile failed: {:?}", result.err());
+}
+
+#[test]
+fn compile_accepts_u128_param_and_arithmetic() {
+    // A contract with u128 params and checked add/sub should compile.
+    let typed = typed_ast_for(
+        "contract Token {
+            state { supply: u128 }
+            pub fn add(amount: u128) {
+                self.supply = self.supply + amount
+            }
+            pub fn sub(amount: u128) {
+                self.supply = self.supply - amount
+            }
+        }",
+    );
+    let contracts = typed.contracts();
+    let result = compile(&contracts[0]);
+    assert!(result.is_ok(), "compile failed: {:?}", result.err());
+}
+
+#[test]
+fn compile_accepts_u128_comparison() {
+    // u128 comparisons (>=, <, ==) should compile.
+    let typed = typed_ast_for(
+        "contract Guard {
+            state { limit: u128 }
+            pub fn check(amount: u128) -> bool {
+                return amount >= self.limit
+            }
+        }",
+    );
+    let contracts = typed.contracts();
+    let result = compile(&contracts[0]);
+    assert!(result.is_ok(), "compile failed: {:?}", result.err());
+}
+
+#[test]
+fn compile_accepts_transfer_like_function() {
+    // A simplified transfer function with Address + u128 params.
+    // This is the core token use case that subtask_08 unblocks.
+    let typed = typed_ast_for(
+        "contract SimpleToken {
+            state { supply: u128 }
+            pub fn mint(to: Address, amount: u128) {
+                self.supply = self.supply + amount
+            }
+        }",
+    );
+    let contracts = typed.contracts();
+    let result = compile(&contracts[0]);
+    assert!(result.is_ok(), "compile failed: {:?}", result.err());
+}
+
+#[test]
+fn compile_u128_deterministic() {
+    // u128 codegen must be deterministic (AGENTS §7.1).
+    let typed = typed_ast_for(
+        "contract Token {
+            state { supply: u128 }
+            pub fn add(amount: u128) {
+                self.supply = self.supply + amount
+            }
+        }",
+    );
+    let contracts = typed.contracts();
+    let first = compile(&contracts[0]).expect("first compile failed");
+    let second = compile(&contracts[0]).expect("second compile failed");
+    assert_eq!(first, second, "u128 codegen is not deterministic");
+}

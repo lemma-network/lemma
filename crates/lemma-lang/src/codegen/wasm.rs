@@ -61,7 +61,9 @@ use crate::codegen::abi::{
     STATIC_CALL_INDEX,
 };
 use crate::codegen::metadata;
-use crate::codegen::types::{is_i64, is_signed, is_sub_word, wasm_valtype};
+use crate::codegen::types::{
+    is_address, is_i64, is_signed, is_sub_word, is_u128, local_count, wasm_valtype,
+};
 use crate::error::LangError;
 use crate::lexer::token::Span;
 use crate::parser::expr_span;
@@ -377,6 +379,8 @@ fn storage_byte_width(ty: &ResolvedType) -> Result<u32, LangError> {
         }),
         ResolvedType::U32 | ResolvedType::I32 => Ok(4),
         ResolvedType::U64 | ResolvedType::I64 => Ok(8),
+        ResolvedType::U128 => Ok(16),
+        ResolvedType::AddressTy => Ok(ADDRESS_BYTE_LEN),
         _ => Err(LangError::Codegen {
             message: format!(
                 "storage encoding for type {} not yet implemented",
@@ -512,12 +516,17 @@ pub(crate) fn emit_module(contract: &TypedContract<'_>) -> Result<Vec<u8>, LangE
     types.ty().function([ValType::I32], [ValType::I32]);
     // Contract function types: each takes its params as WASM values, returns void.
     // Return values are communicated via value_return host call, not WASM return.
+    // u128 params expand to 2 i64 values (lo, hi); Address params are i32 pointers.
     for f in &pub_fns {
         let mut param_valtypes = Vec::new();
         if let Some(sym_id) = f.symbol_id {
             if let Some(SymbolSig::Function(fn_sig)) = contract.sig(sym_id) {
                 for (_, ty, _) in &fn_sig.params {
-                    param_valtypes.push(wasm_valtype(ty)?);
+                    let vt = wasm_valtype(ty)?;
+                    let count = local_count(ty);
+                    for _ in 0..count {
+                        param_valtypes.push(vt);
+                    }
                 }
             }
         }
@@ -722,13 +731,31 @@ fn emit_dispatch_prologue(
     alloc_idx: u32,
     fn_base: u32,
 ) -> Result<Function, LangError> {
-    // Locals: cd_len_i64 (i64), cd_len (i32), cd_ptr (i32), selector (i32)
-    let mut f = Function::new(vec![
+    // Count the max number of Address params in any single dispatchable function.
+    // Each Address param needs a temp i32 local during calldata decoding to hold
+    // the bump-allocated pointer while copying bytes. Since dispatch branches are
+    // mutually exclusive, we can reuse the same temp locals across branches.
+    let mut max_addr_params: u32 = 0;
+    for func in pub_fns {
+        let resolved = get_fn_resolved_params(func, contract);
+        let addr_count = resolved.iter().filter(|(_, ty)| is_address(ty)).count() as u32;
+        if addr_count > max_addr_params {
+            max_addr_params = addr_count;
+        }
+    }
+
+    // Locals: cd_len_i64 (i64), cd_len (i32), cd_ptr (i32), selector (i32),
+    //         then max_addr_params × i32 temps for Address pointer storage.
+    let mut local_decls = vec![
         (1, ValType::I64), // local 0: cd_len_i64 (raw register_len result, for sentinel check)
         (1, ValType::I32), // local 1: cd_len
         (1, ValType::I32), // local 2: cd_ptr
         (1, ValType::I32), // local 3: selector
-    ]);
+    ];
+    if max_addr_params > 0 {
+        local_decls.push((max_addr_params, ValType::I32)); // locals 4..4+N: addr temps
+    }
+    let mut f = Function::new(local_decls);
 
     // If no dispatchable functions, just return (empty contract)
     if selectors.is_empty() {
@@ -778,45 +805,117 @@ fn emit_dispatch_prologue(
     }));
     f.instruction(&Instruction::LocalSet(3)); // selector
 
-    // Dispatch: if/else chain comparing selector to each function's selector
+    // Dispatch: if/else chain comparing selector to each function's selector.
+    // Address temp locals start at index 4 and are reused across branches
+    // (only one branch executes per call).
+    let addr_temp_base: u32 = 4;
     for (sel, fn_idx) in selectors {
+        // Reset the Address temp local counter for each branch (reuse across branches).
+        let mut dispatch_next_local = addr_temp_base;
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Const(*sel as i32));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
 
-        // Decode args from calldata and call the function
+        // Decode args from calldata and call the function.
+        // Uses resolved Lem types (not just WASM ValTypes) to distinguish
+        // u128 (16 bytes → i64-pair) and Address (20 bytes → i32 pointer)
+        // from plain i32/i64 params.
         let func = pub_fns[*fn_idx];
-        let param_types = get_fn_param_types(func, contract)?;
+        let resolved_params = get_fn_resolved_params(func, contract);
         let mut offset: u32 = 4; // skip selector
 
-        for ty in &param_types {
-            f.instruction(&Instruction::LocalGet(2)); // cd_ptr
-            match ty {
-                ValType::I32 => {
+        for (_name, ty) in &resolved_params {
+            if is_u128(ty) {
+                // u128: read 16 LE bytes from calldata as two i64 values (lo, hi).
+                // Push lo first, then hi — matches the i64-pair local layout.
+                f.instruction(&Instruction::LocalGet(2)); // cd_ptr
+                f.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                    offset: offset as u64,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                offset = offset.checked_add(8).ok_or_else(|| LangError::Codegen {
+                    message: "calldata offset overflow".into(),
+                })?;
+                f.instruction(&Instruction::LocalGet(2)); // cd_ptr
+                f.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                    offset: offset as u64,
+                    align: 3,
+                    memory_index: 0,
+                }));
+                offset = offset.checked_add(8).ok_or_else(|| LangError::Codegen {
+                    message: "calldata offset overflow".into(),
+                })?;
+            } else if is_address(ty) {
+                // Address: read 20 bytes from calldata into bump-alloc memory,
+                // push the pointer (i32). Uses 5 × i32.store (20 bytes).
+                f.instruction(&Instruction::I32Const(ADDRESS_BYTE_LEN as i32));
+                f.instruction(&Instruction::Call(alloc_idx));
+                // Stack: [addr_ptr]. Save to a dispatch-local temp.
+                let addr_tmp = dispatch_next_local;
+                dispatch_next_local += 1;
+                f.instruction(&Instruction::LocalSet(addr_tmp));
+                // Copy 20 bytes from calldata to allocated memory.
+                // 4 × i32.store (16 bytes) + 1 × i32.store for last 4 bytes.
+                for chunk in 0..5u32 {
+                    f.instruction(&Instruction::LocalGet(addr_tmp));
+                    f.instruction(&Instruction::LocalGet(2)); // cd_ptr
+                    let byte_offset =
+                        offset
+                            .checked_add(chunk * 4)
+                            .ok_or_else(|| LangError::Codegen {
+                                message: "calldata offset overflow".into(),
+                            })?;
                     f.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
-                        offset: offset as u64,
+                        offset: byte_offset as u64,
                         align: 2,
                         memory_index: 0,
                     }));
-                    offset = offset.checked_add(4).ok_or_else(|| LangError::Codegen {
-                        message: "calldata offset overflow".into(),
-                    })?;
-                }
-                ValType::I64 => {
-                    f.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
-                        offset: offset as u64,
-                        align: 3,
+                    f.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                        offset: (chunk * 4) as u64,
+                        align: 2,
                         memory_index: 0,
                     }));
-                    offset = offset.checked_add(8).ok_or_else(|| LangError::Codegen {
-                        message: "calldata offset overflow".into(),
-                    })?;
                 }
-                _ => {
-                    return Err(LangError::Codegen {
-                        message: format!("unsupported WASM param type in dispatch: {ty:?}"),
-                    });
+                offset =
+                    offset
+                        .checked_add(ADDRESS_BYTE_LEN)
+                        .ok_or_else(|| LangError::Codegen {
+                            message: "calldata offset overflow".into(),
+                        })?;
+                // Push the pointer for the function call
+                f.instruction(&Instruction::LocalGet(addr_tmp));
+            } else {
+                // Standard single-word types
+                let vt = wasm_valtype(ty)?;
+                f.instruction(&Instruction::LocalGet(2)); // cd_ptr
+                match vt {
+                    ValType::I32 => {
+                        f.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                            offset: offset as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        offset = offset.checked_add(4).ok_or_else(|| LangError::Codegen {
+                            message: "calldata offset overflow".into(),
+                        })?;
+                    }
+                    ValType::I64 => {
+                        f.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                            offset: offset as u64,
+                            align: 3,
+                            memory_index: 0,
+                        }));
+                        offset = offset.checked_add(8).ok_or_else(|| LangError::Codegen {
+                            message: "calldata offset overflow".into(),
+                        })?;
+                    }
+                    _ => {
+                        return Err(LangError::Codegen {
+                            message: format!("unsupported WASM param type in dispatch: {vt:?}"),
+                        });
+                    }
                 }
             }
         }
@@ -834,20 +933,25 @@ fn emit_dispatch_prologue(
     Ok(f)
 }
 
-/// Get the WASM param types for a contract function from its resolved signature.
-fn get_fn_param_types(
+/// Resolved param info for a contract function: (name, ResolvedType) pairs.
+///
+/// Used by calldata decoding to know the Lem-level type of each param
+/// (needed to distinguish u128 i64-pair from plain i64, and Address pointer
+/// from plain i32).
+fn get_fn_resolved_params(
     func: &ContractFunction<'_>,
     contract: &TypedContract<'_>,
-) -> Result<Vec<ValType>, LangError> {
-    let mut param_valtypes = Vec::new();
+) -> Vec<(String, ResolvedType)> {
     if let Some(sym_id) = func.symbol_id {
         if let Some(SymbolSig::Function(fn_sig)) = contract.sig(sym_id) {
-            for (_, ty, _) in &fn_sig.params {
-                param_valtypes.push(wasm_valtype(ty)?);
-            }
+            return fn_sig
+                .params
+                .iter()
+                .map(|(name, ty, _)| (name.clone(), ty.clone()))
+                .collect();
         }
     }
-    Ok(param_valtypes)
+    Vec::new()
 }
 
 /// Emit a contract function body using the two-pass approach.
@@ -864,12 +968,22 @@ fn emit_contract_fn_body(
         message: format!("function '{}' has no body", func.name),
     })?;
 
-    // Build param list: (name, ValType) from the resolved signature
+    // Build param list: (name, ValType) from the resolved signature.
+    // u128 params expand to 2 i64 locals (lo, hi) with synthetic names.
+    // Address params are i32 pointers (1 local).
     let mut params: Vec<(String, ValType)> = Vec::new();
     if let Some(sym_id) = func.symbol_id {
         if let Some(SymbolSig::Function(fn_sig)) = contract.sig(sym_id) {
             for (name, ty, _) in &fn_sig.params {
-                params.push((name.clone(), wasm_valtype(ty)?));
+                let vt = wasm_valtype(ty)?;
+                let count = local_count(ty);
+                if count == 2 {
+                    // u128: two i64 locals named <name>_lo and <name>_hi
+                    params.push((format!("{name}_lo"), vt));
+                    params.push((format!("{name}_hi"), vt));
+                } else {
+                    params.push((name.clone(), vt));
+                }
             }
         }
     }
@@ -995,7 +1109,6 @@ struct LoopCtx {
 /// key (blake3 hash of the field name). `alloc_fn_idx` is the WASM function
 /// index of the internal bump allocator.
 // consumer: emit_test_expr_module (P3·Step 6c tests); emit_module (P3·Step 6d/6e)
-#[allow(dead_code)]
 struct LowerCtx<'a> {
     /// The contract being compiled (for `type_of` lookups).
     contract: &'a TypedContract<'a>,
@@ -1022,7 +1135,6 @@ struct LowerCtx<'a> {
     state_fields: BTreeMap<String, (&'a ResolvedType, [u8; 32])>,
 }
 
-#[allow(dead_code)]
 impl<'a> LowerCtx<'a> {
     /// Create a new lowering context for a function with the given parameters.
     ///
@@ -1377,14 +1489,32 @@ impl<'a> LowerCtx<'a> {
                 let expr_s = expr_span(expr);
                 let resolved = self.resolve_type(&expr_s)?;
                 let valtype = wasm_valtype(&resolved)?;
-                // Allocate a named local
-                let idx = self.next_local;
-                self.locals.insert(name, idx);
-                self.local_types.push((1, valtype));
-                self.next_local += 1;
-                // Emit the initializer and store
-                self.emit_expr(expr)?;
-                self.func.instruction(&Instruction::LocalSet(idx));
+                let count = local_count(&resolved);
+
+                if count == 2 {
+                    // u128: allocate two named locals (name_lo, name_hi)
+                    let lo_idx = self.next_local;
+                    self.locals.insert(format!("{name}_lo"), lo_idx);
+                    self.local_types.push((1, valtype));
+                    self.next_local += 1;
+                    let hi_idx = self.next_local;
+                    self.locals.insert(format!("{name}_hi"), hi_idx);
+                    self.local_types.push((1, valtype));
+                    self.next_local += 1;
+                    // Emit the initializer — pushes [lo, hi] on stack
+                    self.emit_expr(expr)?;
+                    self.func.instruction(&Instruction::LocalSet(hi_idx));
+                    self.func.instruction(&Instruction::LocalSet(lo_idx));
+                } else {
+                    // Standard single-local variable
+                    let idx = self.next_local;
+                    self.locals.insert(name, idx);
+                    self.local_types.push((1, valtype));
+                    self.next_local += 1;
+                    // Emit the initializer and store
+                    self.emit_expr(expr)?;
+                    self.func.instruction(&Instruction::LocalSet(idx));
+                }
                 Ok(())
             }
 
@@ -1394,12 +1524,28 @@ impl<'a> LowerCtx<'a> {
                 let expr_s = expr_span(&c.value);
                 let resolved = self.resolve_type(&expr_s)?;
                 let valtype = wasm_valtype(&resolved)?;
-                let idx = self.next_local;
-                self.locals.insert(name, idx);
-                self.local_types.push((1, valtype));
-                self.next_local += 1;
-                self.emit_expr(&c.value)?;
-                self.func.instruction(&Instruction::LocalSet(idx));
+                let count = local_count(&resolved);
+
+                if count == 2 {
+                    let lo_idx = self.next_local;
+                    self.locals.insert(format!("{name}_lo"), lo_idx);
+                    self.local_types.push((1, valtype));
+                    self.next_local += 1;
+                    let hi_idx = self.next_local;
+                    self.locals.insert(format!("{name}_hi"), hi_idx);
+                    self.local_types.push((1, valtype));
+                    self.next_local += 1;
+                    self.emit_expr(&c.value)?;
+                    self.func.instruction(&Instruction::LocalSet(hi_idx));
+                    self.func.instruction(&Instruction::LocalSet(lo_idx));
+                } else {
+                    let idx = self.next_local;
+                    self.locals.insert(name, idx);
+                    self.local_types.push((1, valtype));
+                    self.next_local += 1;
+                    self.emit_expr(&c.value)?;
+                    self.func.instruction(&Instruction::LocalSet(idx));
+                }
                 Ok(())
             }
 
@@ -1640,6 +1786,45 @@ impl<'a> LowerCtx<'a> {
     ) -> Result<(), LangError> {
         match target {
             Expr::Ident(name, ident_span) => {
+                // Check for u128 variable (stored as name_lo + name_hi)
+                let lo_name = format!("{name}_lo");
+                if let Some(&lo_idx) = self.locals.get(&lo_name) {
+                    let hi_name = format!("{name}_hi");
+                    let hi_idx = *self
+                        .locals
+                        .get(&hi_name)
+                        .ok_or_else(|| LangError::Codegen {
+                            message: format!(
+                                "u128 variable '{name}' has _lo but missing _hi local"
+                            ),
+                        })?;
+                    if matches!(op, AssignOp::Assign) {
+                        self.emit_expr(value)?;
+                        self.func.instruction(&Instruction::LocalSet(hi_idx));
+                        self.func.instruction(&Instruction::LocalSet(lo_idx));
+                    } else {
+                        let ty = ResolvedType::U128;
+                        // Load current value (lo, hi)
+                        self.func.instruction(&Instruction::LocalGet(lo_idx));
+                        self.func.instruction(&Instruction::LocalGet(hi_idx));
+                        self.emit_expr(value)?;
+                        match op {
+                            AssignOp::Add => self.emit_checked_add(&ty)?,
+                            AssignOp::Sub => self.emit_checked_sub(&ty)?,
+                            _ => {
+                                return Err(LangError::Codegen {
+                                    message: format!(
+                                        "compound assignment operator {op:?} not yet implemented for u128"
+                                    ),
+                                })
+                            }
+                        }
+                        self.func.instruction(&Instruction::LocalSet(hi_idx));
+                        self.func.instruction(&Instruction::LocalSet(lo_idx));
+                    }
+                    return Ok(());
+                }
+
                 let idx = *self.locals.get(name).ok_or_else(|| LangError::Codegen {
                     message: format!("undefined variable in assignment: {name}"),
                 })?;
@@ -1714,12 +1899,18 @@ impl<'a> LowerCtx<'a> {
         match lit {
             Literal::Int(n) => {
                 let ty = self.resolve_type(span)?;
-                if is_i64(&ty) {
+                if is_u128(&ty) {
+                    // u128 literal: split into lo/hi i64 pair.
+                    let lo = (*n & u64::MAX as u128) as i64;
+                    let hi = ((*n >> 64) & u64::MAX as u128) as i64;
+                    self.func.instruction(&Instruction::I64Const(lo));
+                    self.func.instruction(&Instruction::I64Const(hi));
+                } else if is_i64(&ty) {
                     // Range check: literal must fit in i64 (M2 — catch oversized IntLiteral)
                     if *n > i64::MAX as u128 {
                         return Err(LangError::Codegen {
                             message: format!(
-                                "integer literal {n} exceeds i64 range; u128/u256 codegen not yet implemented"
+                                "integer literal {n} exceeds i64 range; use u128 type"
                             ),
                         });
                     }
@@ -1832,6 +2023,22 @@ impl<'a> LowerCtx<'a> {
     // ── Identifier (local variable read) ──────────────────────────────────
 
     fn emit_ident(&mut self, name: &str, _span: &Span) -> Result<(), LangError> {
+        // Check if this is a u128 variable (stored as name_lo + name_hi locals).
+        let lo_name = format!("{name}_lo");
+        if let Some(&lo_idx) = self.locals.get(&lo_name) {
+            let hi_name = format!("{name}_hi");
+            let hi_idx = *self
+                .locals
+                .get(&hi_name)
+                .ok_or_else(|| LangError::Codegen {
+                    message: format!("u128 variable '{name}' has _lo but missing _hi local"),
+                })?;
+            self.func.instruction(&Instruction::LocalGet(lo_idx));
+            self.func.instruction(&Instruction::LocalGet(hi_idx));
+            return Ok(());
+        }
+
+        // Standard single-local variable
         let local_idx = self.locals.get(name).ok_or_else(|| LangError::Codegen {
             message: format!("undefined local variable: {name}"),
         })?;
@@ -2141,12 +2348,124 @@ impl<'a> LowerCtx<'a> {
         self.func.instruction(&Instruction::Call(8)); // storage_read = index 8
         self.func.instruction(&Instruction::LocalSet(status));
 
-        // Check status: if STORAGE_NOT_FOUND → push default (0)
+        // Check status: if STORAGE_NOT_FOUND → push default.
+        // u128 defaults to (0i64, 0i64) pair; Address defaults to Address::zero pointer.
+        // Single-word types default to 0.
         self.func.instruction(&Instruction::LocalGet(status));
         self.func
             .instruction(&Instruction::I32Const(abi::STORAGE_NOT_FOUND));
         self.func.instruction(&Instruction::I32Eq);
-        if is_i64(&ty) {
+
+        if is_u128(&ty) {
+            // u128 not-found default: push two i64 zeros (lo=0, hi=0).
+            // WASM if/else must produce a consistent stack shape. For u128 we
+            // need 2 values, but WASM block types only support 0 or 1 result.
+            // Solution: use void block, write defaults to temp locals, load after.
+            let u128_lo = self.alloc_temp_local(ValType::I64);
+            let u128_hi = self.alloc_temp_local(ValType::I64);
+            self.func
+                .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            self.block_depth += 1;
+            // Not found → default 0
+            self.func.instruction(&Instruction::I64Const(0));
+            self.func.instruction(&Instruction::LocalSet(u128_lo));
+            self.func.instruction(&Instruction::I64Const(0));
+            self.func.instruction(&Instruction::LocalSet(u128_hi));
+            self.func.instruction(&Instruction::Else);
+
+            // Found → validate register length, read 16 bytes, split into lo/hi.
+            let val_len = self.alloc_temp_local(ValType::I32);
+            self.func
+                .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+            self.func.instruction(&Instruction::Call(6)); // register_len
+            self.func.instruction(&Instruction::I32WrapI64);
+            self.func.instruction(&Instruction::LocalTee(val_len));
+            self.func
+                .instruction(&Instruction::I32Const(byte_width as i32));
+            self.func.instruction(&Instruction::I32Ne);
+            self.func
+                .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            self.block_depth += 1;
+            self.func.instruction(&Instruction::Unreachable);
+            self.block_depth -= 1;
+            self.func.instruction(&Instruction::End);
+
+            let val_ptr = self.alloc_temp_local(ValType::I32);
+            self.func.instruction(&Instruction::LocalGet(val_len));
+            self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
+            self.func.instruction(&Instruction::LocalSet(val_ptr));
+
+            self.func
+                .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func.instruction(&Instruction::Call(7)); // read_register
+
+            // Load lo (bytes 0..8) and hi (bytes 8..16)
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func
+                .instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+            self.func.instruction(&Instruction::LocalSet(u128_lo));
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func
+                .instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                    offset: 8,
+                    align: 3,
+                    memory_index: 0,
+                }));
+            self.func.instruction(&Instruction::LocalSet(u128_hi));
+
+            self.block_depth -= 1;
+            self.func.instruction(&Instruction::End); // end if/else
+
+            // Push lo, hi onto stack
+            self.func.instruction(&Instruction::LocalGet(u128_lo));
+            self.func.instruction(&Instruction::LocalGet(u128_hi));
+        } else if is_address(&ty) {
+            // Address not-found default: pointer to Address::zero (offset 0 in page 0).
+            let addr_ptr = self.alloc_temp_local(ValType::I32);
+            self.func
+                .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            self.block_depth += 1;
+            self.func
+                .instruction(&Instruction::I32Const(ADDR_ZERO_OFFSET as i32));
+            self.func.instruction(&Instruction::LocalSet(addr_ptr));
+            self.func.instruction(&Instruction::Else);
+
+            // Found → read 20 bytes into bump-alloc memory, push pointer.
+            let val_len = self.alloc_temp_local(ValType::I32);
+            self.func
+                .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+            self.func.instruction(&Instruction::Call(6));
+            self.func.instruction(&Instruction::I32WrapI64);
+            self.func.instruction(&Instruction::LocalTee(val_len));
+            self.func
+                .instruction(&Instruction::I32Const(byte_width as i32));
+            self.func.instruction(&Instruction::I32Ne);
+            self.func
+                .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            self.block_depth += 1;
+            self.func.instruction(&Instruction::Unreachable);
+            self.block_depth -= 1;
+            self.func.instruction(&Instruction::End);
+
+            self.func.instruction(&Instruction::LocalGet(val_len));
+            self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
+            self.func.instruction(&Instruction::LocalSet(addr_ptr));
+
+            self.func
+                .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+            self.func.instruction(&Instruction::LocalGet(addr_ptr));
+            self.func.instruction(&Instruction::Call(7));
+
+            self.block_depth -= 1;
+            self.func.instruction(&Instruction::End);
+
+            self.func.instruction(&Instruction::LocalGet(addr_ptr));
+        } else if is_i64(&ty) {
             self.func
                 .instruction(&Instruction::If(wasm_encoder::BlockType::Result(
                     ValType::I64,
@@ -2155,6 +2474,44 @@ impl<'a> LowerCtx<'a> {
             // Not found → default 0
             self.func.instruction(&Instruction::I64Const(0));
             self.func.instruction(&Instruction::Else);
+
+            // Found → validate register length matches expected byte width.
+            let val_len = self.alloc_temp_local(ValType::I32);
+            self.func
+                .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+            self.func.instruction(&Instruction::Call(6));
+            self.func.instruction(&Instruction::I32WrapI64);
+            self.func.instruction(&Instruction::LocalTee(val_len));
+            self.func
+                .instruction(&Instruction::I32Const(byte_width as i32));
+            self.func.instruction(&Instruction::I32Ne);
+            self.func
+                .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            self.block_depth += 1;
+            self.func.instruction(&Instruction::Unreachable);
+            self.block_depth -= 1;
+            self.func.instruction(&Instruction::End);
+
+            let val_ptr = self.alloc_temp_local(ValType::I32);
+            self.func.instruction(&Instruction::LocalGet(val_len));
+            self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
+            self.func.instruction(&Instruction::LocalSet(val_ptr));
+
+            self.func
+                .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func.instruction(&Instruction::Call(7));
+
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func
+                .instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+
+            self.block_depth -= 1;
+            self.func.instruction(&Instruction::End);
         } else {
             self.func
                 .instruction(&Instruction::If(wasm_encoder::BlockType::Result(
@@ -2164,79 +2521,65 @@ impl<'a> LowerCtx<'a> {
             // Not found → default 0
             self.func.instruction(&Instruction::I32Const(0));
             self.func.instruction(&Instruction::Else);
+
+            // Found → validate register length matches expected byte width.
+            let val_len = self.alloc_temp_local(ValType::I32);
+            self.func
+                .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+            self.func.instruction(&Instruction::Call(6));
+            self.func.instruction(&Instruction::I32WrapI64);
+            self.func.instruction(&Instruction::LocalTee(val_len));
+            self.func
+                .instruction(&Instruction::I32Const(byte_width as i32));
+            self.func.instruction(&Instruction::I32Ne);
+            self.func
+                .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+            self.block_depth += 1;
+            self.func.instruction(&Instruction::Unreachable);
+            self.block_depth -= 1;
+            self.func.instruction(&Instruction::End);
+
+            let val_ptr = self.alloc_temp_local(ValType::I32);
+            self.func.instruction(&Instruction::LocalGet(val_len));
+            self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
+            self.func.instruction(&Instruction::LocalSet(val_ptr));
+
+            self.func
+                .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func.instruction(&Instruction::Call(7));
+
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            match &ty {
+                ResolvedType::Bool => {
+                    self.func
+                        .instruction(&Instruction::I32Load8U(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }));
+                }
+                ResolvedType::U32 | ResolvedType::I32 => {
+                    self.func
+                        .instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                }
+                _ => {
+                    return Err(LangError::Codegen {
+                        message: format!(
+                            "storage read for type {} not yet implemented",
+                            ty.display_name()
+                        ),
+                    });
+                }
+            }
+
+            self.block_depth -= 1;
+            self.func.instruction(&Instruction::End);
         }
-
-        // Found → validate register length matches expected byte width.
-        // Storage value length must match the declared field type's byte width.
-        // A mismatch indicates storage corruption or type migration — trap
-        // deterministically (AGENTS §7.2).
-        let val_len = self.alloc_temp_local(ValType::I32);
-        self.func
-            .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
-        self.func.instruction(&Instruction::Call(6)); // register_len = index 6
-        self.func.instruction(&Instruction::I32WrapI64); // truncate to i32 (storage values < 2GB)
-        self.func.instruction(&Instruction::LocalTee(val_len));
-        self.func
-            .instruction(&Instruction::I32Const(byte_width as i32));
-        self.func.instruction(&Instruction::I32Ne);
-        self.func
-            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-        self.block_depth += 1;
-        self.func.instruction(&Instruction::Unreachable); // trap: storage value length mismatch
-        self.block_depth -= 1;
-        self.func.instruction(&Instruction::End);
-
-        // Allocate buffer for value
-        let val_ptr = self.alloc_temp_local(ValType::I32);
-        self.func.instruction(&Instruction::LocalGet(val_len));
-        self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
-        self.func.instruction(&Instruction::LocalSet(val_ptr));
-
-        // read_register(REG_SCRATCH, val_ptr)
-        self.func
-            .instruction(&Instruction::I32Const(abi::REG_SCRATCH as i32));
-        self.func.instruction(&Instruction::LocalGet(val_ptr));
-        self.func.instruction(&Instruction::Call(7)); // read_register = index 7
-
-        // Load value from memory based on type
-        self.func.instruction(&Instruction::LocalGet(val_ptr));
-        match &ty {
-            ResolvedType::Bool => {
-                self.func
-                    .instruction(&Instruction::I32Load8U(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 0,
-                        memory_index: 0,
-                    }));
-            }
-            ResolvedType::U32 | ResolvedType::I32 => {
-                self.func
-                    .instruction(&Instruction::I32Load(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 2,
-                        memory_index: 0,
-                    }));
-            }
-            ResolvedType::U64 | ResolvedType::I64 => {
-                self.func
-                    .instruction(&Instruction::I64Load(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 3,
-                        memory_index: 0,
-                    }));
-            }
-            _ => {
-                return Err(LangError::Codegen {
-                    message: format!(
-                        "storage read for type {} not yet implemented",
-                        ty.display_name()
-                    ),
-                });
-            }
-        }
-
-        self.block_depth -= 1;
-        self.func.instruction(&Instruction::End); // end if/else
 
         Ok(())
     }
@@ -2294,50 +2637,98 @@ impl<'a> LowerCtx<'a> {
         self.func.instruction(&Instruction::Call(self.alloc_fn_idx));
         self.func.instruction(&Instruction::LocalSet(val_ptr));
 
-        // Store value to memory based on type
+        // Store value to memory based on type.
         // The value is on the stack from emit_expr; we need to save it to a temp
         // because we need val_ptr on the stack first for the store instruction.
-        let val_tmp = if is_i64(&ty) {
-            self.alloc_temp_local(ValType::I64)
-        } else {
-            self.alloc_temp_local(ValType::I32)
-        };
-        self.func.instruction(&Instruction::LocalSet(val_tmp));
-
-        self.func.instruction(&Instruction::LocalGet(val_ptr));
-        self.func.instruction(&Instruction::LocalGet(val_tmp));
-        match &ty {
-            ResolvedType::Bool => {
+        if is_u128(&ty) {
+            // u128: stack has [lo: i64, hi: i64]. Store both halves to memory.
+            let tmp_hi = self.alloc_temp_local(ValType::I64);
+            let tmp_lo = self.alloc_temp_local(ValType::I64);
+            self.func.instruction(&Instruction::LocalSet(tmp_hi));
+            self.func.instruction(&Instruction::LocalSet(tmp_lo));
+            // Store lo at val_ptr+0
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func.instruction(&Instruction::LocalGet(tmp_lo));
+            self.func
+                .instruction(&Instruction::I64Store(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 3,
+                    memory_index: 0,
+                }));
+            // Store hi at val_ptr+8
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func.instruction(&Instruction::LocalGet(tmp_hi));
+            self.func
+                .instruction(&Instruction::I64Store(wasm_encoder::MemArg {
+                    offset: 8,
+                    align: 3,
+                    memory_index: 0,
+                }));
+        } else if is_address(&ty) {
+            // Address: stack has [ptr: i32] pointing to 20 bytes in memory.
+            // Copy 20 bytes from the source pointer to val_ptr.
+            let src_ptr = self.alloc_temp_local(ValType::I32);
+            self.func.instruction(&Instruction::LocalSet(src_ptr));
+            // Copy 5 × i32 (20 bytes)
+            for chunk in 0..5u32 {
+                self.func.instruction(&Instruction::LocalGet(val_ptr));
+                self.func.instruction(&Instruction::LocalGet(src_ptr));
                 self.func
-                    .instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 0,
+                    .instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                        offset: (chunk * 4) as u64,
+                        align: 2,
                         memory_index: 0,
                     }));
-            }
-            ResolvedType::U32 | ResolvedType::I32 => {
                 self.func
                     .instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-                        offset: 0,
+                        offset: (chunk * 4) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
             }
-            ResolvedType::U64 | ResolvedType::I64 => {
-                self.func
-                    .instruction(&Instruction::I64Store(wasm_encoder::MemArg {
-                        offset: 0,
-                        align: 3,
-                        memory_index: 0,
-                    }));
-            }
-            _ => {
-                return Err(LangError::Codegen {
-                    message: format!(
-                        "storage write for type {} not yet implemented",
-                        ty.display_name()
-                    ),
-                });
+        } else {
+            let val_tmp = if is_i64(&ty) {
+                self.alloc_temp_local(ValType::I64)
+            } else {
+                self.alloc_temp_local(ValType::I32)
+            };
+            self.func.instruction(&Instruction::LocalSet(val_tmp));
+
+            self.func.instruction(&Instruction::LocalGet(val_ptr));
+            self.func.instruction(&Instruction::LocalGet(val_tmp));
+            match &ty {
+                ResolvedType::Bool => {
+                    self.func
+                        .instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }));
+                }
+                ResolvedType::U32 | ResolvedType::I32 => {
+                    self.func
+                        .instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                }
+                ResolvedType::U64 | ResolvedType::I64 => {
+                    self.func
+                        .instruction(&Instruction::I64Store(wasm_encoder::MemArg {
+                            offset: 0,
+                            align: 3,
+                            memory_index: 0,
+                        }));
+                }
+                _ => {
+                    return Err(LangError::Codegen {
+                        message: format!(
+                            "storage write for type {} not yet implemented",
+                            ty.display_name()
+                        ),
+                    });
+                }
             }
         }
 
@@ -2421,7 +2812,10 @@ impl<'a> LowerCtx<'a> {
             BinaryOp::Eq => {
                 self.emit_expr(lhs)?;
                 self.emit_expr(rhs)?;
-                if is_i64(&ty) {
+                if is_u128(&ty) {
+                    // u128 eq: (a_lo == b_lo) && (a_hi == b_hi)
+                    self.emit_u128_eq()?;
+                } else if is_i64(&ty) {
                     self.func.instruction(&Instruction::I64Eq);
                 } else {
                     self.func.instruction(&Instruction::I32Eq);
@@ -2431,7 +2825,11 @@ impl<'a> LowerCtx<'a> {
             BinaryOp::NotEq => {
                 self.emit_expr(lhs)?;
                 self.emit_expr(rhs)?;
-                if is_i64(&ty) {
+                if is_u128(&ty) {
+                    // u128 ne: !(a_lo == b_lo && a_hi == b_hi)
+                    self.emit_u128_eq()?;
+                    self.func.instruction(&Instruction::I32Eqz);
+                } else if is_i64(&ty) {
                     self.func.instruction(&Instruction::I64Ne);
                 } else {
                     self.func.instruction(&Instruction::I32Ne);
@@ -2441,25 +2839,46 @@ impl<'a> LowerCtx<'a> {
             BinaryOp::Lt => {
                 self.emit_expr(lhs)?;
                 self.emit_expr(rhs)?;
-                self.emit_lt(&ty);
+                if is_u128(&ty) {
+                    self.emit_u128_lt()?;
+                } else {
+                    self.emit_lt(&ty);
+                }
                 Ok(())
             }
             BinaryOp::Gt => {
                 self.emit_expr(lhs)?;
                 self.emit_expr(rhs)?;
-                self.emit_gt(&ty);
+                if is_u128(&ty) {
+                    // a > b ≡ b < a: swap operands and use lt
+                    self.emit_u128_gt()?;
+                } else {
+                    self.emit_gt(&ty);
+                }
                 Ok(())
             }
             BinaryOp::LtEq => {
                 self.emit_expr(lhs)?;
                 self.emit_expr(rhs)?;
-                self.emit_le(&ty);
+                if is_u128(&ty) {
+                    // a <= b ≡ !(a > b) ≡ !(b < a)
+                    self.emit_u128_gt()?;
+                    self.func.instruction(&Instruction::I32Eqz);
+                } else {
+                    self.emit_le(&ty);
+                }
                 Ok(())
             }
             BinaryOp::GtEq => {
                 self.emit_expr(lhs)?;
                 self.emit_expr(rhs)?;
-                self.emit_ge(&ty);
+                if is_u128(&ty) {
+                    // a >= b ≡ !(a < b)
+                    self.emit_u128_lt()?;
+                    self.func.instruction(&Instruction::I32Eqz);
+                } else {
+                    self.emit_ge(&ty);
+                }
                 Ok(())
             }
 
@@ -2583,6 +3002,87 @@ impl<'a> LowerCtx<'a> {
         }
     }
 
+    // ── u128 comparison helpers (subtask_08) ─────────────────────────────
+    //
+    // Stack layout for all: [a_lo, a_hi, b_lo, b_hi] → [i32 result].
+
+    /// u128 equality: (a_lo == b_lo) && (a_hi == b_hi).
+    /// Stack: [a_lo, a_hi, b_lo, b_hi] → [i32: 1 if equal, 0 if not].
+    fn emit_u128_eq(&mut self) -> Result<(), LangError> {
+        let a_lo = self.alloc_temp_local(ValType::I64);
+        let a_hi = self.alloc_temp_local(ValType::I64);
+        let b_lo = self.alloc_temp_local(ValType::I64);
+        let b_hi = self.alloc_temp_local(ValType::I64);
+        self.func.instruction(&Instruction::LocalSet(b_hi));
+        self.func.instruction(&Instruction::LocalSet(b_lo));
+        self.func.instruction(&Instruction::LocalSet(a_hi));
+        self.func.instruction(&Instruction::LocalSet(a_lo));
+        // (a_lo == b_lo) && (a_hi == b_hi)
+        self.func.instruction(&Instruction::LocalGet(a_lo));
+        self.func.instruction(&Instruction::LocalGet(b_lo));
+        self.func.instruction(&Instruction::I64Eq);
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::I64Eq);
+        self.func.instruction(&Instruction::I32And);
+        Ok(())
+    }
+
+    /// u128 less-than (unsigned): a < b.
+    /// Stack: [a_lo, a_hi, b_lo, b_hi] → [i32: 1 if a < b, 0 otherwise].
+    /// Logic: (a_hi < b_hi) || (a_hi == b_hi && a_lo < b_lo)
+    fn emit_u128_lt(&mut self) -> Result<(), LangError> {
+        let a_lo = self.alloc_temp_local(ValType::I64);
+        let a_hi = self.alloc_temp_local(ValType::I64);
+        let b_lo = self.alloc_temp_local(ValType::I64);
+        let b_hi = self.alloc_temp_local(ValType::I64);
+        self.func.instruction(&Instruction::LocalSet(b_hi));
+        self.func.instruction(&Instruction::LocalSet(b_lo));
+        self.func.instruction(&Instruction::LocalSet(a_hi));
+        self.func.instruction(&Instruction::LocalSet(a_lo));
+        // (a_hi < b_hi)
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::I64LtU);
+        // (a_hi == b_hi && a_lo < b_lo)
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::I64Eq);
+        self.func.instruction(&Instruction::LocalGet(a_lo));
+        self.func.instruction(&Instruction::LocalGet(b_lo));
+        self.func.instruction(&Instruction::I64LtU);
+        self.func.instruction(&Instruction::I32And);
+        // OR
+        self.func.instruction(&Instruction::I32Or);
+        Ok(())
+    }
+
+    /// u128 greater-than (unsigned): a > b ≡ b < a.
+    /// Stack: [a_lo, a_hi, b_lo, b_hi] → [i32: 1 if a > b, 0 otherwise].
+    fn emit_u128_gt(&mut self) -> Result<(), LangError> {
+        let a_lo = self.alloc_temp_local(ValType::I64);
+        let a_hi = self.alloc_temp_local(ValType::I64);
+        let b_lo = self.alloc_temp_local(ValType::I64);
+        let b_hi = self.alloc_temp_local(ValType::I64);
+        self.func.instruction(&Instruction::LocalSet(b_hi));
+        self.func.instruction(&Instruction::LocalSet(b_lo));
+        self.func.instruction(&Instruction::LocalSet(a_hi));
+        self.func.instruction(&Instruction::LocalSet(a_lo));
+        // a > b ≡ (b_hi < a_hi) || (b_hi == a_hi && b_lo < a_lo)
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::I64LtU);
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::I64Eq);
+        self.func.instruction(&Instruction::LocalGet(b_lo));
+        self.func.instruction(&Instruction::LocalGet(a_lo));
+        self.func.instruction(&Instruction::I64LtU);
+        self.func.instruction(&Instruction::I32And);
+        self.func.instruction(&Instruction::I32Or);
+        Ok(())
+    }
+
     // ── Checked arithmetic (AGENTS §7.4) ──────────────────────────────────
     //
     // Every arithmetic operation traps on overflow/underflow/division-by-zero.
@@ -2601,7 +3101,16 @@ impl<'a> LowerCtx<'a> {
     /// - If both operands negative and result positive → overflow
     ///
     /// Simplified: `(a ^ result) & (b ^ result)` has sign bit set on overflow.
+    ///
+    /// ## u128 (i64-pair) overflow detection (subtask_08)
+    ///
+    /// Stack: [a_lo, a_hi, b_lo, b_hi]. Add lo halves, detect carry
+    /// (result_lo < a_lo unsigned), add hi halves + carry, detect overflow
+    /// (result_hi < a_hi unsigned, or result_hi == a_hi && carry).
     fn emit_checked_add(&mut self, ty: &ResolvedType) -> Result<(), LangError> {
+        if is_u128(ty) {
+            return self.emit_checked_add_u128();
+        }
         let wide = is_i64(ty);
         let signed = is_signed(ty);
 
@@ -2692,7 +3201,15 @@ impl<'a> LowerCtx<'a> {
     ///
     /// ## Signed overflow detection
     /// `(a ^ b) & (a ^ result)` has sign bit set on overflow.
+    ///
+    /// ## u128 (i64-pair) underflow detection (subtask_08)
+    ///
+    /// Stack: [a_lo, a_hi, b_lo, b_hi]. Sub lo halves, detect borrow
+    /// (a_lo < b_lo unsigned), sub hi halves - borrow, detect underflow.
     fn emit_checked_sub(&mut self, ty: &ResolvedType) -> Result<(), LangError> {
+        if is_u128(ty) {
+            return self.emit_checked_sub_u128();
+        }
         let wide = is_i64(ty);
         let signed = is_signed(ty);
 
@@ -2780,7 +3297,20 @@ impl<'a> LowerCtx<'a> {
     /// ## Signed overflow detection
     /// Same check but using signed division, plus special-case for
     /// `a == -1 && b == MIN` (which would overflow signed div).
+    ///
+    /// ## u128 multiplication — deferred (subtask_08)
+    ///
+    /// u128 multiplication requires 4-way i64 cross-product with carry
+    /// propagation. Token contracts don't multiply u128 values (transfer is
+    /// +/-, mint is +). Deferred to P3·Step 23 with an honest codegen error.
     fn emit_checked_mul(&mut self, ty: &ResolvedType) -> Result<(), LangError> {
+        if is_u128(ty) {
+            return Err(LangError::Codegen {
+                message: "u128 multiplication not yet implemented (deferred P3·Step 23; \
+                          token contracts use add/sub only)"
+                    .into(),
+            });
+        }
         let wide = is_i64(ty);
         let signed = is_signed(ty);
 
@@ -2867,6 +3397,11 @@ impl<'a> LowerCtx<'a> {
     /// an explicit check for clarity and to produce a consistent trap pattern.
     /// For signed division, WASM also traps on `INT_MIN / -1` (overflow).
     fn emit_checked_div(&mut self, ty: &ResolvedType) -> Result<(), LangError> {
+        if is_u128(ty) {
+            return Err(LangError::Codegen {
+                message: "u128 division not yet implemented (deferred P3·Step 23)".into(),
+            });
+        }
         let wide = is_i64(ty);
         let signed = is_signed(ty);
 
@@ -2908,6 +3443,11 @@ impl<'a> LowerCtx<'a> {
     ///
     /// Same zero-check pattern as division.
     fn emit_checked_rem(&mut self, ty: &ResolvedType) -> Result<(), LangError> {
+        if is_u128(ty) {
+            return Err(LangError::Codegen {
+                message: "u128 remainder not yet implemented (deferred P3·Step 23)".into(),
+            });
+        }
         let wide = is_i64(ty);
         let signed = is_signed(ty);
 
@@ -2943,14 +3483,160 @@ impl<'a> LowerCtx<'a> {
         Ok(())
     }
 
-    /// Seal the function body by appending the `End` instruction.
+    // ── u128 (i64-pair) checked arithmetic (subtask_08) ──────────────────
+    //
+    // u128 is represented as (lo: i64, hi: i64) in two consecutive locals.
+    // Stack layout: [a_lo, a_hi, b_lo, b_hi] (a pushed first, then b).
+    // Result: [result_lo, result_hi] on the stack.
+    //
+    // Overflow detection for unsigned add:
+    //   1. result_lo = a_lo + b_lo (wrapping)
+    //   2. carry = (result_lo < a_lo) ? 1 : 0  (unsigned)
+    //   3. result_hi = a_hi + b_hi + carry (wrapping)
+    //   4. overflow if: result_hi < a_hi (unsigned)
+    //      OR (result_hi == a_hi AND carry == 1 AND b_hi == 0)
+    //      Simplified: overflow if result_hi < a_hi + carry (with carry from step 2)
+    //      Actually: overflow iff (result_hi < a_hi) || (result_hi == a_hi && carry)
+    //      But that's not quite right either. The correct check:
+    //      hi_sum = a_hi + b_hi (wrapping). Then hi_sum + carry.
+    //      Overflow if: (hi_sum < a_hi) || (hi_sum + carry < hi_sum)
+    //      i.e. overflow in the hi addition OR overflow when adding carry.
+
+    /// Checked u128 addition: traps if `a + b` overflows (AGENTS §7.4).
     ///
-    /// Returns the built `Function`. Note: the caller is responsible for
-    /// ensuring the function was created with the correct local declarations
-    /// (see `emit_test_expr_module` for the two-pass approach).
-    fn finish(mut self) -> Function {
-        self.func.instruction(&Instruction::End);
+    /// Stack: [a_lo, a_hi, b_lo, b_hi] → [result_lo, result_hi].
+    fn emit_checked_add_u128(&mut self) -> Result<(), LangError> {
+        let a_lo = self.alloc_temp_local(ValType::I64);
+        let a_hi = self.alloc_temp_local(ValType::I64);
+        let b_lo = self.alloc_temp_local(ValType::I64);
+        let b_hi = self.alloc_temp_local(ValType::I64);
+        let r_lo = self.alloc_temp_local(ValType::I64);
+        let r_hi = self.alloc_temp_local(ValType::I64);
+        let carry = self.alloc_temp_local(ValType::I64);
+
+        // Pop operands: stack is [a_lo, a_hi, b_lo, b_hi]
+        self.func.instruction(&Instruction::LocalSet(b_hi));
+        self.func.instruction(&Instruction::LocalSet(b_lo));
+        self.func.instruction(&Instruction::LocalSet(a_hi));
+        self.func.instruction(&Instruction::LocalSet(a_lo));
+
+        // r_lo = a_lo + b_lo (wrapping i64 add)
+        self.func.instruction(&Instruction::LocalGet(a_lo));
+        self.func.instruction(&Instruction::LocalGet(b_lo));
+        self.func.instruction(&Instruction::I64Add);
+        self.func.instruction(&Instruction::LocalSet(r_lo));
+
+        // carry = (r_lo < a_lo) ? 1 : 0 (unsigned comparison detects wrap)
+        self.func.instruction(&Instruction::LocalGet(r_lo));
+        self.func.instruction(&Instruction::LocalGet(a_lo));
+        self.func.instruction(&Instruction::I64LtU);
+        self.func.instruction(&Instruction::I64ExtendI32U);
+        self.func.instruction(&Instruction::LocalSet(carry));
+
+        // r_hi = a_hi + b_hi (wrapping)
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::I64Add);
+        // Check overflow of hi addition BEFORE adding carry
+        self.func.instruction(&Instruction::LocalTee(r_hi));
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::I64LtU);
+        // If r_hi < a_hi → overflow in hi addition → trap
         self.func
+            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        self.func.instruction(&Instruction::Unreachable);
+        self.func.instruction(&Instruction::End);
+
+        // r_hi = r_hi + carry
+        self.func.instruction(&Instruction::LocalGet(r_hi));
+        self.func.instruction(&Instruction::LocalGet(carry));
+        self.func.instruction(&Instruction::I64Add);
+        self.func.instruction(&Instruction::LocalTee(r_hi));
+        // Check overflow from adding carry: if carry was 1 and r_hi wrapped to 0
+        // (only possible if r_hi was 0xFFFF...FFFF before adding carry=1)
+        // Detect: new_r_hi < old_r_hi is wrong because we already overwrote.
+        // Simpler: if carry != 0 && r_hi == 0 → overflow (wrapped from MAX+1)
+        // Actually: r_hi_before_carry + carry overflows iff carry==1 && r_hi_before==MAX.
+        // After add: r_hi_new = r_hi_before + carry. Overflow iff r_hi_new < carry.
+        self.func.instruction(&Instruction::LocalGet(carry));
+        self.func.instruction(&Instruction::I64LtU);
+        self.func
+            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        self.func.instruction(&Instruction::Unreachable);
+        self.func.instruction(&Instruction::End);
+
+        // Push result: [r_lo, r_hi]
+        self.func.instruction(&Instruction::LocalGet(r_lo));
+        self.func.instruction(&Instruction::LocalGet(r_hi));
+        Ok(())
+    }
+
+    /// Checked u128 subtraction: traps if `a - b` underflows (AGENTS §7.4).
+    ///
+    /// Stack: [a_lo, a_hi, b_lo, b_hi] → [result_lo, result_hi].
+    fn emit_checked_sub_u128(&mut self) -> Result<(), LangError> {
+        let a_lo = self.alloc_temp_local(ValType::I64);
+        let a_hi = self.alloc_temp_local(ValType::I64);
+        let b_lo = self.alloc_temp_local(ValType::I64);
+        let b_hi = self.alloc_temp_local(ValType::I64);
+        let r_lo = self.alloc_temp_local(ValType::I64);
+        let r_hi = self.alloc_temp_local(ValType::I64);
+        let borrow = self.alloc_temp_local(ValType::I64);
+
+        // Pop operands: stack is [a_lo, a_hi, b_lo, b_hi]
+        self.func.instruction(&Instruction::LocalSet(b_hi));
+        self.func.instruction(&Instruction::LocalSet(b_lo));
+        self.func.instruction(&Instruction::LocalSet(a_hi));
+        self.func.instruction(&Instruction::LocalSet(a_lo));
+
+        // borrow = (a_lo < b_lo) ? 1 : 0 (unsigned — will underflow)
+        self.func.instruction(&Instruction::LocalGet(a_lo));
+        self.func.instruction(&Instruction::LocalGet(b_lo));
+        self.func.instruction(&Instruction::I64LtU);
+        self.func.instruction(&Instruction::I64ExtendI32U);
+        self.func.instruction(&Instruction::LocalSet(borrow));
+
+        // r_lo = a_lo - b_lo (wrapping)
+        self.func.instruction(&Instruction::LocalGet(a_lo));
+        self.func.instruction(&Instruction::LocalGet(b_lo));
+        self.func.instruction(&Instruction::I64Sub);
+        self.func.instruction(&Instruction::LocalSet(r_lo));
+
+        // Check underflow of hi subtraction: if a_hi < b_hi → underflow
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::I64LtU);
+        self.func
+            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        self.func.instruction(&Instruction::Unreachable);
+        self.func.instruction(&Instruction::End);
+
+        // Check borrow underflow: (a_hi - b_hi) < borrow → underflow
+        // (a_hi >= b_hi is guaranteed by the check above, so a_hi - b_hi >= 0.
+        // Underflow from borrow only when a_hi - b_hi == 0 && borrow == 1.)
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::I64Sub);
+        // Stack: [r_hi_before]. Check r_hi_before < borrow → underflow
+        self.func.instruction(&Instruction::LocalGet(borrow));
+        self.func.instruction(&Instruction::I64LtU);
+        self.func
+            .instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+        self.func.instruction(&Instruction::Unreachable);
+        self.func.instruction(&Instruction::End);
+
+        // Now compute final r_hi = (a_hi - b_hi) - borrow
+        self.func.instruction(&Instruction::LocalGet(a_hi));
+        self.func.instruction(&Instruction::LocalGet(b_hi));
+        self.func.instruction(&Instruction::I64Sub);
+        self.func.instruction(&Instruction::LocalGet(borrow));
+        self.func.instruction(&Instruction::I64Sub);
+        self.func.instruction(&Instruction::LocalSet(r_hi));
+
+        // Push result: [r_lo, r_hi]
+        self.func.instruction(&Instruction::LocalGet(r_lo));
+        self.func.instruction(&Instruction::LocalGet(r_hi));
+        Ok(())
     }
 }
 
