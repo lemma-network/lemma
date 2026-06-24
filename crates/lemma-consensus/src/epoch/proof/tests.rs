@@ -93,6 +93,7 @@ fn make_boundary_header(
         hash(0),                // receipts_root
         addr(0),                // proposer
         epoch,
+        1,       // protocol_version
         0,       // dag_round
         hash(0), // dag_anchor
         validators_hash,

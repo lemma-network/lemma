@@ -276,8 +276,9 @@ pub fn build_block_from_commit(
         exec_out.receipts_root,
         proposer,
         parent.header.epoch,
-        commit.leader.round,  // dag_round — leader round of this commit
-        commit.leader.digest, // dag_anchor — leader block digest
+        parent.header.protocol_version, // inherit from parent (within-epoch invariant, §7.5)
+        commit.leader.round,            // dag_round — leader round of this commit
+        commit.leader.digest,           // dag_anchor — leader block digest
         parent.header.validators_hash,
         parent.header.next_validators_hash,
         parent.header.gas_limit,

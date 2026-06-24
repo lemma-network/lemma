@@ -44,6 +44,7 @@ fn gas_header(gas_limit: u64, gas_used: u64, base_fee: Amount) -> BlockHeader {
         receipts_root: Hash::zero(),
         proposer: Address::zero(),
         epoch: 0,
+        protocol_version: 1,
         dag_round: 0,
         dag_anchor: Hash::zero(),
         validators_hash: Hash::zero(),

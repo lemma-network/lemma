@@ -53,6 +53,7 @@ fn make_block(height: u64, parent_hash: Hash) -> Block {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         vh,
@@ -123,6 +124,7 @@ fn make_block_with_valid_qc(height: u64, parent_hash: Hash, kp: &KeyPair) -> Blo
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         vh,
@@ -288,6 +290,7 @@ fn certified_verifier_rejects_block_with_invalid_qc_sig() {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         vh,
@@ -329,6 +332,7 @@ fn certified_verifier_rejects_block_with_empty_signers() {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         vh,
@@ -677,6 +681,7 @@ async fn apply_synced_block_returns_invalid_qc_on_bad_cert() {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         vh,
@@ -701,4 +706,98 @@ async fn apply_synced_block_returns_invalid_qc_on_bad_cert() {
     );
     // Tip must not advance.
     assert_eq!(ChainStore::new(&db).latest_height().unwrap().unwrap(), 0);
+}
+
+// ── Protocol version detection (docs/17-VERSIONING_SPEC §7.3) ────────────────
+
+/// Build a block with a specific `protocol_version` for detection tests.
+fn make_block_with_protocol_version(
+    height: u64,
+    parent_hash: Hash,
+    protocol_version: u32,
+) -> Block {
+    let vh = Hash::from_bytes([0xBB; 32]);
+    let h = BlockHeader::new(
+        height,
+        1_700_000_000 + height,
+        parent_hash,
+        Hash::zero(),
+        Hash::zero(),
+        Hash::zero(),
+        Address::zero(),
+        0,
+        protocol_version,
+        0,
+        Hash::zero(),
+        vh,
+        vh,
+        30_000_000,
+        0,
+        Amount::from_drop(1_000_000_000),
+        vec![],
+    )
+    .expect("header");
+    Block::new(h, vec![], vec![], None).expect("block")
+}
+
+#[test]
+fn structural_verifier_rejects_too_new_protocol_version() {
+    let genesis = make_block(0, Hash::zero());
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+    // Block with protocol_version = 99 — far beyond MAX_SUPPORTED.
+    let block = make_block_with_protocol_version(1, g_hash, 99);
+    let err = verifier()
+        .verify(&block, g_hash, 0)
+        .expect_err("must reject too-new protocol version");
+    assert!(
+        matches!(
+            err,
+            VerifyError::UnsupportedProtocolVersion { seen: 99, max: 1 }
+        ),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn structural_verifier_accepts_current_protocol_version() {
+    let genesis = make_block(0, Hash::zero());
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+    // Block with protocol_version = 1 (current MAX_SUPPORTED).
+    let block = make_block_with_protocol_version(1, g_hash, 1);
+    let result = verifier().verify(&block, g_hash, 0);
+    assert!(
+        result.is_ok(),
+        "current protocol version must be accepted: {result:?}"
+    );
+}
+
+#[test]
+fn structural_verifier_accepts_lower_protocol_version() {
+    // When MAX = 1, protocol_version = 1 is the lowest valid value.
+    // This test proves lower-or-equal acceptance (trivially, since 1 <= 1).
+    let genesis = make_block(0, Hash::zero());
+    let g_hash = compute_block_hash(&genesis).expect("g_hash");
+    let block = make_block_with_protocol_version(1, g_hash, 1);
+    let result = verifier().verify(&block, g_hash, 0);
+    assert!(
+        result.is_ok(),
+        "protocol_version <= MAX must be accepted: {result:?}"
+    );
+}
+
+#[test]
+fn protocol_version_check_precedes_other_structural_checks() {
+    // Block is too-new AND has a wrong parent_hash + wrong height.
+    // Check 0 must win — proves detection is unconditionally first (§7.3).
+    let block = make_block_with_protocol_version(42, Hash::from_bytes([0xEE; 32]), 99);
+    let err = verifier()
+        .verify(&block, Hash::zero(), 5) // deliberately wrong prev_hash/height
+        .expect_err("must reject");
+    assert!(
+        matches!(
+            err,
+            VerifyError::UnsupportedProtocolVersion { seen: 99, max: 1 }
+        ),
+        "version check must precede parent/height checks; got: {err}"
+    );
 }

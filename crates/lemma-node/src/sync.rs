@@ -115,6 +115,20 @@ pub enum VerifyError {
     /// `PeerEvent::InvalidQuorumCert` (spec 12 §5, AGENTS §15.2).
     #[error("quorum certificate invalid: {reason}")]
     QuorumCertInvalid { reason: String },
+
+    /// The block's protocol version exceeds this node's maximum supported version.
+    ///
+    /// The node MUST halt and refuse to process this block — never silently accept
+    /// a block it cannot fully validate (anti-split, docs/17-VERSIONING_SPEC §7.3).
+    /// The operator must upgrade their node binary to a version that supports the
+    /// required protocol version.
+    #[error("unsupported protocol version: block requires {seen}, node supports up to {max}")]
+    UnsupportedProtocolVersion {
+        /// The protocol version declared in the block header.
+        seen: u32,
+        /// The maximum version this node binary supports.
+        max: u32,
+    },
 }
 
 // ── BlockVerifier trait ───────────────────────────────────────────────────────
@@ -154,12 +168,27 @@ pub trait BlockVerifier: Send + Sync {
         -> Result<Hash, VerifyError>;
 }
 
+// ── Protocol version detection ────────────────────────────────────────────────
+
+/// Maximum protocol version this node binary supports.
+///
+/// Blocks with `header.protocol_version > MAX_SUPPORTED_PROTOCOL_VERSION`
+/// are rejected by [`StructuralVerifier`] — the node halts rather than
+/// silently accepting a block it cannot validate (anti-split).
+///
+/// Bumped only when a consensus-breaking change ships (header format,
+/// consensus algorithm, QC scheme). See docs/17-VERSIONING_SPEC §7.1.A.
+pub(crate) const MAX_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+
 // ── StructuralVerifier ────────────────────────────────────────────────────────
 
 /// Phase-1 block verifier — structural integrity only, no QC.
 ///
-/// Performs four checks in order (cheap → more expensive):
+/// Performs five checks in order (cheap → more expensive):
 ///
+/// 0. **Protocol version** — `block.header.protocol_version <= MAX_SUPPORTED_PROTOCOL_VERSION`.
+///    This is the FIRST check: if the node cannot understand the block's
+///    protocol, no other check is meaningful (anti-split, §7.3).
 /// 1. **Height continuity** — `block.height() == prev_height + 1`.
 /// 2. **Parent linkage** — `block.header.parent_hash == prev_hash`.
 /// 3. **Intra-block consistency** — delegates to [`Block::validate`]
@@ -173,10 +202,11 @@ pub trait BlockVerifier: Send + Sync {
 ///
 /// ## Why the order matters
 ///
-/// Height and parent checks are O(1) and detect the most common peer errors
-/// (serving the wrong range, wrong chain) early. Intra-block validation runs
-/// before hash recomputation to avoid paying the serialization cost on an
-/// obviously invalid block.
+/// Protocol version is checked first because a block with an unknown version
+/// cannot be meaningfully validated. Height and parent checks are O(1) and
+/// detect the most common peer errors (serving the wrong range, wrong chain)
+/// early. Intra-block validation runs before hash recomputation to avoid
+/// paying the serialization cost on an obviously invalid block.
 pub struct StructuralVerifier;
 
 impl BlockVerifier for StructuralVerifier {
@@ -186,6 +216,17 @@ impl BlockVerifier for StructuralVerifier {
         prev_hash: Hash,
         prev_height: u64,
     ) -> Result<Hash, VerifyError> {
+        // ── Check 0: protocol version (docs/17-VERSIONING_SPEC §7.3) ─────────
+        // This MUST be the first check: if the node cannot understand the
+        // block's protocol, no other check is meaningful. Reject immediately
+        // to prevent a silent consensus fork (anti-split).
+        if block.header.protocol_version > MAX_SUPPORTED_PROTOCOL_VERSION {
+            return Err(VerifyError::UnsupportedProtocolVersion {
+                seen: block.header.protocol_version,
+                max: MAX_SUPPORTED_PROTOCOL_VERSION,
+            });
+        }
+
         // ── Check 1: height continuity ────────────────────────────────────────
         let expected_height = prev_height
             .checked_add(1)

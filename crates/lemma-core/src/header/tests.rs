@@ -32,6 +32,7 @@ fn genesis_header() -> BlockHeader {
         Hash::zero(),
         proposer(),
         0,            // epoch
+        1,            // protocol_version (genesis = 1)
         0,            // dag_round
         Hash::zero(), // dag_anchor
         Hash::zero(), // validators_hash
@@ -55,6 +56,7 @@ fn block_1_header() -> BlockHeader {
         Hash::zero(),
         proposer(),
         1,                              // epoch
+        1,                              // protocol_version
         10,                             // dag_round
         Hash::from_bytes([0x0Au8; 32]), // dag_anchor
         Hash::from_bytes([0x0Bu8; 32]), // validators_hash
@@ -95,6 +97,7 @@ fn new_header_with_gas_used_equal_to_limit_succeeds() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -126,6 +129,7 @@ fn new_header_stores_all_fields_correctly() {
         rcpt_root,
         Address::burn(),
         3,  // epoch
+        1,  // protocol_version
         77, // dag_round
         anchor,
         validators,
@@ -145,6 +149,7 @@ fn new_header_stores_all_fields_correctly() {
     assert_eq!(h.receipts_root, rcpt_root);
     assert_eq!(h.proposer, Address::burn());
     assert_eq!(h.epoch, 3);
+    assert_eq!(h.protocol_version, 1);
     assert_eq!(h.dag_round, 77);
     assert_eq!(h.dag_anchor, anchor);
     assert_eq!(h.validators_hash, validators);
@@ -172,6 +177,7 @@ fn new_header_stores_consensus_provenance_fields() {
         Hash::zero(),
         proposer(),
         4,   // epoch
+        1,   // protocol_version
         128, // dag_round
         anchor,
         validators,
@@ -213,6 +219,7 @@ fn new_header_rejects_zero_gas_limit() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -236,6 +243,7 @@ fn new_header_rejects_gas_used_exceeding_gas_limit() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -281,6 +289,7 @@ fn validate_rejects_zero_gas_limit_on_deserialized_header() {
         receipts_root: Hash::zero(),
         proposer: proposer(),
         epoch: 0,
+        protocol_version: 1,
         dag_round: 0,
         dag_anchor: Hash::zero(),
         validators_hash: Hash::zero(),
@@ -304,6 +313,7 @@ fn validate_rejects_gas_exceeded_on_deserialized_header() {
         receipts_root: Hash::zero(),
         proposer: proposer(),
         epoch: 0,
+        protocol_version: 1,
         dag_round: 0,
         dag_anchor: Hash::zero(),
         validators_hash: Hash::zero(),
@@ -366,6 +376,7 @@ fn is_above_target_gas_true_when_gas_used_exceeds_half() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -390,6 +401,7 @@ fn is_above_target_gas_true_when_block_is_full() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -415,6 +427,7 @@ fn is_above_target_gas_false_when_gas_limit_is_one_and_gas_used_is_zero() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -440,6 +453,7 @@ fn is_above_target_gas_true_when_gas_limit_is_one_and_gas_used_is_one() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -476,6 +490,7 @@ fn gas_remaining_is_zero_when_block_is_full() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -502,6 +517,7 @@ fn gas_remaining_is_correct_at_max_gas_limit() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -551,6 +567,7 @@ fn header_with_extra_data_roundtrips_through_json() {
         Hash::zero(),
         proposer(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -587,4 +604,41 @@ fn headers_with_different_state_roots_are_not_equal() {
     let mut h2 = genesis_header();
     h2.state_root = Hash::from_bytes([0xFFu8; 32]);
     assert_ne!(h1, h2);
+}
+
+// ── protocol_version (docs/17-VERSIONING_SPEC §7) ────────────────────────────
+
+#[test]
+fn protocol_version_in_genesis_is_one() {
+    let h = genesis_header();
+    assert_eq!(
+        h.protocol_version, 1,
+        "genesis protocol_version must be 1 (§7.2)"
+    );
+}
+
+#[test]
+fn protocol_version_is_serialized() {
+    // Serialize a header, deserialize, assert protocol_version preserved.
+    let h = genesis_header();
+    let json = serde_json::to_string(&h).unwrap();
+    let decoded: BlockHeader = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.protocol_version, h.protocol_version);
+}
+
+#[test]
+fn protocol_version_affects_digest() {
+    // Two headers identical except protocol_version must produce different
+    // serialized bytes — and therefore different hashes when fed to any
+    // deterministic hash function (e.g. Blake3 in lemma-crypto).
+    let h1 = genesis_header();
+    let mut h2 = genesis_header();
+    h2.protocol_version = 2;
+
+    let bytes1 = serde_json::to_vec(&h1).unwrap();
+    let bytes2 = serde_json::to_vec(&h2).unwrap();
+    assert_ne!(
+        bytes1, bytes2,
+        "different protocol_version must produce different serialized bytes"
+    );
 }

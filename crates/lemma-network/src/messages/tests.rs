@@ -22,6 +22,7 @@ fn test_block(height: u64) -> Block {
         Hash::zero(),
         Address::zero(),
         0,            // epoch
+        1,            // protocol_version
         0,            // dag_round
         Hash::zero(), // dag_anchor
         Hash::zero(), // validators_hash

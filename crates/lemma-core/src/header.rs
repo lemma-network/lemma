@@ -48,7 +48,8 @@ use crate::{address::Address, amount::Amount, error::BlockError, hash::Hash};
 ///     Hash::zero(),
 ///     Hash::zero(),
 ///     Address::zero(),
-///     0,
+///     0,               // epoch
+///     1,               // protocol_version (genesis = 1)
 ///     0,
 ///     Hash::zero(),
 ///     Hash::zero(),
@@ -92,6 +93,16 @@ pub struct BlockHeader {
     /// The committee is fixed for an epoch; this links the block to the
     /// `ValidatorSet` that may sign it. See docs/13-VALIDATOR_EPOCH_SPEC §4.4.
     pub epoch: u64,
+    /// Protocol version number for this block (DB-A63, docs/17-VERSIONING_SPEC §7).
+    ///
+    /// A coarse version for changes that CANNOT be feature-gated (header format,
+    /// consensus algorithm, QC/serialization). Monotonic non-decreasing; constant
+    /// within an epoch; changes only at epoch boundaries (§7.5).
+    ///
+    /// Genesis = 1. Validators sign this field as part of `header_digest` →
+    /// `QuorumCert` (§7.2). Detection: `StructuralVerifier` rejects blocks with
+    /// `protocol_version > MAX_SUPPORTED_PROTOCOL_VERSION` (§7.3, anti-split).
+    pub protocol_version: u32,
     /// DAG round of the consensus commit that produced this block.
     ///
     /// The committed leader's anchor round (the `Commit`'s index) — lets light
@@ -140,7 +151,7 @@ impl BlockHeader {
     ///
     /// - [`BlockError::GasLimitZero`] — `gas_limit` is 0.
     /// - [`BlockError::GasExceeded`] — `gas_used > gas_limit`.
-    // `too_many_arguments`: `BlockHeader` is a primitive blockchain type. All 16 fields
+    // `too_many_arguments`: `BlockHeader` is a primitive blockchain type. All 17 fields
     // are required and distinct; a builder pattern would add complexity for no structural
     // benefit.
     #[allow(clippy::too_many_arguments)]
@@ -153,6 +164,7 @@ impl BlockHeader {
         receipts_root: Hash,
         proposer: Address,
         epoch: u64,
+        protocol_version: u32,
         dag_round: u64,
         dag_anchor: Hash,
         validators_hash: Hash,
@@ -171,6 +183,7 @@ impl BlockHeader {
             receipts_root,
             proposer,
             epoch,
+            protocol_version,
             dag_round,
             dag_anchor,
             validators_hash,

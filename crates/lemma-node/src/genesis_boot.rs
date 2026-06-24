@@ -120,6 +120,7 @@ pub fn init_chain(db: LemmaDb, genesis: &GenesisConfig) -> Result<InitOutcome, N
         Hash::zero(),    // receipts_root — no receipts
         Address::zero(), // proposer — none at genesis
         0,               // epoch = 0
+        1,               // protocol_version = 1 (genesis, §7.2)
         0,               // dag_round = 0
         Hash::zero(),    // dag_anchor — none at genesis
         validators_hash,

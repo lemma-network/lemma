@@ -146,6 +146,7 @@ pub fn build_next_block(
         Hash::zero(),             // receipts_root (no receipts)
         proposer,
         parent.header.epoch,                // epoch — unchanged
+        parent.header.protocol_version,     // inherit from parent (within-epoch invariant, §7.5)
         0,                                  // dag_round (no consensus)
         Hash::zero(),                       // dag_anchor (no consensus)
         parent.header.validators_hash,      // validators_hash — unchanged

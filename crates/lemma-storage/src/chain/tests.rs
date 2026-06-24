@@ -44,6 +44,7 @@ fn make_block_at(height: u64, parent_hash: Hash) -> (Block, Hash) {
         Hash::zero(),    // receipts_root
         Address::zero(), // proposer
         0,               // epoch
+        1,               // protocol_version
         0,               // dag_round
         Hash::zero(),    // dag_anchor
         validators_hash,

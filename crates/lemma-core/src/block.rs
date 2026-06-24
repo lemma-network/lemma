@@ -50,7 +50,7 @@ use crate::{
 /// let header = BlockHeader::new(
 ///     0, 1_700_000_000, Hash::zero(), Hash::zero(),
 ///     Hash::zero(), Hash::zero(), Address::zero(),
-///     0, 0, Hash::zero(), Hash::zero(), Hash::zero(),
+///     0, 1, 0, Hash::zero(), Hash::zero(), Hash::zero(),
 ///     30_000_000, 0, Amount::from_drop(1_000_000_000), vec![],
 /// ).unwrap();
 /// let block = Block::new(header, vec![], vec![], None).unwrap();

@@ -39,6 +39,7 @@ fn make_genesis_block() -> (Block, Hash) {
         Hash::zero(),                     // receipts_root
         Address::zero(),                  // proposer
         0,                                // epoch
+        1,                                // protocol_version (genesis = 1)
         0,                                // dag_round
         Hash::zero(),                     // dag_anchor
         validators_hash,                  // validators_hash

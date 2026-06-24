@@ -24,6 +24,7 @@ fn test_block() -> Block {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),

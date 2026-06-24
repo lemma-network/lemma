@@ -41,6 +41,7 @@ fn genesis_header() -> BlockHeader {
         Hash::zero(),
         Address::zero(),
         0,            // epoch
+        1,            // protocol_version (genesis = 1)
         0,            // dag_round
         Hash::zero(), // dag_anchor
         Hash::zero(), // validators_hash
@@ -64,6 +65,7 @@ fn block_1_header() -> BlockHeader {
         Hash::zero(),
         Address::zero(),
         1,                              // epoch
+        1,                              // protocol_version
         10,                             // dag_round
         Hash::from_bytes([0x0Au8; 32]), // dag_anchor
         Hash::from_bytes([0x0Bu8; 32]), // validators_hash
@@ -87,6 +89,7 @@ fn block_2_header() -> BlockHeader {
         Hash::zero(),
         Address::zero(),
         1,                              // epoch
+        1,                              // protocol_version
         11,                             // dag_round
         Hash::from_bytes([0x0Cu8; 32]), // dag_anchor
         Hash::from_bytes([0x0Bu8; 32]), // validators_hash
@@ -194,6 +197,7 @@ fn new_block_rejects_gas_accounting_mismatch() {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::zero(),
@@ -230,6 +234,7 @@ fn new_block_propagates_header_gas_limit_zero_error() {
         receipts_root: Hash::zero(),
         proposer: Address::zero(),
         epoch: 0,
+        protocol_version: 1,
         dag_round: 0,
         dag_anchor: Hash::zero(),
         validators_hash: Hash::zero(),
@@ -254,6 +259,7 @@ fn new_block_propagates_header_gas_exceeded_error() {
         receipts_root: Hash::zero(),
         proposer: Address::zero(),
         epoch: 0,
+        protocol_version: 1,
         dag_round: 0,
         dag_anchor: Hash::zero(),
         validators_hash: Hash::zero(),
@@ -325,6 +331,7 @@ fn validate_rejects_gas_limit_zero_on_deserialized_block() {
         receipts_root: Hash::zero(),
         proposer: Address::zero(),
         epoch: 0,
+        protocol_version: 1,
         dag_round: 0,
         dag_anchor: Hash::zero(),
         validators_hash: Hash::zero(),
@@ -354,6 +361,7 @@ fn validate_rejects_gas_exceeded_on_deserialized_block() {
         receipts_root: Hash::zero(),
         proposer: Address::zero(),
         epoch: 0,
+        protocol_version: 1,
         dag_round: 0,
         dag_anchor: Hash::zero(),
         validators_hash: Hash::zero(),

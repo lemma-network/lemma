@@ -48,6 +48,7 @@ fn make_block(height: u64, parent_hash: Hash) -> (Block, Hash) {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         vh,
@@ -149,6 +150,7 @@ async fn sync_rejects_tampered_parent_hash() {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         Hash::from_bytes([0xCC; 32]),

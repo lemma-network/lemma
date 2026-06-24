@@ -64,6 +64,7 @@ fn make_block_at(height: u64, parent_hash: Hash) -> Block {
         Hash::zero(),
         Address::zero(),
         0,
+        1, // protocol_version
         0,
         Hash::zero(),
         vh,
