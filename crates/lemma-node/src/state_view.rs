@@ -20,13 +20,19 @@
 //! `read`, `exists`, `balance`, `nonce`, and `code` — the read side.
 //! (Verified in `lemma-vm/src/parallel/mvview.rs`.)
 //!
-//! ## Phase 2 scope notes
+//! ## Read resolution (Phase 3)
 //!
-//! - `code()` always returns `None`: no WASM bytecode store exists in Phase 2
-//!   (only `Account.code_hash` is stored; the bytecode bytes live in Phase 3).
-//! - `read()` / `exists()`: storage slots always absent in Phase 2 (contract
-//!   storage namespace: M3 CLOSED in P3·Step 6b-vm-1 — `BlockContext.contract`
-//!   now distinct from `msg_sender`. Remaining: storage_root wire-up in apply_writes).
+//! - `code()`: resolves committed contract bytecode by reading the account's
+//!   `code_hash` (state trie) and looking up the bytes in the content-addressed
+//!   `CF_CODE` store — the inverse of `apply_one_write`'s deploy path
+//!   (`put_code` + stamp `account.code_hash`). EOAs (`code_hash.is_zero()`)
+//!   return `None`. This is what lets a contract deployed in block N be called
+//!   in block N+1 (08-EXECUTION_SPEC §ContractCall: bytecode via
+//!   `account.code_hash → CF_CODE[code_hash]`).
+//! - `read()` / `exists()`: resolve committed contract storage slots from
+//!   `CF_STORAGE` (M3 CLOSED in P3·Step 6b-vm-1 — `BlockContext.contract` is
+//!   distinct from `msg_sender`). Remaining: `storage_root` trie wire-up in
+//!   `apply_writes` (see debt record below).
 //!
 //! ## Debt record (C·Step 13-residual)
 //!
@@ -88,10 +94,10 @@ impl ContractStateView for WorldStateView {
     // ── Read operations ───────────────────────────────────────────────────────
 
     fn read(&self, contract: &Address, key: &[u8]) -> Option<Vec<u8>> {
-        // Hash the arbitrary key bytes to derive a 32-byte CF_STORAGE slot.
-        // NOTE: Phase 2 scope — no contracts deployed, always returns None.
+        // Hash the arbitrary key bytes to derive a 32-byte CF_STORAGE slot, then
+        // read the committed slot value from CF_STORAGE (namespaced per contract).
         // M3 CLOSED (P3·Step 6b-vm-1): namespace uses BlockContext.contract correctly.
-        // Phase 2 scope: no contracts deployed, always returns None regardless.
+        // Returns None when the slot has never been written for this contract.
         let slot = lemma_crypto::hash_bytes(key);
         self.inner.get_storage(contract, &slot).ok().flatten()
     }
@@ -107,7 +113,8 @@ impl ContractStateView for WorldStateView {
 
     fn balance(&self, addr: &Address) -> Amount {
         // Storage errors (e.g. trie node not found) degrade gracefully to zero —
-        // the VM treats missing accounts as zero-balance EOAs (Phase 2: no staking).
+        // the VM treats missing accounts as zero-balance EOAs. (Staking balance is
+        // tracked separately in Account.staked; only liquid balance is returned here.)
         self.inner
             .get_balance(addr)
             .unwrap_or_else(|_| Amount::zero())
@@ -117,11 +124,19 @@ impl ContractStateView for WorldStateView {
         self.inner.get_nonce(addr).unwrap_or(0)
     }
 
-    fn code(&self, _addr: &Address) -> Option<Vec<u8>> {
-        // Phase 2: no WASM bytecode store (only Account.code_hash exists).
-        // Bytecode storage keyed by hash is a Phase 3 deliverable.
-        // Transfer txs (the only Phase 2 tx type) never call code().
-        None
+    fn code(&self, addr: &Address) -> Option<Vec<u8>> {
+        // Resolve committed contract bytecode — the inverse of apply_one_write's
+        // deploy path (put_code + stamp account.code_hash). Load the account,
+        // bail to None for EOAs (zero code_hash, the fast path), otherwise look
+        // up the bytes in the content-addressed CF_CODE store by code_hash.
+        // Storage errors degrade gracefully to None via .ok().flatten() — the VM
+        // treats an unresolvable callee as "no contract deployed", never panics
+        // (AGENTS §7.2). Consistent with balance()/nonce()/has_code_hash().
+        let account = self.inner.get_account(addr).ok().flatten()?;
+        if account.code_hash.is_zero() {
+            return None;
+        }
+        self.inner.get_code(&account.code_hash).ok().flatten()
     }
 
     // ── Write operations — unreachable (see module doc) ───────────────────────

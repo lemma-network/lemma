@@ -193,6 +193,21 @@ impl StdLibRegistry {
     ///
     /// Returns `None` for unknown bases (the user may be extending a
     /// user-defined type — not yet supported, produces a type error elsewhere).
+    ///
+    /// ## Canonical source: the embedded `.lem` files
+    ///
+    /// The `@std` base definitions have a SINGLE canonical source — the embedded
+    /// Lem source files (`token.lem`, `access.lem`). This map is a *hand-maintained
+    /// mirror* used for symbol resolution until full re-entrant parse+check of the
+    /// `.lem` files lands (see [`StdLibRegistry::symbol_kind`]). Per AGENTS §2
+    /// ("one canonical way"), the two must never diverge: the bidirectional sync
+    /// test in `stdlib/tests.rs` (`base_members_match_lem_source`) parses each
+    /// `.lem` and asserts every member here exists there and vice-versa, so a drift
+    /// fails CI rather than silently changing contract behaviour.
+    ///
+    /// Member set is dictated by `docs/03-LANGUAGE_SPEC.md` §13 (IToken) + §24
+    /// (Token / TaxToken). Note `distributeTaxes` / `isTaxable` are *dev*-implemented
+    /// (WF-014), not base members, so they appear in neither.
     pub fn base_members(name: &str) -> Option<StdBaseMembers> {
         match name {
             "Token" => Some(StdBaseMembers {
@@ -325,6 +340,18 @@ impl StdLibRegistry {
                     StdFunction {
                         name: "setRewardExempt",
                         is_public: true,
+                    },
+                    // Internal predicates (§24.5) — private helpers the protocol /
+                    // dev `isTaxable` call.  NOT public.  `distributeTaxes` and
+                    // `isTaxable` are dev-implemented (WF-014), so they are
+                    // intentionally NOT base members.
+                    StdFunction {
+                        name: "isPair",
+                        is_public: false,
+                    },
+                    StdFunction {
+                        name: "isExempt",
+                        is_public: false,
                     },
                 ],
             }),

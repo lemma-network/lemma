@@ -129,6 +129,51 @@ contract TaxToken {
         return self.totalSupply
     }
 
+    // IToken members (§13, §24.2): a TaxToken IS a fungible token, so it exposes
+    // the full IToken surface (bounded approvals, transferFrom, allowance, mint).
+    // The tax/fee model rides on top of transfer; approval semantics are identical
+    // to the plain Token base above.
+    pub fn approve(spender: Address, opts: ApprovalOpts) -> bool {
+        assert(opts.amount > 0, "Amount must be positive")
+        self.allowances.get(msg.sender).set(spender, Allowance {
+            amount: opts.amount,
+            expiry: opts.expiry,
+            oneTime: opts.oneTime
+        })
+        emit Approval { owner: msg.sender, spender: spender, amount: opts.amount, expiry: opts.expiry, oneTime: opts.oneTime }
+        return true
+    }
+
+    pub fn transferFrom(from: Address, to: Address, amount: u128) -> bool {
+        let a = self.allowances.get(from).get(msg.sender)
+        assert(block.timestamp <= a.expiry, "Approval expired")
+        assert(amount <= a.amount, "Insufficient allowance")
+        self.balances.set(from, self.balances.get(from) - amount)
+        self.balances.set(to, self.balances.get(to) + amount)
+        if (a.oneTime) {
+            self.allowances.get(from).set(msg.sender, Allowance { amount: 0, expiry: 0, oneTime: false })
+        } else {
+            self.allowances.get(from).set(msg.sender, Allowance {
+                amount: a.amount - amount,
+                expiry: a.expiry,
+                oneTime: a.oneTime
+            })
+        }
+        emit Transfer { from: from, to: to, amount: amount }
+        return true
+    }
+
+    pub fn allowance(owner: Address, spender: Address) -> Allowance {
+        return self.allowances.get(owner).get(spender)
+    }
+
+    @onlyOwner
+    pub fn mint(to: Address, amount: u128) {
+        self.totalSupply = self.totalSupply + amount
+        self.balances.set(to, self.balances.get(to) + amount)
+        emit Transfer { from: Address.zero, to: to, amount: amount }
+    }
+
     @onlyOwner
     pub fn setPair(pair: Address, on: bool) {
         if (on) { self.pairs.add(pair) } else { self.pairs.remove(pair) }

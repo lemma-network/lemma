@@ -31,6 +31,28 @@ fn seeded_db(accounts: &[(Address, Amount)]) -> (Arc<LemmaDb>, Hash, TempDir) {
     (db, root, dir)
 }
 
+/// Commit a contract to world state exactly as `apply_one_write`'s deploy path
+/// does (CF_CODE bytecode + account stamped with `code_hash`), then return the
+/// committed `(Arc<LemmaDb>, state_root, TempDir)`.
+///
+/// The returned state root is what a later block (N+1) would root a fresh
+/// [`WorldStateView`] at — the cross-block resolution path that the V-1 bug
+/// (`code()` returning `None`) silently broke.
+fn deployed_db(contract: &Address, bytecode: &[u8]) -> (Arc<LemmaDb>, Hash, TempDir) {
+    let dir = TempDir::new().expect("tempdir");
+    let db = Arc::new(LemmaDb::open(dir.path()).expect("LemmaDb::open"));
+    let mut ws = WorldState::new(Arc::clone(&db));
+
+    // Mirror apply_one_write (block_exec.rs): hash → CF_CODE → stamp account.
+    let code_hash = lemma_crypto::hash_bytes(bytecode);
+    ws.put_code(&code_hash, bytecode).expect("put_code");
+    ws.put_account(contract, &Account::new_contract(code_hash))
+        .expect("put_account");
+
+    let root = ws.state_root().unwrap_or(Hash::zero());
+    (db, root, dir)
+}
+
 fn addr(n: u8) -> Address {
     Address::from_public_key(&[n; 32])
 }
@@ -92,8 +114,54 @@ fn code_returns_none_for_eoa() {
     let (db, root, _dir) = seeded_db(&[(a, Amount::from_drop(1))]);
     let view = WorldStateView::new(db, root);
 
-    // Phase 2: no bytecode store; code() always returns None.
+    // An EOA has a zero code_hash → code() returns None (fast path, no CF_CODE
+    // lookup). Only contract accounts (non-zero code_hash) resolve bytecode.
     assert!(view.code(&a).is_none());
+}
+
+#[test]
+fn code_resolves_committed_bytecode_for_contract() {
+    // V-1 regression: a contract deployed in block N must be callable in block
+    // N+1. We commit the contract (CF_CODE + account.code_hash) and then resolve
+    // its bytecode through a *freshly constructed* WorldStateView rooted at the
+    // committed state_root — exactly the cross-block path that returned None.
+    let c = addr(0x42);
+    let bytecode = b"\x00asm\x01\x00\x00\x00".to_vec(); // minimal WASM header bytes
+    let (db, root, _dir) = deployed_db(&c, &bytecode);
+
+    // Separate view instance — models block N+1 reading block N's committed state.
+    let view = WorldStateView::new(db, root);
+
+    assert_eq!(
+        view.code(&c),
+        Some(bytecode),
+        "code() must resolve committed bytecode via account.code_hash → CF_CODE"
+    );
+}
+
+#[test]
+fn code_returns_none_for_unknown_address() {
+    // An address never written has no account → no code_hash → None (graceful,
+    // no panic) even when the view is rooted at a non-empty state.
+    let c = addr(0x42);
+    let (db, root, _dir) = deployed_db(&c, b"\x00asm\x01\x00\x00\x00");
+    let view = WorldStateView::new(db, root);
+
+    assert!(view.code(&addr(0x99)).is_none());
+}
+
+#[test]
+fn has_code_hash_true_for_committed_bytecode() {
+    // Companion to code(): the content-addressed CF_CODE presence check used by
+    // deploy-dedup must also see the committed bytecode across a fresh view.
+    let c = addr(0x42);
+    let bytecode = b"\x00asm\x01\x00\x00\x00".to_vec();
+    let code_hash = lemma_crypto::hash_bytes(&bytecode);
+    let (db, root, _dir) = deployed_db(&c, &bytecode);
+    let view = WorldStateView::new(db, root);
+
+    assert!(view.has_code_hash(&code_hash));
+    assert!(!view.has_code_hash(&Hash::zero()));
 }
 
 // ── storage read ──────────────────────────────────────────────────────────────
@@ -104,7 +172,7 @@ fn read_returns_none_for_empty_storage() {
     let (db, root, _dir) = seeded_db(&[(a, Amount::from_drop(100))]);
     let view = WorldStateView::new(db, root);
 
-    // No storage slots written → always None in Phase 2.
+    // No storage slots written for this contract → None.
     assert!(view.read(&a, b"some_key").is_none());
 }
 
