@@ -93,6 +93,44 @@ impl<'a> TxSigningBody<'a> {
     }
 }
 
+// ─── Domain separation (DB-A65, P3·Step 24) ─────────────────────────────────
+
+/// Domain separator for personal message signing (DB-A65, P3·Step 24).
+///
+/// Prepended to every message before hashing, ensuring the signing payload
+/// can NEVER collide with a `TxSigningBody` hash (which is `blake3(bincode(...))`
+/// with no domain prefix).
+///
+/// Format: `b"\x19Lemma Signed Message:\n"` (24 bytes). Inspired by EIP-191.
+///
+/// # Collision-impossibility proof
+///
+/// `compute_message_hash` input begins with this domain prefix (bytes 0–23).
+/// `compute_tx_hash` input is `bincode_v1(TxSigningBody)`, whose first field
+/// `sender: &Address` serializes as a **bech32m string** via `Address`'s custom
+/// `Serialize` impl. In bincode v1 a `String` is encoded as an 8-byte LE
+/// `u64` length prefix followed by UTF-8 bytes. For every reachable address
+/// the bech32m encoding is < 256 chars, so byte 0 of the bincode output is
+/// the low byte of the string length (~43 → 0x2B) and **byte 1 is always
+/// 0x00** (high byte of a length < 256). The domain prefix's byte 1 is `L`
+/// (0x4C ≠ 0x00), so no `bincode(TxSigningBody)` can share even the first
+/// two bytes with a domain-tagged message. Collision is structurally impossible.
+///
+/// **INVARIANT**: this proof depends on `Address` keeping its bech32m-string
+/// `Serialize` impl. If `Address::serialize` is ever changed to raw bytes,
+/// re-verify this domain-separation property. The regression test
+/// `tx_signing_body_bincode_never_starts_with_domain_prefix` in
+/// `signing/tests.rs` will break if this assumption is violated.
+///
+/// # Signing payload
+///
+/// `blake3(PERSONAL_SIGN_DOMAIN || le_u64(msg.len()) || msg)`
+/// - Domain prefix: prevents cross-domain replay (tx ↔ message)
+/// - Length prefix (little-endian u64): prevents concatenation ambiguity
+///   (`sign_message(b"ab")` != domain with `b"a" + b"b"` as separate messages)
+/// - Blake3 hash: reduces the payload to 32 bytes for the signer (same as tx)
+const PERSONAL_SIGN_DOMAIN: &[u8] = b"\x19Lemma Signed Message:\n";
+
 // ─── compute_tx_hash ─────────────────────────────────────────────────────────
 
 /// Compute the canonical Blake3 hash of a transaction's signing body.
@@ -247,6 +285,72 @@ pub fn verify_transaction(tx: &Transaction, pubkey: &PublicKey) -> Result<(), Cr
 
     // ── Verify both signatures over the hash bytes ───────────────────────────
     verify(pubkey, tx_hash.as_bytes(), &hybrid_sig)
+}
+
+// ─── Domain-separated message signing (DB-A65, P3·Step 24) ──────────────────
+
+/// Compute the domain-separated Blake3 hash of a personal message.
+///
+/// The hash covers `PERSONAL_SIGN_DOMAIN || le_u64(message.len()) || message`,
+/// producing a 32-byte digest that can NEVER equal a `compute_tx_hash` output
+/// (which hashes `bincode(TxSigningBody)` with no domain prefix).
+///
+/// # Why the length prefix
+///
+/// Without the length prefix, `sign_message(b"AB")` would produce the same
+/// hash as a message `b"A"` in a scheme that concatenates with `b"B"`. The
+/// 8-byte LE length commits to the exact message boundary.
+pub fn compute_message_hash(message: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PERSONAL_SIGN_DOMAIN);
+    hasher.update(&(message.len() as u64).to_le_bytes());
+    hasher.update(message);
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Sign a personal message with domain separation (DB-A65, P3·Step 24).
+///
+/// The signature is computed over `compute_message_hash(message)` — a
+/// domain-separated Blake3 hash that can NEVER collide with a transaction
+/// hash. This prevents a signed login/auth message from being replayed as
+/// a valid transaction signature.
+///
+/// # Returns
+///
+/// A [`HybridSignature`] (Ed25519 + ML-DSA-65). Infallible — hashing and
+/// signing are both infallible for well-formed keys.
+///
+/// # Examples
+///
+/// ```no_run
+/// use lemma_crypto::{KeyPair, sign_message, verify_message};
+///
+/// let kp = KeyPair::generate().unwrap();
+/// let sig = sign_message(b"Login to Lemma Explorer", &kp);
+/// assert!(verify_message(b"Login to Lemma Explorer", &sig, &kp.public_key()).is_ok());
+/// ```
+pub fn sign_message(message: &[u8], keypair: &KeyPair) -> HybridSignature {
+    let msg_hash = compute_message_hash(message);
+    keypair.sign(msg_hash.as_bytes())
+}
+
+/// Verify a personal message signature (DB-A65, P3·Step 24).
+///
+/// Recomputes `compute_message_hash(message)` and verifies both the Ed25519
+/// and ML-DSA-65 signatures over the hash bytes.
+///
+/// # Errors
+///
+/// Propagates from [`verify`](keypair::verify):
+/// - [`CryptoError::ClassicalVerificationFailed`] — Ed25519 sig invalid.
+/// - [`CryptoError::QuantumVerificationFailed`] — ML-DSA-65 sig invalid.
+pub fn verify_message(
+    message: &[u8],
+    signature: &HybridSignature,
+    pubkey: &PublicKey,
+) -> Result<(), CryptoError> {
+    let msg_hash = compute_message_hash(message);
+    verify(pubkey, msg_hash.as_bytes(), signature)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

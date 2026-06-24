@@ -226,6 +226,19 @@ impl KeyPair {
     /// Returns a [`HybridSignature`] where **both** halves must verify.
     /// The result is deterministic for the same `(key, message)` pair.
     ///
+    /// # Warning — no domain separation
+    ///
+    /// This is the **raw** signing primitive. It signs `message` as-is with
+    /// no domain tag. For signing **user/personal messages** (login, auth,
+    /// off-chain proofs), use [`sign_message`](crate::sign_message) instead
+    /// — it prepends a domain separator that prevents the signature from
+    /// being replayed as a transaction (DB-A65, P3·Step 24). Calling `sign`
+    /// directly for user messages bypasses this protection.
+    ///
+    /// Legitimate direct callers: [`sign_transaction`](crate::sign_transaction)
+    /// (which domain-separates via `TxSigningBody`), QC header signing
+    /// (consensus layer), and internal test code.
+    ///
     /// # Infallibility
     ///
     /// This function cannot fail — Ed25519 signing is infallible for any

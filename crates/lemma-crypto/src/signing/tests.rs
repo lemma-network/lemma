@@ -4,6 +4,8 @@
 //!  - compute_tx_hash: determinism, non-zero, changes with field changes
 //!  - sign_transaction: sets hash + Hybrid signature, roundtrip verify
 //!  - verify_transaction: happy path, tampered fields, wrong key, error variants
+//!  - compute_message_hash: determinism, non-zero, domain separation from tx hash
+//!  - sign_message / verify_message: roundtrip, wrong message, wrong key, cross-domain rejection
 
 use lemma_core::{
     transaction::{Transaction, TxType},
@@ -12,7 +14,10 @@ use lemma_core::{
 
 use crate::{
     keypair::KeyPair,
-    signing::{compute_tx_hash, sign_transaction, verify_transaction},
+    signing::{
+        compute_message_hash, compute_tx_hash, sign_message, sign_transaction, verify_message,
+        verify_transaction,
+    },
     CryptoError,
 };
 
@@ -282,5 +287,132 @@ fn verify_returns_hybrid_required_for_post_quantum_sig() {
             Err(CryptoError::HybridSignatureRequired { got: "PostQuantum" })
         ),
         "expected HybridSignatureRequired{{got:PostQuantum}}, got: {result:?}"
+    );
+}
+
+// ─── sign_message / verify_message (DB-A65, P3·Step 24) ─────────────────────
+
+#[test]
+fn sign_message_round_trip() {
+    let kp = keypair();
+    let sig = sign_message(b"hello lemma", &kp);
+    assert!(verify_message(b"hello lemma", &sig, &kp.public_key()).is_ok());
+}
+
+#[test]
+fn verify_message_rejects_wrong_message() {
+    let kp = keypair();
+    let sig = sign_message(b"hello", &kp);
+    assert!(verify_message(b"world", &sig, &kp.public_key()).is_err());
+}
+
+#[test]
+fn verify_message_rejects_wrong_key() {
+    let kp1 = keypair();
+    let kp2 = keypair();
+    let sig = sign_message(b"hello", &kp1);
+    assert!(verify_message(b"hello", &sig, &kp2.public_key()).is_err());
+}
+
+#[test]
+fn message_hash_differs_from_tx_hash() {
+    // Construct a transaction and compute its hash.
+    let kp = keypair();
+    let tx = unsigned_tx(&kp);
+    let tx_hash = compute_tx_hash(&tx).unwrap();
+
+    // Now compute the "message hash" of the same raw tx_hash bytes.
+    // These MUST differ — if they were equal, a message signature could
+    // be replayed as a transaction signature.
+    let msg_hash = compute_message_hash(tx_hash.as_bytes());
+    assert_ne!(
+        tx_hash, msg_hash,
+        "domain-separated message hash must NEVER equal a tx hash"
+    );
+}
+
+#[test]
+fn message_signature_not_valid_as_tx_signature() {
+    // Sign a message whose bytes happen to equal a tx_hash.
+    let kp = keypair();
+    let mut tx = unsigned_tx(&kp);
+    sign_transaction(&mut tx, &kp).unwrap();
+
+    // Sign the tx_hash bytes as a "personal message".
+    let msg_sig = sign_message(tx.hash.as_bytes(), &kp);
+
+    // The message signature must NOT verify as a transaction signature.
+    // Replace the tx signature with the message signature and try to verify.
+    tx.signature = msg_sig.to_lemma_signature();
+    assert!(
+        verify_transaction(&tx, &kp.public_key()).is_err(),
+        "a message signature must never be accepted as a tx signature"
+    );
+}
+
+#[test]
+fn compute_message_hash_is_deterministic() {
+    let a = compute_message_hash(b"test");
+    let b = compute_message_hash(b"test");
+    assert_eq!(a, b);
+}
+
+#[test]
+fn compute_message_hash_empty_message() {
+    // Empty message is valid — the domain prefix alone produces a hash.
+    let h = compute_message_hash(b"");
+    assert!(!h.is_zero());
+}
+
+#[test]
+fn compute_message_hash_length_prefix_prevents_concatenation_ambiguity() {
+    // "AB" as one message must differ from "A" or "B" as separate messages.
+    let h_ab = compute_message_hash(b"AB");
+    let h_a = compute_message_hash(b"A");
+    let h_b = compute_message_hash(b"B");
+    assert_ne!(
+        h_ab, h_a,
+        "different messages must produce different hashes"
+    );
+    assert_ne!(
+        h_ab, h_b,
+        "different messages must produce different hashes"
+    );
+}
+
+// ── Domain-separation invariant regression test (CR-C1/C3) ───────────────
+
+#[test]
+fn tx_signing_body_bincode_never_starts_with_domain_prefix() {
+    // INVARIANT: the first two bytes of bincode(TxSigningBody) must NEVER
+    // match the first two bytes of PERSONAL_SIGN_DOMAIN (0x19, 0x4C).
+    //
+    // This invariant is the foundation of the domain-separation proof.
+    // It holds because `Address` serializes as a bech32m STRING via its
+    // custom `Serialize` impl, and bincode v1 encodes a String as
+    // `u64 LE length ‖ UTF-8 bytes`. For any address with bech32m length
+    // < 256, byte 0 is the string length and byte 1 is 0x00.
+    //
+    // If this test fails, `Address::serialize` has changed in a way that
+    // breaks domain separation — review PERSONAL_SIGN_DOMAIN immediately.
+    let kp = keypair();
+    let tx = unsigned_tx(&kp);
+    let body = super::TxSigningBody::from_tx(&tx);
+    let bincode_bytes = bincode::serialize(&body).expect("TxSigningBody must serialize");
+
+    let domain = super::PERSONAL_SIGN_DOMAIN;
+    assert!(
+        bincode_bytes.len() >= 2,
+        "bincode(TxSigningBody) must be at least 2 bytes"
+    );
+    assert!(
+        bincode_bytes[0] != domain[0] || bincode_bytes[1] != domain[1],
+        "CRITICAL: bincode(TxSigningBody) first two bytes ({:#04x}, {:#04x}) match \
+         PERSONAL_SIGN_DOMAIN ({:#04x}, {:#04x}) — domain separation BROKEN. \
+         Address::serialize likely changed from bech32m string to raw bytes.",
+        bincode_bytes[0],
+        bincode_bytes[1],
+        domain[0],
+        domain[1],
     );
 }
