@@ -18,20 +18,24 @@
 //!                     BlockExecutionOutput { txs, receipts, state_root, … }
 //! ```
 //!
-//! ## State-root correctness (C·Step 13)
+//! ## State-root correctness (P3·Step 22)
 //!
-//! Balance, nonce, and code writes are applied to the account trie and
-//! included in `state_root` (consensus-critical commitment).
+//! All four write kinds contribute to `state_root`:
 //!
-//! Contract storage writes are persisted to `CF_STORAGE` for intra-block
-//! read-through but do NOT yet update `Account.storage_root` — this is
-//! **C·Step 13-residual** — `Account.storage_root` wire-up (newly unblocked):
-//! - **M3 CLOSED (P3·Step 6b-vm-1)**: `BlockContext.contract` field added;
-//!   host storage ops now use the executing contract's address (not `msg_sender`).
-//! - **Remaining blocker**: `apply_writes` does not yet call `WorldState::put_storage`
-//!   via a contract trie and update `Account.storage_root`. Until this lands,
-//!   storage does NOT contribute to `state_root`. Record as newly-unblocked debt.
-//! - This is intentional-deferred (dependency now resolved), NOT silent loss.
+//! - **Balance, Nonce, Code** — applied to the account trie via `put_account`
+//!   (each write does a full read-modify-write round-trip).
+//! - **Storage** — persisted to `CF_STORAGE` for intra-block read-through,
+//!   then committed to per-contract storage sub-tries. The resulting
+//!   `storage_root` is written into `Account.storage_root` via `put_account`,
+//!   so contract storage is included in the consensus `state_root`.
+//!
+//! The two-phase approach in `apply_writes`:
+//! 1. **Phase 1**: iterate all writes in `StateKey` order. Non-storage writes
+//!    (Balance, Nonce, Code) are applied immediately. Storage writes are
+//!    persisted to `CF_STORAGE` and collected by contract address.
+//! 2. **Phase 2**: for each contract with changed storage slots, rebuild the
+//!    per-contract storage sub-trie, compute the new `storage_root`, and
+//!    update `Account.storage_root` via `put_account`.
 //!
 //! ## Determinism (AGENTS §7.1)
 //!
@@ -46,6 +50,7 @@
 //!   Per-account correctness does not require adjacency: every write does a full
 //!   read-modify-write round-trip via `put_account`, so later writes to the same
 //!   account see the already-committed earlier write.
+//! - Phase 2 iterates `storage_changes` via `BTreeMap` (deterministic order).
 //! - `hash_list` uses `bincode::serialize` (deterministic field order).
 //!
 //! ## Panic-free settlement boundary (AGENTS §7.2, §9.3)
@@ -67,7 +72,7 @@ use lemma_core::{
     hash::Hash,
     transaction::{Transaction, TransactionReceipt},
 };
-use lemma_storage::{db::LemmaDb, state::WorldState};
+use lemma_storage::{db::LemmaDb, state::WorldState, trie::MerklePatriciaTrie};
 use lemma_vm::{
     executor::Executor,
     gas::GasSchedule,
@@ -90,6 +95,13 @@ use crate::{error::NodeError, state_view::WorldStateView};
 /// Conservative interim ceiling: `initial_gas_limit (30M) / tx_base (21K) ≈ 1428`.
 /// Phase 4 will derive this dynamically from `parent.header.gas_limit`.
 pub const MAX_TXS_PER_BLOCK: usize = 256;
+
+/// Per-contract storage slot changes collected during Phase 1 of `apply_writes`.
+///
+/// Each entry is `(slot_hash, value)` where `None` denotes deletion.
+/// Keyed by contract `Address` in a `BTreeMap` for deterministic iteration
+/// order (AGENTS §7.1).
+type StorageChanges = BTreeMap<Address, Vec<(Hash, Option<Vec<u8>>)>>;
 
 // ── BlockExecutionOutput ──────────────────────────────────────────────────────
 
@@ -213,30 +225,37 @@ pub fn execute_committed_block(
 
 /// Apply `BlockOutput.writes` to the committed world state, return new state_root.
 ///
-/// Iterates in deterministic `StateKey` order (AGENTS §7.1 — `BTreeMap`).
-/// `StateKey` derives `Ord`, which sorts by **variant discriminant first**:
+/// Uses a two-phase approach so that ALL write kinds — including contract
+/// storage — contribute to the consensus `state_root` (P3·Step 22).
+///
+/// ## Phase 1: iterate writes in `StateKey` order
+///
+/// `StateKey` derives `Ord`, sorting by **variant discriminant first**:
 /// `Storage(0) < Balance(1) < Nonce(2) < Code(3)`, then by fields within each
-/// variant. Writes are grouped by **field kind** across all addresses, NOT by
-/// address. For example, with addresses A and B: `Balance(A), Balance(B), ...,
-/// Nonce(A), Nonce(B), ...` — the two Balance writes precede both Nonce writes.
+/// variant. Non-storage writes (Balance, Nonce, Code) are applied immediately
+/// via `apply_one_write`. Storage writes are persisted to `CF_STORAGE` for
+/// intra-block read-through and collected by contract address into a
+/// `BTreeMap<Address, Vec<…>>` for Phase 2.
+///
+/// ## Phase 2: rebuild per-contract storage tries
+///
+/// For each contract with changed storage slots, open its storage sub-trie
+/// (from `Account.storage_root`), apply the slot changes, compute the new
+/// root, and update `Account.storage_root` via `put_account`. The storage
+/// sub-tries share `CF_TRIE_NODES` with the world-state trie — content-
+/// addressed nodes (keyed by hash) have no namespace collision.
 ///
 /// ## Correctness (commutative multi-field updates)
 ///
 /// Per-account correctness does NOT require writes to the same account to be
 /// adjacent. Each `apply_one_write` does a full `get_account → mutate one
 /// field → put_account` round-trip that commits to the trie immediately.
-/// When `Nonce(A)` is processed later, `get_account(A)` reads the updated
-/// account that already has the new `balance` from `Balance(A)`. All field
-/// updates to one account therefore commute correctly, regardless of the gap
-/// between them in iteration order.
+/// Phase 2 runs after all non-storage writes, so `get_account` in Phase 2
+/// sees the latest balance/nonce/code for each contract.
 ///
-/// ## Storage + Account.storage_root (C·Step 13-residual)
+/// ## Determinism (AGENTS §7.1)
 ///
-/// `StateKey::Storage` writes are persisted to `CF_STORAGE` for intra-block
-/// read-through correctness. `Account.storage_root` is NOT updated here —
-/// **M3 is now CLOSED** (`BlockContext.contract` landed in P3·Step 6b-vm-1).
-/// The remaining work is the storage_root trie wire-up (C·Step 13-residual,
-/// newly unblocked). Storage does not yet contribute to `state_root`.
+/// Both phases iterate `BTreeMap`s — deterministic order guaranteed.
 fn apply_writes(
     db: Arc<LemmaDb>,
     base_state_root: Hash,
@@ -252,16 +271,108 @@ fn apply_writes(
         WorldState::with_state_root(Arc::clone(&db), base_state_root)
     };
 
+    // ── Phase 1: Collect storage writes, apply non-storage writes ─────────
+    // Storage writes are collected by contract address for bulk trie update
+    // in Phase 2. Non-storage writes (Balance, Nonce, Code) are applied
+    // immediately via apply_one_write (unchanged from before).
+    let mut storage_changes: StorageChanges = BTreeMap::new();
+
     for (key, value) in writes {
-        apply_one_write(&mut world, key, value)?;
+        match (key, value) {
+            (
+                StateKey::Storage {
+                    contract,
+                    key: slot_key,
+                },
+                StateValue::Storage(val),
+            ) => {
+                // Hash the slot key (canonical Blake3, AGENTS §2.2).
+                let slot = lemma_crypto::hash_bytes(slot_key);
+                // Persist to CF_STORAGE for intra-block read-through (unchanged).
+                match val {
+                    Some(v) => world.put_storage(contract, &slot, v)?,
+                    None => world.delete_storage(contract, &slot)?,
+                }
+                // Collect for per-contract trie update in Phase 2.
+                storage_changes
+                    .entry(*contract)
+                    .or_default()
+                    .push((slot, val.clone()));
+            }
+            _ => {
+                // Balance, Nonce, Code — apply immediately (existing behavior).
+                apply_one_write(&mut world, key, value)?;
+            }
+        }
     }
 
-    // state_root() is None only on a completely empty trie (all txs were storage-only
-    // with no balance/nonce/code changes). In that rare case, preserve the parent root.
+    // ── Phase 2: Rebuild per-contract storage tries ────────────────────────
+    // For each contract with changed storage slots, open its storage sub-trie
+    // (from Account.storage_root), apply the slot changes, compute the new
+    // root, and update Account.storage_root in the world-state trie.
+    //
+    // The storage sub-tries share the same CF_TRIE_NODES column family as the
+    // world-state trie — content-addressed nodes (keyed by hash), no namespace
+    // collision. DRY: reuses MerklePatriciaTrie (AGENTS §2).
+    for (contract, slots) in &storage_changes {
+        let account = world.get_account(contract)?.unwrap_or_default();
+
+        // Open the contract's storage trie from its current root.
+        let mut storage_trie = if account.storage_root.is_zero() {
+            MerklePatriciaTrie::new(&db)
+        } else {
+            MerklePatriciaTrie::with_root(&db, account.storage_root)
+        };
+
+        for (slot_hash, value) in slots {
+            match value {
+                Some(v) => storage_trie.insert(slot_hash.as_bytes(), v.clone())?,
+                None => {
+                    // Deletion: MerklePatriciaTrie does not have a `delete`
+                    // method yet (deferred per trie.rs doc). Insert an empty
+                    // vec as a tombstone — the trie root reflects the slot's
+                    // existence (with empty value) rather than true absence.
+                    // This is deterministic and correct for consensus (all
+                    // validators apply the same tombstone logic).
+                    //
+                    // CAVEAT (CR-W4): CF_STORAGE treats a delete as true
+                    // removal (`get_storage` → `None`), while the storage
+                    // trie treats it as an empty-value leaf. The trie is
+                    // authoritative for state_root commitment only; CF_STORAGE
+                    // is authoritative for read-through. A future verifier
+                    // that reconstructs storage from the trie alone must
+                    // treat empty-value leaves as deleted slots.
+                    //
+                    // TODO(P3): replace with storage_trie.delete() when
+                    // MerklePatriciaTrie::delete lands (trie.rs §"Not yet
+                    // implemented"). This will align both stores.
+                    storage_trie.insert(slot_hash.as_bytes(), Vec::new())?;
+                }
+            }
+        }
+
+        // Compute the new storage root.
+        let new_storage_root = storage_trie.root().unwrap_or(Hash::zero());
+
+        // Update Account.storage_root if it changed (avoids unnecessary put_account).
+        if new_storage_root != account.storage_root {
+            let mut updated_account = account;
+            updated_account.storage_root = new_storage_root;
+            world.put_account(contract, &updated_account)?;
+        }
+    }
+
+    // state_root() is None only on a completely empty trie (no account writes
+    // at all — neither direct nor via Phase 2 storage_root updates). In that
+    // rare case, preserve the parent root.
     Ok(world.state_root().unwrap_or(base_state_root))
 }
 
-/// Apply one (StateKey, StateValue) write to the committed [`WorldState`].
+/// Apply one non-storage (StateKey, StateValue) write to the committed [`WorldState`].
+///
+/// Handles Balance, Nonce, and Code writes only. Storage writes are handled
+/// directly in [`apply_writes`] Phase 1 (CF_STORAGE persistence) and Phase 2
+/// (per-contract storage trie rebuild + `Account.storage_root` update).
 ///
 /// Mismatched key/value variants (e.g. `Balance(addr)` paired with `Nonce(n)`)
 /// cannot occur in correct Flux output — logged as a warning and skipped
@@ -295,9 +406,6 @@ fn apply_one_write(
             // Store bytecode in CF_CODE (content-addressed, append-only).
             // WorldState::put_code is idempotent: if code_hash already exists,
             // it returns Ok(()) immediately without overwriting (DB-A23).
-            // This closes the TODO(Phase 3) that was here: bytecode is now
-            // persisted in CF_CODE so execute_call can load it on ContractCall
-            // via account.code_hash → CF_CODE[code_hash] → bytecode.
             // StorageError → NodeError via #[from] (error.rs).
             world.put_code(&code_hash, bytecode)?;
 
@@ -315,41 +423,17 @@ fn apply_one_write(
             world.put_account(addr, &account)?;
         }
 
-        // ── Storage ───────────────────────────────────────────────────────────
-        // Persist to CF_STORAGE for read-through correctness within the block.
-        // Account.storage_root NOT updated — C·Step 13-residual (M3 CLOSED; storage_root wire-up is the remaining work).
-        (
-            StateKey::Storage {
-                contract,
-                key: slot_key,
-            },
-            StateValue::Storage(Some(val)),
-        ) => {
-            let slot = lemma_crypto::hash_bytes(slot_key);
-            world.put_storage(contract, &slot, val)?;
-        }
-        (
-            StateKey::Storage {
-                contract,
-                key: slot_key,
-            },
-            StateValue::Storage(None),
-        ) => {
-            let slot = lemma_crypto::hash_bytes(slot_key);
-            world.delete_storage(contract, &slot)?;
-        }
-
         // ── Mismatched variants (Flux invariant violation) ────────────────────
         _ => {
-            // This should never occur in correct Flux output. Log and continue
-            // rather than returning an error that would halt the consensus path
-            // (AGENTS §7.2: no panics in consensus; storage errors are fatal but
-            // a malformed write map is Flux-internal logic, not storage failure).
+            // Storage writes are handled by apply_writes Phase 1+2 and should
+            // never reach here. Any other mismatch is a Flux invariant violation.
+            // Log and continue rather than panicking (AGENTS §7.2).
             warn!(
                 key = ?key,
                 value = ?value,
-                "block_exec: mismatched StateKey/StateValue variant — skipped \
-                 (Flux invariant violation; should not occur)"
+                "block_exec: unexpected StateKey/StateValue variant in apply_one_write — \
+                 skipped (Storage is handled in apply_writes Phase 1+2; other mismatches \
+                 indicate a Flux invariant violation)"
             );
         }
     }
