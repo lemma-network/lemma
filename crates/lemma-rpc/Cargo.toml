@@ -27,3 +27,7 @@ lemma-network = { path = "../lemma-network", features = ["test-utils"] }
 lemma-storage = { path = "../lemma-storage" }
 lemma-mempool = { path = "../lemma-mempool" }
 lemma-core    = { path = "../lemma-core" }
+# tower::ServiceExt::oneshot — used for body-limit integration tests.
+# Pinned to the version axum 0.7 depends on (axum 0.7 requires tower 0.4.x).
+tower         = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"

@@ -120,6 +120,20 @@ pub enum NetworkCommand {
     /// ref to actual transactions at commit time.
     BroadcastBatch(Vec<u8>),
 
+    /// Broadcast a commit-acknowledgement to all gossip mesh peers (P4·Step 9).
+    ///
+    /// The payload is a JSON-serialized `CommitAckPayload` (opaque bytes —
+    /// `lemma-network` does not depend on `lemma-consensus`; the node layer
+    /// handles encode/decode). Published on `lemma/commit-ack/1` via
+    /// [`GossipMessage::CommitAck`].
+    ///
+    /// Published by each validator immediately after it commits a chain block.
+    /// Peers accumulate acks until ≥ 2f+1 stake is reached, then assemble a
+    /// multi-signer [`QuorumCert`] (AGENTS §7.1 — deterministic BTreeMap signers).
+    ///
+    /// [`QuorumCert`]: lemma_core::QuorumCert
+    BroadcastCommitAck(Vec<u8>),
+
     /// Send a bounded range request to a specific peer (partition-heal path,
     /// 12-NETWORK_SYNC_SPEC §2.2).
     RequestRange {
@@ -284,6 +298,22 @@ pub enum NetworkEvent {
         batch_bytes: Option<Vec<u8>>,
     },
 
+    /// A commit-acknowledgement was received from a peer (P4·Step 9).
+    ///
+    /// The payload is a JSON-serialized `CommitAckPayload` (opaque bytes —
+    /// decoding happens at the node layer where `lemma-consensus` is available).
+    /// The node layer decodes, verifies the hybrid signature, and feeds the ack
+    /// into the `CommitAckAccumulator`. When ≥ 2f+1 stake is accumulated, a
+    /// multi-signer [`QuorumCert`] is assembled and attached to the block.
+    ///
+    /// [`QuorumCert`]: lemma_core::QuorumCert
+    CommitAckReceived {
+        /// The peer that propagated the ack.
+        from: PeerId,
+        /// Raw JSON-serialized `CommitAckPayload` bytes.
+        bytes: Vec<u8>,
+    },
+
     /// A connection to a new peer was established.
     PeerConnected(PeerId),
 
@@ -368,6 +398,25 @@ impl NetworkHandle {
     /// Returns [`NetworkError::Transport`] if the command channel is closed.
     pub async fn broadcast_batch(&self, bytes: Vec<u8>) -> Result<(), NetworkError> {
         self.send(NetworkCommand::BroadcastBatch(bytes)).await
+    }
+
+    /// Broadcast a commit-acknowledgement to the gossip mesh (P4·Step 9).
+    ///
+    /// `bytes` must be a JSON-serialized `CommitAckPayload` (produced via
+    /// `serde_json::to_vec(&ack_payload)`). The network layer routes it to the
+    /// `lemma/commit-ack/1` topic without interpreting the payload.
+    ///
+    /// Called by each validator immediately after committing a chain block.
+    /// Peers accumulate acks until ≥ 2f+1 stake is reached, then assemble a
+    /// multi-signer [`QuorumCert`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetworkError::Transport`] if the command channel is closed.
+    ///
+    /// [`QuorumCert`]: lemma_core::QuorumCert
+    pub async fn broadcast_commit_ack(&self, bytes: Vec<u8>) -> Result<(), NetworkError> {
+        self.send(NetworkCommand::BroadcastCommitAck(bytes)).await
     }
 
     /// Send a bounded range request to a specific peer (partition-heal path).
@@ -814,6 +863,13 @@ impl NetworkService {
                 self.emit(NetworkEvent::BatchReceived { from, bytes });
             }
 
+            Ok(GossipMessage::CommitAck(bytes)) => {
+                // Emit raw bytes — the node layer decodes into CommitAckPayload,
+                // verifies the hybrid signature, and feeds into CommitAckAccumulator
+                // (P4·Step 9 — multi-signer QuorumCert).
+                self.emit(NetworkEvent::CommitAckReceived { from, bytes });
+            }
+
             Err(err) => {
                 // Malformed message — demote sender.
                 tracing::warn!(
@@ -1004,6 +1060,28 @@ impl NetworkService {
                 ) {
                     // NoPeersSubscribedToTopic is expected in single-node mode.
                     tracing::debug!(error = %e, "BroadcastBatch publish failed (non-fatal)");
+                }
+            }
+
+            NetworkCommand::BroadcastCommitAck(bytes) => {
+                // Symmetric 1 MiB size guard — a CommitAckPayload is tiny (< 2 KiB);
+                // exceeding 1 MiB indicates a bug in the encode path (AGENTS §15.1).
+                if bytes.len() > crate::messages::MAX_GOSSIP_DECODE_BYTES {
+                    tracing::warn!(
+                        size = bytes.len(),
+                        max = crate::messages::MAX_GOSSIP_DECODE_BYTES,
+                        "BroadcastCommitAck: oversized — rejected (AGENTS §15.1)"
+                    );
+                    return; // do not publish
+                }
+                let msg = GossipMessage::CommitAck(bytes);
+                if let Err(e) = gossip::publish(
+                    self.swarm.behaviour_mut().gossipsub_mut(),
+                    &self.topics,
+                    &msg,
+                ) {
+                    // NoPeersSubscribedToTopic is expected in single-node mode.
+                    tracing::debug!(error = %e, "BroadcastCommitAck publish failed (non-fatal)");
                 }
             }
 

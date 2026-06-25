@@ -62,6 +62,15 @@ pub enum RpcError {
     #[error("transaction rejected: {reason}")]
     TransactionRejected { reason: String },
 
+    // ── Not-yet-implemented errors ────────────────────────────────────────────
+    /// The method exists but is not yet implemented.
+    ///
+    /// Used for stubs that are intentionally deferred (e.g. `lem_call` VM
+    /// simulation). Maps to JSON-RPC code `-32601` (Method not found) so
+    /// callers can detect the gap without treating it as an internal error.
+    #[error("method not implemented: {method} — {reason}")]
+    Unsupported { method: String, reason: String },
+
     // ── Internal errors ───────────────────────────────────────────────────────
     /// An unexpected internal error occurred.
     #[error("internal error: {reason}")]
@@ -82,7 +91,9 @@ impl RpcError {
         match self {
             Self::ParseError { .. } => CODE_PARSE_ERROR,
             Self::InvalidRequest { .. } => CODE_INVALID_REQUEST,
-            Self::MethodNotFound { .. } => CODE_METHOD_NOT_FOUND,
+            // Unsupported maps to MethodNotFound so callers can detect
+            // deferred stubs without treating them as internal errors.
+            Self::MethodNotFound { .. } | Self::Unsupported { .. } => CODE_METHOD_NOT_FOUND,
             Self::InvalidParams { .. } => CODE_INVALID_PARAMS,
             Self::StorageError { .. }
             | Self::TransactionRejected { .. }

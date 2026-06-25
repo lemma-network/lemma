@@ -206,16 +206,19 @@ pub async fn call(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError
         })?
     };
 
-    // Validate the address and data are parseable; return a stub response.
-    // Full VM simulation (execute_transaction with read-only state) is a
-    // follow-up task once the RPC ↔ VM integration layer is wired.
-    // The stub returns empty return data — callers can detect this via the
-    // "simulated" flag and fall back to off-chain estimation.
-    let _ = handle; // suppress unused warning — handle used for address validation above
-    Ok(json!({
-        "returnData": "0x",
-        "simulated": true,
-    }))
+    // Return an explicit Unsupported error rather than a misleading stub
+    // response. A stub that returns `{ "returnData": "0x", "simulated": true }`
+    // looks like a real (empty) response and can silently mislead callers into
+    // thinking the call succeeded with no return data.
+    //
+    // Full VM simulation (read-only Executor::execute_transaction against a
+    // WorldState snapshot) is tracked as lem_call-stub-1 in Technical Debt.
+    // Wire when the RPC ↔ VM integration layer is designed (Phase 4 follow-up).
+    let _ = (handle, _to, _data); // params validated above; unused until VM wired
+    Err(RpcError::Unsupported {
+        method: "lem_call".into(),
+        reason: "read-only VM simulation not yet implemented; tracked as lem_call-stub-1 (Phase 4 follow-up)".into(),
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

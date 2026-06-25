@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
@@ -172,6 +172,19 @@ async fn route_method(
 
 // ── Server startup ────────────────────────────────────────────────────────────
 
+/// Maximum allowed JSON-RPC request body size (1 MiB).
+///
+/// Requests larger than this are rejected with HTTP 413 Payload Too Large
+/// before the body is buffered. This prevents a trivial DoS where an attacker
+/// sends a multi-GB body to exhaust server memory (AGENTS §15.2 — validate at
+/// the boundary; AGENTS §7.2 — no panics in the ingress path).
+///
+/// 1 MiB is generous for any valid JSON-RPC call (the largest legitimate
+/// payload is `lem_sendTransaction` with a large contract deploy, which is
+/// bounded by `MAX_CONTRACT_WASM_SIZE` = 2 MiB at the VM layer — but the
+/// JSON envelope overhead is small, so 1 MiB covers all real cases).
+const MAX_RPC_REQUEST_BYTES: usize = 1 << 20; // 1 MiB
+
 /// Start the JSON-RPC HTTP server and serve until the process exits.
 ///
 /// Binds on `config.listen_addr`, applies CORS middleware, and runs the
@@ -185,6 +198,9 @@ pub async fn start_server(handle: NodeHandle, config: &RpcConfig) -> Result<(), 
 
     let app = Router::new()
         .route("/", post(dispatch_request))
+        // Reject bodies larger than MAX_RPC_REQUEST_BYTES with HTTP 413
+        // before buffering — DoS guard on public ingress (AGENTS §15.2).
+        .layer(DefaultBodyLimit::max(MAX_RPC_REQUEST_BYTES))
         .layer(cors)
         .with_state(handle);
 
@@ -202,3 +218,8 @@ pub async fn start_server(handle: NodeHandle, config: &RpcConfig) -> Result<(), 
             reason: format!("server error: {e}"),
         })
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests;

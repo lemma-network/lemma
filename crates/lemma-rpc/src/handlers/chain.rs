@@ -56,31 +56,35 @@ pub fn get_block(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError>
 
     let chain = ChainStore::new(&handle.db);
 
-    let block_opt: Option<Block> = if let Some(s) = height_or_hash.as_str() {
-        // Determine if it's a hash (64 hex chars) or a height.
-        if s.len() == 64 || s.starts_with("0x") && s.len() == 66 {
-            // Block hash lookup.
-            let hash_bytes = parse_hex_hash(s)?;
-            let hash = lemma_core::hash::Hash::from_bytes(hash_bytes);
-            chain.get_block_by_hash(&hash)?
+    // Resolve to (Block, Hash) — the hash is known for the by-hash path (it's
+    // the lookup key itself) and for the by-height path (computed from the
+    // stored bytes by get_block_with_hash_by_height).
+    let block_and_hash: Option<(Block, lemma_core::hash::Hash)> =
+        if let Some(s) = height_or_hash.as_str() {
+            // Determine if it's a hash (64 hex chars) or a height.
+            if s.len() == 64 || (s.starts_with("0x") && s.len() == 66) {
+                // Block hash lookup — the hash is the lookup key itself.
+                let hash_bytes = parse_hex_hash(s)?;
+                let hash = lemma_core::hash::Hash::from_bytes(hash_bytes);
+                chain.get_block_by_hash(&hash)?.map(|block| (block, hash))
+            } else {
+                // Height string (decimal or hex) — fetch block + computed hash.
+                let height = parse_height(s)?;
+                chain.get_block_with_hash_by_height(height)?
+            }
+        } else if let Some(n) = height_or_hash.as_u64() {
+            chain.get_block_with_hash_by_height(n)?
         } else {
-            // Height string (decimal or hex).
-            let height = parse_height(s)?;
-            chain.get_block_by_height(height)?
-        }
-    } else if let Some(n) = height_or_hash.as_u64() {
-        chain.get_block_by_height(n)?
-    } else {
-        return Err(RpcError::InvalidParams {
+            return Err(RpcError::InvalidParams {
             reason:
                 "lem_getBlock: first param must be a height (number/string) or hash (hex string)"
                     .into(),
         });
-    };
+        };
 
-    match block_opt {
+    match block_and_hash {
         None => Ok(Value::Null),
-        Some(block) => Ok(serialize_block(&block, include_txs)),
+        Some((block, hash)) => Ok(serialize_block(&block, include_txs, hash)),
     }
 }
 
@@ -106,14 +110,19 @@ pub fn get_logs(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError> 
 
     let filter = arr.first().cloned().unwrap_or(json!({}));
 
-    let from_block = filter.get("fromBlock").and_then(Value::as_u64).unwrap_or(0);
+    // Parse fromBlock/toBlock: absent → default (0 / chain tip); present-but-
+    // non-integer → InvalidParams (silent coercion to 0 would silently scan
+    // from genesis on malformed input — AGENTS §15.2 validate at boundary).
+    let from_block = parse_optional_block_height(&filter, "fromBlock")?;
 
     let chain = ChainStore::new(&handle.db);
 
-    let to_block = filter
-        .get("toBlock")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| chain.latest_height().ok().flatten().unwrap_or(0));
+    let to_block = match filter.get("toBlock") {
+        None => chain.latest_height()?.unwrap_or(0),
+        Some(v) => v.as_u64().ok_or_else(|| RpcError::InvalidParams {
+            reason: "toBlock must be a non-negative integer".into(),
+        })?,
+    };
 
     // Bound the scan to prevent DoS (max 1000 blocks per call).
     const MAX_LOG_RANGE: u64 = 1_000;
@@ -125,20 +134,24 @@ pub fn get_logs(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError> 
         .map(parse_address)
         .transpose()?;
 
-    let filter_topics: Vec<lemma_core::hash::Hash> = filter
-        .get("topics")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
+    // Parse topics: any malformed hex entry returns InvalidParams rather than
+    // silently dropping the topic (silent drop would produce wrong results —
+    // the caller's filter would be partially applied without warning).
+    let filter_topics: Vec<lemma_core::hash::Hash> =
+        match filter.get("topics").and_then(Value::as_array) {
+            None => Vec::new(),
+            Some(raw_topics) => raw_topics
+                .iter()
                 .filter_map(Value::as_str)
-                .filter_map(|s| {
+                .map(|s| {
                     parse_hex_hash(s)
-                        .ok()
                         .map(lemma_core::hash::Hash::from_bytes)
+                        .map_err(|_| RpcError::InvalidParams {
+                            reason: format!("invalid topic hex: {s:?}"),
+                        })
                 })
-                .collect()
-        })
-        .unwrap_or_default();
+                .collect::<Result<Vec<_>, _>>()?,
+        };
 
     let mut logs: Vec<Value> = Vec::new();
 
@@ -163,10 +176,24 @@ pub fn get_logs(handle: &NodeHandle, params: &Value) -> Result<Value, RpcError> 
 
 /// Serialize a [`Block`] to JSON.
 ///
+/// `hash` is the canonical block hash as stored in `CF_BLOCK_HASH` — either
+/// the lookup key (by-hash path) or the value computed by
+/// [`ChainStore::get_block_with_hash_by_height`] (by-height path).
+///
 /// When `include_txs` is `false`, transactions are represented as their hash
 /// hex strings only. When `true`, full transaction objects are included.
-fn serialize_block(block: &Block, include_txs: bool) -> Value {
+///
+/// # Infallibility note
+///
+/// `serde_json::to_value(tx)` is used for the full-tx path. `Transaction` is
+/// infallibly `Serialize` (all fields are primitive or serde-derived types with
+/// no custom serializers that can fail), so `unwrap_or(Value::Null)` is safe
+/// here. If serialization ever fails it indicates a bug in the `Transaction`
+/// type, not a runtime condition — the `Value::Null` fallback is a last-resort
+/// guard, not a silent swallow of a real error.
+fn serialize_block(block: &Block, include_txs: bool, hash: lemma_core::hash::Hash) -> Value {
     let txs: Value = if include_txs {
+        // Transaction is infallibly Serialize (all fields are primitive/serde types).
         json!(block
             .transactions
             .iter()
@@ -182,9 +209,7 @@ fn serialize_block(block: &Block, include_txs: bool) -> Value {
 
     json!({
         "height": block.header.height,
-        "hash": format!("0x{}", hex::encode(
-            lemma_core::hash::Hash::zero().as_bytes() // placeholder — real hash from ChainStore
-        )),
+        "hash": format!("0x{}", hex::encode(hash.as_bytes())),
         "parentHash": format!("0x{}", hex::encode(block.header.parent_hash.as_bytes())),
         "timestamp": block.header.timestamp,
         "proposer": block.header.proposer.to_string(),
@@ -232,6 +257,23 @@ fn matches_log_filter(
         }
     }
     true
+}
+
+/// Parse an optional block height from a filter object.
+///
+/// - Key absent → `Ok(0)` (default to genesis / chain tip depending on caller).
+/// - Key present, value is a non-negative integer → `Ok(value)`.
+/// - Key present, value is not a non-negative integer → `Err(InvalidParams)`.
+///
+/// This prevents malformed input (e.g. `"fromBlock": "latest"`) from silently
+/// coercing to 0 and scanning from genesis (AGENTS §15.2 — validate at boundary).
+fn parse_optional_block_height(filter: &Value, key: &str) -> Result<u64, RpcError> {
+    match filter.get(key) {
+        None => Ok(0),
+        Some(v) => v.as_u64().ok_or_else(|| RpcError::InvalidParams {
+            reason: format!("{key} must be a non-negative integer"),
+        }),
+    }
 }
 
 /// Parse a block height from a decimal or `0x`-prefixed hex string.

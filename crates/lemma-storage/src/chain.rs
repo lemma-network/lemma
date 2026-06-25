@@ -194,6 +194,34 @@ impl<'a> ChainStore<'a> {
         ))
     }
 
+    /// Retrieve the block at `height` together with its canonical hash, or
+    /// `None` if no block has been committed at that height.
+    ///
+    /// The hash is computed from the stored serialized bytes using the same
+    /// `serde_json` + `blake3` convention as `ChainStore::put_block` and
+    /// `lemma-node::sync::compute_block_hash` (AGENTS §2 — one canonical hash
+    /// function per concern; the hash is derived from the same bytes that were
+    /// stored, so it is always consistent with the `CF_BLOCK_HASH` key).
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::SerializationFailed`] — stored bytes are not a valid
+    ///   `Block` (indicates DB corruption).
+    /// - [`StorageError::Database`] — RocksDB I/O error.
+    pub fn get_block_with_hash_by_height(
+        &self,
+        height: u64,
+    ) -> Result<Option<(Block, Hash)>, StorageError> {
+        let Some(bytes) = self.db.get(CF_BLOCKS, &height.to_be_bytes())? else {
+            return Ok(None);
+        };
+        let block: Block = serde_json::from_slice(&bytes).map_err(StorageError::from)?;
+        // Compute the canonical hash from the stored bytes — same convention as
+        // put_block (serde_json serialization → blake3 hash).
+        let hash = lemma_crypto::hash_bytes(&bytes);
+        Ok(Some((block, hash)))
+    }
+
     /// Retrieve the block with `hash`, or `None` if not found.
     ///
     /// # Errors

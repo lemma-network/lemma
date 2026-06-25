@@ -148,16 +148,21 @@ fn get_storage_at_missing_slot_returns_error() {
 
 // ── lem_call ─────────────────────────────────────────────────────────────────
 
+/// `lem_call` is intentionally unimplemented (tracked as lem_call-stub-1).
+/// It must return `RpcError::Unsupported` — NOT a misleading stub response —
+/// so callers can detect the gap without treating it as a successful empty call.
 #[tokio::test]
-async fn call_returns_stub_response() {
+async fn call_returns_unsupported_error() {
     let (db, _dir) = open_temp_db();
     let handle = make_test_handle(db);
     let addr = Address::zero();
-    let result = call(&handle, &json!([{ "to": addr_hex(&addr), "data": "0x" }]))
+    let err = call(&handle, &json!([{ "to": addr_hex(&addr), "data": "0x" }]))
         .await
-        .expect("call must succeed");
-    assert_eq!(result["returnData"], "0x");
-    assert_eq!(result["simulated"], true);
+        .unwrap_err();
+    assert!(
+        matches!(err, crate::error::RpcError::Unsupported { ref method, .. } if method == "lem_call"),
+        "expected Unsupported(lem_call), got: {err:?}"
+    );
 }
 
 #[tokio::test]

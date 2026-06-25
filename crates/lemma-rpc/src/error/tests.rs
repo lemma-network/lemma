@@ -58,6 +58,30 @@ fn internal_error_maps_to_minus_32603() {
     assert_eq!(e.code(), CODE_INTERNAL_ERROR);
 }
 
+// ── RpcError::Unsupported ─────────────────────────────────────────────────────
+
+#[test]
+fn unsupported_maps_to_method_not_found_code() {
+    // Unsupported maps to -32601 (MethodNotFound) so callers can detect
+    // deferred stubs without treating them as internal errors.
+    let e = RpcError::Unsupported {
+        method: "lem_call".into(),
+        reason: "VM simulation not yet implemented".into(),
+    };
+    assert_eq!(e.code(), CODE_METHOD_NOT_FOUND);
+}
+
+#[test]
+fn unsupported_displays_method_and_reason() {
+    let e = RpcError::Unsupported {
+        method: "lem_call".into(),
+        reason: "tracked as lem_call-stub-1".into(),
+    };
+    let s = e.to_string();
+    assert!(s.contains("lem_call"), "display must include method name");
+    assert!(s.contains("lem_call-stub-1"), "display must include reason");
+}
+
 // ── Display ───────────────────────────────────────────────────────────────────
 
 #[test]
