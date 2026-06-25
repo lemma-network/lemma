@@ -36,6 +36,12 @@ futures = { workspace = true }
 # Internal dependencies
 lemma-core = { path = "../lemma-core" }
 
+[features]
+# Expose test-only constructors (e.g. NetworkHandle::new_for_test) for use in
+# integration tests in other crates (lemma-rpc, lemma-node). Never enable in
+# production builds.
+test-utils = []
+
 [dev-dependencies]
 # #[tokio::test] for behaviour/tests.rs (build_behaviour requires a tokio runtime
 # because mdns::tokio::Behaviour spawns Tokio tasks internally).

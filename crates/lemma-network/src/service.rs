@@ -482,6 +482,22 @@ impl NetworkHandle {
             ))
         })
     }
+
+    /// Construct a `NetworkHandle` from a raw mpsc sender.
+    ///
+    /// **For testing only.** Production code must use [`NetworkService::new`]
+    /// which builds the full swarm. This constructor allows unit tests in
+    /// `lemma-rpc` and other crates to create a handle without a running
+    /// network service.
+    ///
+    /// Enable via the `test-utils` feature in `Cargo.toml`:
+    /// ```toml
+    /// lemma-network = { path = "...", features = ["test-utils"] }
+    /// ```
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_test(command_tx: mpsc::Sender<NetworkCommand>) -> Self {
+        Self { command_tx }
+    }
 }
 
 // ── NetworkService ────────────────────────────────────────────────────────────

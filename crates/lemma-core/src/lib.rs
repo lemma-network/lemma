@@ -40,6 +40,13 @@ pub mod epoch;
 pub mod error;
 /// Feature-gate types for epoch-boundary upgrade activation (P3·Step 20, DB-A63).
 pub mod feature_gate;
+/// Gas primitives shared across VM, RPC, and mempool (AGENTS §2.4).
+///
+/// [`Gas`] and [`GasSchedule`] live here so that `lemma-rpc` (fee estimation)
+/// and `lemma-mempool` (base-fee checks) can import them without depending on
+/// `lemma-vm`. The metering machinery ([`GasMeter`] trait, [`FuelMeter`] impl)
+/// remains in `lemma-vm` because it depends on [`VmError`].
+pub mod gas;
 pub mod genesis;
 pub mod hash;
 pub mod header;
@@ -60,6 +67,7 @@ pub use agent::{
 };
 pub use amount::{Amount, DRIPS_PER_LEM, DROPS_PER_DRIP, DROPS_PER_LEM};
 pub use feature_gate::{FeatureId, FEATURE_HOST_ABI_V2};
+pub use gas::{Gas, GasSchedule};
 pub use hash::Hash;
 pub use limits::MAX_CONTRACT_WASM_SIZE;
 pub use signature::Signature;

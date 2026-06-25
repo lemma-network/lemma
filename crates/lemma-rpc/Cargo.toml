@@ -5,8 +5,25 @@ edition = "2021"
 description = "JSON-RPC and WebSocket server for Lemma: lem_* methods, subscriptions"
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-lemma-core = { path = "../lemma-core" }
+lemma-core    = { path = "../lemma-core" }
+lemma-storage = { path = "../lemma-storage" }
+lemma-mempool = { path = "../lemma-mempool" }
+lemma-vm      = { path = "../lemma-vm" }
+lemma-network = { path = "../lemma-network" }
+lemma-crypto  = { path = "../lemma-crypto" }
+axum          = { workspace = true }
+tower-http    = { workspace = true }
+tokio         = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+tracing       = { workspace = true }
+thiserror     = { workspace = true }
+hex           = { workspace = true }
+
+[dev-dependencies]
+tokio         = { workspace = true, features = ["test-util"] }
+tempfile      = { workspace = true }
+lemma-network = { path = "../lemma-network", features = ["test-utils"] }
+lemma-storage = { path = "../lemma-storage" }
+lemma-mempool = { path = "../lemma-mempool" }
+lemma-core    = { path = "../lemma-core" }
