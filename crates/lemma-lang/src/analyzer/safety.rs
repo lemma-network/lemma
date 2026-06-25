@@ -49,8 +49,9 @@ use super::rules;
 /// **Batch 3 (4f-tax)**: SAFETY-020, SAFETY-021, SAFETY-022 (TaxToken fee-model) — active.
 /// **Batch 3 (4f-launch)**: SAFETY-023 (maxWallet) + P3-own-3 (a)(c) — active. SAFETY-024 RETIRED (DB-A57).
 /// **Batch 4 (4g)**: SAFETY-025 (sell-path external-call revert veto) — active.
-/// **P3·Step 11**: SAFETY-015 (policy-mutation owner-gating), SAFETY-016 (no agent re-grant) — active.
-///   SAFETY-014/017 (stubs — Batch 2), SAFETY-018/019 (stubs — Batch 3).
+/// **P3·Step 11**: SAFETY-014..019 (agent-safety rules) — all six active.
+///   SAFETY-014 (bounded effects), SAFETY-015 (owner-gating), SAFETY-016 (no re-grant),
+///   SAFETY-017 (kill-switch gate), SAFETY-018 (co-sign integrity), SAFETY-019 (anomaly determinism).
 /// SAFETY-013 retired per decision DB-A48 (auto-injected by codegen).
 ///
 /// ## Caller
@@ -94,13 +95,13 @@ pub fn analyze_safety(contract: &TypedContract<'_>) -> Result<(), Vec<SafetyErro
     // SAFETY-025: any external call on the transfer path must be try-wrapped.
     violations.extend(rules::sell_path_veto::check(contract)); // SAFETY-025
 
-    // Phase 3 Track C (P3·Step 11): agent-safety rules.
-    // SAFETY-014: @agentCallable bounded effects (stub — Batch 2).
-    // SAFETY-015: policy-mutation functions must be @onlyOwner-gated.
-    // SAFETY-016: @agentCallable functions must not call grant functions.
-    // SAFETY-017: kill-switch honored (stub — Batch 2).
-    // SAFETY-018: co-sign threshold integrity (stub — Batch 3).
-    // SAFETY-019: deterministic anomaly inputs (stub — Batch 3).
+    // Phase 3 Track C (P3·Step 11): agent-safety rules — ALL SIX IMPLEMENTED.
+    // SAFETY-014: @agentCallable bounded effects (declaration-forcing: maxValueOut + loop-transfer).
+    // SAFETY-015: policy-mutation functions must be @onlyOwner-gated (call-graph reachability).
+    // SAFETY-016: @agentCallable functions must not call grant functions (call-graph reachability).
+    // SAFETY-017: kill-switch honored (declaration-forcing: agent-state access without @agentCallable).
+    // SAFETY-018: co-sign threshold integrity (declaration-forcing: owner-key verification).
+    // SAFETY-019: deterministic anomaly inputs (declaration-forcing: on-chain state only).
     violations.extend(rules::agent::check(contract)); // SAFETY-014..019
 
     if violations.is_empty() {

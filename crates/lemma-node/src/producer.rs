@@ -104,7 +104,7 @@ impl Default for ProducerConfig {
 ///   (e.g. `gas_limit = 0` in the parent; would indicate DB corruption).
 /// - [`NodeError::Core`] — base-fee arithmetic overflowed (unreachable given
 ///   the LEM supply cap, but propagated per AGENTS.md §7.4).
-/// - [`NodeError::Serialization`] — `bincode` encoding of the block failed.
+/// - [`NodeError::Serialization`] — `serde_json` encoding of the block failed.
 ///
 /// [`init_chain`]: crate::genesis_boot::init_chain
 pub fn build_next_block(

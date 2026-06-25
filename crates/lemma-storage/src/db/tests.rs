@@ -84,6 +84,40 @@ fn open_regular_file_path_produces_database_error() {
     );
 }
 
+#[test]
+fn from_rocksdb_error_produces_database_variant() {
+    // Prove that `From<rocksdb::Error>` maps to `StorageError::Database` and
+    // preserves the error message.  `rocksdb::Error` has no public constructor,
+    // so we trigger a real one by opening a regular file as a DB path.
+    let dir = tempdir().expect("tempdir creation must succeed");
+    let file_path = dir.path().join("not_a_db.txt");
+    std::fs::write(&file_path, b"not a database").expect("test file write must succeed");
+
+    // rocksdb::DB::open produces a rocksdb::Error for a non-directory path.
+    let opts = rocksdb::Options::default();
+    let rocksdb_result = rocksdb::DB::open(&opts, &file_path);
+    assert!(rocksdb_result.is_err(), "opening a file should fail");
+
+    let rocksdb_err = rocksdb_result.unwrap_err();
+    let expected_msg = rocksdb_err.to_string();
+
+    // Exercise the From<rocksdb::Error> impl directly.
+    let storage_err = StorageError::from(rocksdb_err);
+    match &storage_err {
+        StorageError::Database { reason } => {
+            assert!(
+                !reason.is_empty(),
+                "Database reason should preserve the RocksDB error message"
+            );
+            assert_eq!(
+                reason, &expected_msg,
+                "Database reason should match the original rocksdb::Error Display"
+            );
+        }
+        other => panic!("expected StorageError::Database, got: {other:?}"),
+    }
+}
+
 // ── Column families — all 9 reachable ────────────────────────────────────────
 
 #[test]

@@ -260,7 +260,7 @@ impl LemmaDb {
     /// # Errors
     ///
     /// Returns [`StorageError::ColumnFamilyNotFound`] if `cf_name` is not one
-    /// of the 8 registered column family constants.
+    /// of the 9 registered column family constants.
     pub fn batch_put(
         &self,
         batch: &mut WriteBatch,
@@ -281,7 +281,7 @@ impl LemmaDb {
     /// # Errors
     ///
     /// Returns [`StorageError::ColumnFamilyNotFound`] if `cf_name` is not one
-    /// of the 8 registered column family constants.
+    /// of the 9 registered column family constants.
     pub fn batch_delete(
         &self,
         batch: &mut WriteBatch,

@@ -564,10 +564,9 @@ fn from_bincode_error_preserves_error_message() {
 // ── From<rocksdb::Error> — integration note ───────────────────────────────────
 //
 // `rocksdb::Error` has no public constructor, so From<rocksdb::Error> is
-// tested in db/tests.rs where a real DB open failure produces one naturally
-// (e.g. opening a path that is a regular file, not a directory).
-// TODO(dev): add from_rocksdb_error_produces_database_variant test in
-// db/tests.rs once the RocksDB wrapper exists — issue #3
+// tested in db/tests.rs where a real DB open failure produces one naturally.
+// See `db/tests.rs::open_regular_file_path_produces_database_error` (issue #3
+// closed).
 
 // ── Cross-variant PartialEq — database group ──────────────────────────────────
 

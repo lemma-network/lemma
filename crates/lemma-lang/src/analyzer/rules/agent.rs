@@ -116,7 +116,7 @@ const TRANSFER_CALL_NAMES: &[&str] = &[
 // Canonical contract-storage field names for agent-policy state.
 // Naming convention pinned here (not in 14-AGENT_LAYER §2 which defines the
 // *policy value* struct, not the contract storage identifiers).
-// TODO(spec): add a decisions-log entry declaring these as the canonical names.
+// Decision: DB-A69 (canonical AGENT_STATE_FIELDS names).
 const AGENT_STATE_FIELDS: &[&str] = &[
     // Core policy storage (14-AGENT_LAYER §2.1)
     "agentPolicies",
