@@ -74,6 +74,25 @@ fn charge_fuel<T>(caller: &mut Caller<'_, T>, cost: u64) -> Result<(), wasmtime:
     caller.set_fuel(new_remaining)
 }
 
+// ── Cross-contract call unwind helper (V-5 DRY extraction) ───────────────────
+
+/// Unwind a cross-contract call: `exit_call` + sync FuelMeter → Store fuel.
+///
+/// Called on every early-return path in [`dispatch_call`] after a successful
+/// `enter_call`. Consolidates the 5 repeated `exit_call → sync fuel` sites
+/// into one correct implementation (V-5 audit fix, AGENTS §2.1 DRY).
+///
+/// The settlement contract is preserved: the caller's call context is cleaned
+/// up and Store fuel reflects the FuelMeter's remaining budget.
+fn unwind_call<S: ContractStateView + 'static>(
+    caller: &mut Caller<'_, HostState<S>>,
+    addr: &Address,
+) -> Result<(), wasmtime::Error> {
+    caller.data_mut().call_ctx.exit_call(addr);
+    let remaining = caller.data().meter.remaining();
+    caller.set_fuel(remaining.as_u64())
+}
+
 // ── Memory marshalling helpers (private, DRY core — AGENTS §2) ───────────────
 
 /// Resolve the guest's exported `"memory"`. Trap if absent (ABI invariant).
@@ -231,9 +250,7 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
     // Charge call_base gas (AGENTS §7.5: charge before execute).
     let call_base = caller.data().schedule.call_base;
     if let Err(e) = caller.data_mut().meter.charge(call_base) {
-        caller.data_mut().call_ctx.exit_call(&addr);
-        let remaining = caller.data().meter.remaining();
-        caller.set_fuel(remaining.as_u64())?;
+        unwind_call(caller, &addr)?;
         return Err(wasmtime::Error::msg(e.to_string()));
     }
 
@@ -242,9 +259,7 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
     let requested = Gas::new(gas.max(0) as u64);
     let to_callee = requested.min(forwardable);
     if let Err(e) = caller.data_mut().meter.charge(to_callee) {
-        caller.data_mut().call_ctx.exit_call(&addr);
-        let remaining = caller.data().meter.remaining();
-        caller.set_fuel(remaining.as_u64())?;
+        unwind_call(caller, &addr)?;
         return Err(wasmtime::Error::msg(e.to_string()));
     }
 
@@ -253,9 +268,7 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
         Some(b) => b,
         None => {
             // No contract at addr — exit cleanly, return -1 (callee error).
-            caller.data_mut().call_ctx.exit_call(&addr);
-            let remaining = caller.data().meter.remaining();
-            caller.set_fuel(remaining.as_u64())?;
+            unwind_call(caller, &addr)?;
             return Ok(-1_i32);
         }
     };
@@ -269,9 +282,7 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
     let module = match engine.compile_module(&bytecode) {
         Ok(m) => m,
         Err(e) => {
-            caller.data_mut().call_ctx.exit_call(&addr);
-            let remaining = caller.data().meter.remaining();
-            caller.set_fuel(remaining.as_u64())?;
+            unwind_call(caller, &addr)?;
             return Err(wasmtime::Error::msg(e.to_string()));
         }
     };
@@ -360,23 +371,15 @@ fn dispatch_call<S: ContractStateView + Clone + 'static>(
                 .registers
                 .insert(RETURN_DATA_REGISTER, callee_after.return_data);
 
-            // Exit call context.
-            caller.data_mut().call_ctx.exit_call(&addr);
-
-            // Sync up: FuelMeter → Store fuel.
-            let remaining = caller.data().meter.remaining();
-            caller.set_fuel(remaining.as_u64())?;
+            // Unwind call context + sync fuel (V-5 DRY helper).
+            unwind_call(caller, &addr)?;
 
             Ok(RETURN_DATA_REGISTER as i32)
         }
         Err(_e) => {
             // Callee failed (OOG, trap, etc.) — discard callee state.
             // Caller continues with its own state unchanged.
-            caller.data_mut().call_ctx.exit_call(&addr);
-
-            // Sync up: FuelMeter → Store fuel.
-            let remaining = caller.data().meter.remaining();
-            caller.set_fuel(remaining.as_u64())?;
+            unwind_call(caller, &addr)?;
 
             Ok(-1_i32) // callee error sentinel
         }
