@@ -11,7 +11,7 @@
 //! D·15b-3: `build_block_from_commit_sets_quorum_cert` — block has Some(qc)
 //! with correct height, header_digest, signer count.
 //! `build_block_from_commit_quorum_cert_signature_verifiable` — QC sig verifies
-//! against header_digest using keypair's public key.
+//! against `commit_ack_message(height, &header_digest)` using keypair's public key.
 //!
 //! AGENTS §11: separate tests.rs, `{action}_{outcome}` naming, AAA pattern.
 
@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, RwLock};
 
-use lemma_consensus::{commit::Commit, dag::block::DagBlockRef};
+use lemma_consensus::{commit::Commit, commit_ack::commit_ack_message, dag::block::DagBlockRef};
 use lemma_core::{
     address::Address,
     amount::Amount,
@@ -421,7 +421,9 @@ fn build_block_from_commit_sets_quorum_cert() {
 /// D·15b-3: The signature in the QC is verifiable against the proposer's public key.
 ///
 /// Extracts `header_digest` and the `Signature::Hybrid` from the QC, reconstructs
-/// a `HybridSignature`, and calls `lemma_crypto::verify` over `header_digest.as_bytes()`.
+/// a `HybridSignature`, and calls `lemma_crypto::verify` over the domain-separated
+/// `commit_ack_message(height, &header_digest)` — the canonical signed message for
+/// all QC signers (P4·Step 9 fix: single-signer and multi-signer QCs are homogeneous).
 #[test]
 fn build_block_from_commit_quorum_cert_signature_verifiable() {
     use lemma_core::signature::Signature;
@@ -455,11 +457,13 @@ fn build_block_from_commit_quorum_cert_signature_verifiable() {
         other => panic!("expected Hybrid signature in QC, got {:?}", other),
     };
 
-    // Reconstruct HybridSignature and verify against header_digest.
-    // sign_to_lemma() signs `header_digest.as_bytes()`; we verify the same payload.
+    // Reconstruct HybridSignature and verify against the domain-separated message.
+    // build_block_from_commit signs `commit_ack_message(height, &header_digest)` —
+    // the SAME message CertifiedVerifier and CommitAckAccumulator use (P4·Step 9).
+    let signed_msg = commit_ack_message(qc.height, &qc.header_digest);
     let hybrid = HybridSignature { classical, quantum };
-    verify(&pk, qc.header_digest.as_bytes(), &hybrid)
-        .expect("QC signature must verify against header_digest using proposer's public key");
+    verify(&pk, &signed_msg, &hybrid)
+        .expect("QC signature must verify against commit_ack_message using proposer's public key");
 }
 
 /// F-6 / C-1: produce == verify == canonical method.
@@ -531,9 +535,11 @@ async fn run_dag_driver_produces_chain_block_from_dag_consensus() {
             Some(block_tx),
             None, // no dag_block_tx needed for this test
             None, // no batch_tx needed for this test
+            None, // no commit_ack_tx needed for this test (P4·Step 9)
             write_lock_clone,
             shutdown_rx,
             None, // no incoming_dag_block_rx in single-node mode
+            None, // no incoming_commit_ack_rx in single-node mode (P4·Step 9)
         )
         .await
     });
@@ -602,9 +608,11 @@ async fn run_dag_driver_chain_block_height_matches_commit_index() {
             Some(block_tx),
             None,
             None,
+            None, // commit_ack_tx (P4·Step 9)
             wl_clone,
             shutdown_rx,
             None,
+            None, // incoming_commit_ack_rx (P4·Step 9)
         )
         .await;
     });
@@ -816,9 +824,11 @@ async fn run_dag_driver_executes_transfer_and_changes_state_root() {
             Some(block_tx),
             None,
             None,
+            None, // commit_ack_tx (P4·Step 9)
             wl_clone,
             shutdown_rx,
             None,
+            None, // incoming_commit_ack_rx (P4·Step 9)
         )
         .await;
     });
@@ -927,9 +937,11 @@ async fn run_dag_driver_processes_peer_block_via_channel() {
             Some(block_tx),
             None,
             None,
+            None, // commit_ack_tx (P4·Step 9)
             wl_clone,
             shutdown_rx,
             Some(incoming_rx),
+            None, // incoming_commit_ack_rx (P4·Step 9)
         )
         .await
     });

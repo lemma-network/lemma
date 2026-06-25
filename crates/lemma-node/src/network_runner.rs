@@ -12,6 +12,7 @@
 //! | `TransactionReceived` | Convert ConsensusKey→PublicKey; `Mempool::admit` (D·15d) |
 //! | `DagProposalReceived` | Decode → DagBlock; verify hybrid sig; forward `(block, sig_ok)` to dag_driver |
 //! | `BatchReceived` | Decode → Batch; verify per-tx hash + sig gate (D·15d); pin in BatchStore |
+//! | `CommitAckReceived` | Decode → CommitAckPayload; verify hybrid sig; forward `(ack, sig_ok)` to dag_driver (P4·Step 9) |
 //! | `PeerConnected` / `PeerDisconnected` | Log peer lifecycle |
 //! | `ListeningOn` | Log local listen address |
 //!
@@ -68,7 +69,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-use lemma_consensus::dag::block::DagBlock;
+use lemma_consensus::{commit_ack::CommitAckPayload, dag::block::DagBlock};
 use lemma_core::{block::Block, signature::Signature, validator_set::ValidatorSet};
 use lemma_crypto::{verify as verify_hybrid, HybridSignature, PublicKey};
 use lemma_mempool::pool::Mempool;
@@ -132,7 +133,7 @@ const SYNC_RETRY_INTERVAL_MS: u64 = 5_000;
 ///
 /// Returns [`NodeError`] if a `SendRangeResponse` command dispatch fails.
 /// Apply errors from structural verify failure are logged and non-fatal.
-#[allow(clippy::too_many_arguments)] // 9 params: db + mempool + batch_store + handle + write_lock + event_rx + shutdown + vset + dag_block_tx; no natural grouping without a dedicated context struct (deferred to Phase 3 refactor)
+#[allow(clippy::too_many_arguments)] // 10 params: db + mempool + batch_store + handle + write_lock + event_rx + shutdown + vset + dag_block_tx + commit_ack_tx; no natural grouping without a dedicated context struct (deferred to Phase 3 refactor)
 pub async fn run_network_dispatch(
     db: Arc<LemmaDb>,
     mempool: Arc<RwLock<Mempool>>,
@@ -143,6 +144,10 @@ pub async fn run_network_dispatch(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     vset: ValidatorSet,
     incoming_dag_block_tx: Option<mpsc::Sender<(DagBlock, bool)>>,
+    // Channel for forwarding decoded + sig-verified `CommitAckPayload`s to
+    // the DAG driver (P4·Step 9). Pass `None` in single-node mode or tests
+    // that don't need commit-ack gossip.
+    incoming_commit_ack_tx: Option<mpsc::Sender<(CommitAckPayload, bool)>>,
 ) -> Result<(), NodeError> {
     let verifier = CertifiedVerifier::new(vset.clone());
     let mut tracker = SyncTracker::new();
@@ -159,7 +164,7 @@ pub async fn run_network_dispatch(
                         handle_network_event(
                             e, &db, &mempool, &batch_store, &handle,
                             &write_lock, &verifier, &mut tracker,
-                            &vset, &incoming_dag_block_tx,
+                            &vset, &incoming_dag_block_tx, &incoming_commit_ack_tx,
                         ).await?;
                     }
                     None => {
@@ -232,9 +237,50 @@ pub async fn run_block_broadcaster(
     }
 }
 
+// ── run_commit_ack_broadcaster ────────────────────────────────────────────────
+
+/// Forward own commit-ack bytes from the dag_driver to the gossip mesh
+/// (P4·Step 9 — multi-signer QuorumCert).
+///
+/// Drains `commit_ack_rx` (JSON-encoded `CommitAckPayload` bytes produced by
+/// `dag_driver`) and calls `NetworkHandle::broadcast_commit_ack` to publish on
+/// `lemma/commit-ack/1`. Same pattern as `run_batch_broadcaster` (C·Step 14).
+///
+/// Non-fatal: broadcast failures are logged at `debug` and the loop continues.
+pub async fn run_commit_ack_broadcaster(
+    handle: NetworkHandle,
+    mut commit_ack_rx: mpsc::Receiver<Vec<u8>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            bytes = commit_ack_rx.recv() => {
+                match bytes {
+                    Some(b) => {
+                        if let Err(e) = handle.broadcast_commit_ack(b).await {
+                            debug!(error = %e, "broadcast_commit_ack failed (non-fatal)");
+                        }
+                    }
+                    None => {
+                        info!("network_runner: commit_ack channel closed — stopping broadcaster");
+                        break;
+                    }
+                }
+            }
+
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    info!("network_runner: shutdown — stopping commit-ack broadcaster");
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // ── Event handlers ────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)] // 10 params: event + shared-state refs + DAG dispatch; no natural grouping
+#[allow(clippy::too_many_arguments)] // 11 params: event + shared-state refs + DAG dispatch + commit-ack; no natural grouping
 async fn handle_network_event(
     event: NetworkEvent,
     db: &Arc<LemmaDb>,
@@ -246,6 +292,7 @@ async fn handle_network_event(
     tracker: &mut SyncTracker,
     vset: &ValidatorSet,
     incoming_dag_block_tx: &Option<mpsc::Sender<(DagBlock, bool)>>,
+    incoming_commit_ack_tx: &Option<mpsc::Sender<(CommitAckPayload, bool)>>,
 ) -> Result<(), NodeError> {
     match event {
         // ── Block received (gossip or range-response fan-out) ─────────────────
@@ -338,6 +385,22 @@ async fn handle_network_event(
             batch_bytes,
         } => {
             handle_batch_fetch_response(from, digest, batch_bytes, batch_store).await;
+        }
+
+        // ── Inbound commit-ack — decode + sig-verify + forward (P4·Step 9) ──
+        //
+        // 1. Decode JSON bytes → CommitAckPayload.
+        // 2. Look up signer in vset → ConsensusKey → PublicKey.
+        // 3. Verify hybrid signature (Ed25519 + ML-DSA-65) over the
+        //    domain-separated message: blake3(b"commit-ack" || height_le || digest).
+        //    Unknown signer or Signature::Unsigned → sig_ok = false.
+        // 4. Forward (ack, sig_ok) to dag_driver via incoming_commit_ack_tx.
+        //
+        // B3-2 pattern: consensus never calls lemma-crypto directly.
+        // All failure paths log + continue — no crash on malformed peer input
+        // (AGENTS §7.2 / spec 12 §1.2).
+        NetworkEvent::CommitAckReceived { from, bytes } => {
+            handle_commit_ack_received(from, bytes, vset, incoming_commit_ack_tx).await;
         }
 
         // ── Peer lifecycle ────────────────────────────────────────────────────
@@ -1008,6 +1071,114 @@ async fn handle_batch_fetch_response(
         tx_count,
         "batch_fetch: batch pinned from fetch response"
     );
+}
+
+// ── Commit-ack handler (P4·Step 9) ───────────────────────────────────────────
+
+/// Decode, sig-verify, and forward an inbound commit-ack (P4·Step 9).
+///
+/// ## Verification
+///
+/// 1. **Decode**: JSON bytes → `CommitAckPayload`. Malformed bytes → drop + warn.
+/// 2. **Signer lookup**: `vset.members.get(&ack.signer)` → `ConsensusKey`.
+///    Unknown signer → `sig_ok = false` (not a crash).
+/// 3. **Signature check**: only `Signature::Hybrid` is valid for consensus.
+///    `Signature::Unsigned` or `Signature::Classical` → `sig_ok = false`.
+///    Hybrid sig verified via `lemma_crypto::verify` over the domain-separated
+///    message: `blake3(b"commit-ack" || height_le_u64 || header_digest)`.
+/// 4. **Forward**: `(ack, sig_ok)` sent to `incoming_commit_ack_tx`.
+///    Channel full → warn + drop (non-fatal; peer can re-gossip).
+///    No channel wired → log only (single-node mode).
+///
+/// ## No panics (AGENTS §7.2)
+///
+/// All failure paths return `()` after logging. A crafted payload must never
+/// crash the node.
+async fn handle_commit_ack_received(
+    from: libp2p::PeerId,
+    bytes: Vec<u8>,
+    vset: &ValidatorSet,
+    incoming_commit_ack_tx: &Option<mpsc::Sender<(CommitAckPayload, bool)>>,
+) {
+    use lemma_consensus::commit_ack::commit_ack_message;
+
+    // ── 1. Decode JSON → CommitAckPayload ────────────────────────────────────
+    let ack: CommitAckPayload = match serde_json::from_slice(&bytes) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(
+                peer  = %from,
+                error = %e,
+                "CommitAckReceived: JSON decode failed — ack dropped"
+            );
+            return;
+        }
+    };
+
+    // ── 2. Signer lookup + sig verification ──────────────────────────────────
+    // Unknown signer → sig_ok = false (not in current epoch's committee).
+    // Signature::Unsigned or non-Hybrid → sig_ok = false (invalid for consensus).
+    let sig_ok = match vset.members.get(&ack.signer) {
+        None => {
+            debug!(
+                peer   = %from,
+                signer = %ack.signer,
+                height = ack.height,
+                "CommitAckReceived: signer not in validator set — sig_ok=false"
+            );
+            false
+        }
+        Some(member) => {
+            // Compute the domain-separated message the signer should have signed.
+            let msg = commit_ack_message(ack.height, &ack.header_digest);
+
+            // Convert ConsensusKey → PublicKey for crypto verification.
+            let pk = PublicKey::from(member.consensus_pubkey.clone());
+            match &ack.signature {
+                Signature::Hybrid { classical, quantum } => {
+                    let hybrid = HybridSignature {
+                        classical: classical.clone(),
+                        quantum: quantum.clone(),
+                    };
+                    verify_hybrid(&pk, &msg, &hybrid).is_ok()
+                }
+                // Unsigned or Classical-only = invalid for consensus.
+                _ => {
+                    debug!(
+                        peer   = %from,
+                        signer = %ack.signer,
+                        height = ack.height,
+                        "CommitAckReceived: non-Hybrid signature — sig_ok=false"
+                    );
+                    false
+                }
+            }
+        }
+    };
+
+    debug!(
+        peer    = %from,
+        signer  = %ack.signer,
+        height  = ack.height,
+        sig_ok,
+        "commit-ack received from peer"
+    );
+
+    // ── 3. Forward to dag_driver ──────────────────────────────────────────────
+    if let Some(ref tx) = incoming_commit_ack_tx {
+        match tx.try_send((ack, sig_ok)) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    peer  = %from,
+                    "CommitAckReceived: incoming_commit_ack channel full — ack dropped (non-fatal)"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                debug!(peer = %from, "CommitAckReceived: dag_driver channel closed — ack dropped");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

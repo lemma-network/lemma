@@ -18,6 +18,7 @@
 //! | `lemma/tx/1` | Pending transactions | Any node or client |
 //! | `lemma/dag/1` | DAG consensus msgs | Validators |
 //! | `lemma/batch/1` | Surge tx batches | Validators (C·Step 14) |
+//! | `lemma/commit-ack/1` | Commit-ack gossip | Validators (P4·Step 9) |
 //!
 //! ## "Gossip is a hint, the QC is the proof" (§2.1)
 //!
@@ -39,7 +40,7 @@ use crate::{config, error::NetworkError, messages::GossipMessage};
 
 // ── GossipTopics ──────────────────────────────────────────────────────────────
 
-/// Pre-built `IdentTopic` handles for all three Lemma gossip topics.
+/// Pre-built `IdentTopic` handles for all Lemma gossip topics.
 ///
 /// Construct once at startup via [`GossipTopics::new`] and pass by reference
 /// to [`subscribe_all`] and [`publish`]. Topics are lightweight but building
@@ -67,6 +68,15 @@ pub struct GossipTopics {
     /// that references them. Peers pin received batches so `TxBatchRef → txs`
     /// resolution succeeds at commit time.
     pub batch: gossipsub::IdentTopic,
+
+    /// gossipsub topic for commit-acknowledgements — `lemma/commit-ack/1` (P4·Step 9).
+    ///
+    /// Validators broadcast a signed `CommitAckPayload` here after committing a
+    /// chain block. Peers accumulate acks until ≥ 2f+1 stake is reached, then
+    /// assemble a multi-signer [`QuorumCert`].
+    ///
+    /// [`QuorumCert`]: lemma_core::QuorumCert
+    pub commit_ack: gossipsub::IdentTopic,
 }
 
 impl GossipTopics {
@@ -77,6 +87,7 @@ impl GossipTopics {
             dag: gossipsub::IdentTopic::new(config::TOPIC_DAG),
             tx: gossipsub::IdentTopic::new(config::TOPIC_TX),
             batch: gossipsub::IdentTopic::new(config::TOPIC_BATCH),
+            commit_ack: gossipsub::IdentTopic::new(config::TOPIC_COMMIT_ACK),
         }
     }
 
@@ -95,6 +106,7 @@ impl GossipTopics {
             t if t == config::TOPIC_TX => &self.tx,
             t if t == config::TOPIC_DAG => &self.dag,
             t if t == config::TOPIC_BATCH => &self.batch,
+            t if t == config::TOPIC_COMMIT_ACK => &self.commit_ack,
             other => {
                 tracing::warn!(
                     topic = other,
@@ -115,7 +127,7 @@ impl Default for GossipTopics {
 
 // ── subscribe_all ─────────────────────────────────────────────────────────────
 
-/// Subscribe this node to all three Lemma gossip topics.
+/// Subscribe this node to all Lemma gossip topics.
 ///
 /// Must be called once after the swarm starts. Both `Ok(true)` (newly
 /// subscribed) and `Ok(false)` (already subscribed — idempotent) are
@@ -135,6 +147,7 @@ pub fn subscribe_all(
         (&topics.dag, config::TOPIC_DAG),
         (&topics.tx, config::TOPIC_TX),
         (&topics.batch, config::TOPIC_BATCH),
+        (&topics.commit_ack, config::TOPIC_COMMIT_ACK),
     ];
 
     for (topic, name) in to_subscribe {

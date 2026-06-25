@@ -14,3 +14,4 @@ lemma-core = { path = "../lemma-core" }
 [dev-dependencies]
 proptest = { workspace = true }
 serde_json = { workspace = true }
+lemma-crypto = { path = "../lemma-crypto" }

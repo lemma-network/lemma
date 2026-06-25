@@ -243,6 +243,7 @@ async fn dispatch_exits_when_event_channel_closes() {
             shutdown_rx,
             empty_vset(),
             None,
+            None, // incoming_commit_ack_tx (P4·Step 9)
         ),
     )
     .await;
@@ -273,6 +274,7 @@ async fn dispatch_exits_on_shutdown_signal() {
             shutdown_rx,
             empty_vset(),
             None,
+            None, // incoming_commit_ack_tx (P4·Step 9)
         ),
     )
     .await;
@@ -320,6 +322,7 @@ async fn dispatch_applies_block_at_tip_plus_one() {
         shutdown_rx,
         empty_vset(),
         None,
+        None, // incoming_commit_ack_tx (P4·Step 9)
     ));
 
     // Poll until height 1 is applied (or deadline).
@@ -385,6 +388,7 @@ async fn dispatch_skips_block_already_in_chain() {
             shutdown_rx,
             empty_vset(),
             None,
+            None, // incoming_commit_ack_tx (P4·Step 9)
         ),
     )
     .await;
@@ -424,6 +428,7 @@ async fn dispatch_handles_peer_connected_without_error() {
             shutdown_rx,
             empty_vset(),
             None,
+            None, // incoming_commit_ack_tx (P4·Step 9)
         ),
     )
     .await;
@@ -480,6 +485,7 @@ async fn dispatch_handles_transaction_received_without_error() {
             shutdown_rx,
             empty_vset(),
             None,
+            None, // incoming_commit_ack_tx (P4·Step 9)
         ),
     )
     .await;

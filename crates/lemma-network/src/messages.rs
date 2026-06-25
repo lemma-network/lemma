@@ -449,6 +449,30 @@ pub enum GossipMessage {
     /// The same 1 MiB [`MAX_GOSSIP_DECODE_BYTES`] guard applies — a batch
     /// approaching this limit is already pathological under gas limits.
     TxBatch(Vec<u8>),
+
+    /// A commit-acknowledgement from a validator, broadcast on [`TOPIC_COMMIT_ACK`]
+    /// (P4·Step 9 — multi-signer QuorumCert).
+    ///
+    /// The payload is a **JSON-serialized `CommitAckPayload`** (opaque `Vec<u8>`
+    /// at the network layer). `lemma-consensus::CommitAckPayload` is defined in
+    /// build layer 6 (consensus), while `lemma-network` is layer 4 — same
+    /// build-order constraint as [`DagProposal`] (AGENTS §8, DB-A12). The node
+    /// layer handles encode/decode.
+    ///
+    /// Published by each validator immediately after it commits a chain block.
+    /// Peers accumulate acks in a [`CommitAckAccumulator`] until ≥ 2f+1 stake
+    /// is reached, then assemble a multi-signer [`QuorumCert`] and attach it
+    /// to the committed block.
+    ///
+    /// Domain separation: the signed message is
+    /// `blake3(b"commit-ack" || height_le_u64 || header_digest)` — prevents
+    /// cross-message replay (AGENTS §7.3).
+    ///
+    /// [`CommitAckPayload`]: (opaque at this layer — decoded in lemma-node)
+    /// [`CommitAckAccumulator`]: (opaque at this layer — in lemma-consensus)
+    /// [`QuorumCert`]: lemma_core::QuorumCert
+    /// [`TOPIC_COMMIT_ACK`]: crate::config::TOPIC_COMMIT_ACK
+    CommitAck(Vec<u8>),
 }
 
 impl GossipMessage {
@@ -463,6 +487,7 @@ impl GossipMessage {
             GossipMessage::NewTransaction { .. } => config::TOPIC_TX,
             GossipMessage::DagProposal(_) => config::TOPIC_DAG,
             GossipMessage::TxBatch(_) => config::TOPIC_BATCH,
+            GossipMessage::CommitAck(_) => config::TOPIC_COMMIT_ACK,
         }
     }
 

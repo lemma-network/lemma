@@ -38,7 +38,7 @@ pub use config::NodeConfig;
 pub use dag_driver::{build_block_from_commit, build_dag_block, run_dag_driver, DagConfig};
 pub use error::NodeError;
 pub use genesis_boot::{init_chain, InitOutcome};
-pub use network_runner::{run_block_broadcaster, run_network_dispatch};
+pub use network_runner::{run_block_broadcaster, run_commit_ack_broadcaster, run_network_dispatch};
 pub use producer::{build_next_block, commit_block, run as run_producer, ProducerConfig};
 pub use shield_orchestrator::{
     apply_withholding_slashes, run_epoch_shield, EpochShieldOutcome, ShieldOrchestratorError,

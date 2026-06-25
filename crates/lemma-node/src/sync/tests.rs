@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
+use lemma_consensus::commit_ack::commit_ack_message;
 use lemma_core::{
     address::Address,
     amount::Amount,
@@ -140,8 +141,11 @@ fn make_block_with_valid_qc(height: u64, parent_hash: Hash, kp: &KeyPair) -> Blo
     // the canonical BlockHeader::digest() (docs/12-NETWORK_SYNC_SPEC §3.2).
     let header_digest = header.digest();
 
-    // Sign the digest with the keypair.
-    let sig = kp.sign_to_lemma(header_digest.as_bytes());
+    // Sign the domain-separated commit-ack message — the SAME message that
+    // build_block_from_commit and CommitAckAccumulator use (P4·Step 9 fix).
+    // CertifiedVerifier verifies against commit_ack_message, not raw header_digest.
+    let signed_msg = commit_ack_message(height, &header_digest);
+    let sig = kp.sign_to_lemma(&signed_msg);
 
     let mut signers = BTreeMap::new();
     signers.insert(*kp.address(), sig);

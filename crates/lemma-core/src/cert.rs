@@ -86,7 +86,12 @@ pub struct QuorumCert {
     /// `BTreeMap` for deterministic iteration (AGENTS.md §7.1). In a
     /// valid cert, all entries satisfy:
     /// - The signer is a member of the committee for this epoch.
-    /// - The signature is valid over `header_digest` (hybrid Ed25519+ML-DSA).
+    /// - The signature is valid over the domain-separated message
+    ///   `blake3(b"commit-ack" || height_le_u64 || header_digest)`,
+    ///   computed by `lemma_consensus::commit_ack::commit_ack_message`.
+    ///   This is the canonical signed message for ALL QC signers — both
+    ///   the initial single-signer QC and multi-signer QCs from gossip
+    ///   (P4·Step 9, AGENTS §7.3 domain separation).
     ///
     /// The verification of both conditions is performed by
     /// `lemma_consensus::cert::verify_quorum_cert` with injected results.

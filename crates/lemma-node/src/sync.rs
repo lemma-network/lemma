@@ -28,9 +28,10 @@
 //!
 //! In Phase 2 (DAG consensus), blocks carry a `QuorumCert` (2f+1 validator
 //! signatures). [`CertifiedVerifier`] extends structural checks with QC
-//! verification: each signer's hybrid signature over `header_digest` is
-//! verified via `lemma-crypto`, and the stake-weighted 2f+1 threshold is
-//! checked via `lemma_consensus::cert::verify_quorum_cert` (B3-2 pattern).
+//! verification: each signer's hybrid signature over the domain-separated
+//! message `commit_ack_message(height, &header_digest)` is verified via
+//! `lemma-crypto`, and the stake-weighted 2f+1 threshold is checked via
+//! `lemma_consensus::cert::verify_quorum_cert` (B3-2 pattern).
 //!
 //! Blocks with `quorum_cert: None` are accepted (Phase-1 range-sync compat).
 //! Blocks with an invalid QC return [`VerifyError::QuorumCertInvalid`], which
@@ -49,7 +50,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use lemma_consensus::cert::verify_quorum_cert;
+use lemma_consensus::{cert::verify_quorum_cert, commit_ack::commit_ack_message};
 use lemma_core::{
     address::Address, block::Block, error::BlockError, hash::Hash, signature::Signature,
     validator_set::ValidatorSet,
@@ -265,10 +266,16 @@ impl BlockVerifier for StructuralVerifier {
 /// Phase-2 block verifier — structural checks + QuorumCert 2f+1 verification.
 ///
 /// Implements the DB-A15b commit-cert model: each signer in `qc.signers`
-/// explicitly signed `BlockHeader.digest()` at commit time. Verification:
+/// explicitly signed the domain-separated message
+/// `commit_ack_message(height, &header_digest)` =
+/// `blake3(b"commit-ack" || height_le || header_digest)` at commit time.
+/// This is the canonical signed message for ALL QC signers — both the initial
+/// single-signer QC from `build_block_from_commit` and multi-signer QCs from
+/// `CommitAckAccumulator` (P4·Step 9). Verification:
 ///
 /// 1. All structural checks (delegates to [`StructuralVerifier`]).
-/// 2. If `block.quorum_cert` is `Some(qc)`: verify 2f+1 stake signed `header_digest`.
+/// 2. If `block.quorum_cert` is `Some(qc)`: verify 2f+1 stake signed the
+///    domain-separated commit-ack message.
 /// 3. If `block.quorum_cert` is `None`: accepted (Phase-1 range-sync blocks).
 ///
 /// ## Signature injection (B3-2)
@@ -320,8 +327,20 @@ impl BlockVerifier for CertifiedVerifier {
         let header_digest = block.header.digest();
 
         // ── Step 4: Build sig_results via hybrid sig verification (B3-2) ──────
-        // Verify each signer's hybrid sig over header_digest.
+        // Verify each signer's hybrid sig over the DOMAIN-SEPARATED message
+        // `commit_ack_message(qc.height, &qc.header_digest)` =
+        // `blake3(b"commit-ack" || height_le || header_digest)`.
+        //
+        // This is the SAME message signed by:
+        //   - build_block_from_commit (initial single-signer QC)
+        //   - CommitAckAccumulator (multi-signer QC via gossip, P4·Step 9)
+        //
+        // Using the raw `header_digest.as_bytes()` here would reject every
+        // accumulator-built QC (domain mismatch). One canonical signed message
+        // for all QC signers (AGENTS §7.3).
+        //
         // Unknown authors and non-Hybrid sigs yield false (not a crash).
+        let signed_msg = commit_ack_message(qc.height, &qc.header_digest);
         let mut sig_results: BTreeMap<Address, bool> = BTreeMap::new();
         for (addr, sig) in &qc.signers {
             let sig_ok = match self.vset.members.get(addr) {
@@ -333,7 +352,7 @@ impl BlockVerifier for CertifiedVerifier {
                                 classical: classical.clone(),
                                 quantum: quantum.clone(),
                             };
-                            verify_hybrid(&pk, header_digest.as_bytes(), &hybrid).is_ok()
+                            verify_hybrid(&pk, &signed_msg, &hybrid).is_ok()
                         }
                         // Unsigned or Classical-only = invalid for consensus.
                         _ => false,

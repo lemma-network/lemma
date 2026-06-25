@@ -81,6 +81,7 @@ pub const fn wave_of(round: u64) -> u64 {
 
 pub mod cert;
 pub mod commit;
+pub mod commit_ack;
 pub mod dag;
 pub mod epoch;
 pub mod error;
@@ -95,6 +96,7 @@ pub mod stake;
 
 pub use cert::{verify_quorum_cert, CertError};
 pub use commit::Commit;
+pub use commit_ack::{commit_ack_message, CommitAckAccumulator, CommitAckError, CommitAckPayload};
 pub use dag::block::{CommitVote, DagBlock, DagBlockBody, DagBlockRef, Slot, TxBatchRef};
 pub use dag::graph::{Dag, InsertOutcome};
 pub use dag::surge::{SurgeDriver, SurgeOutput};

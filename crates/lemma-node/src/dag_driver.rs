@@ -82,6 +82,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use lemma_consensus::{
+    commit_ack::{commit_ack_message, CommitAckAccumulator, CommitAckPayload},
     dag::block::{DagBlock, DagBlockBody, DagBlockRef},
     Commit, SurgeDriver,
 };
@@ -297,10 +298,18 @@ pub fn build_block_from_commit(
     // `qc.header_digest == header.digest()`). One recipe, shared by producer
     // and every verifier (AGENTS.md §2.2). NOT serde — see header.rs.
     //
+    // Signers sign the DOMAIN-SEPARATED message `commit_ack_message(height,
+    // &header_digest)` = `blake3(b"commit-ack" || height_le || header_digest)`.
+    // This is the SAME message the CommitAckAccumulator uses (P4·Step 9) and
+    // the SAME message CertifiedVerifier verifies against. One canonical signed
+    // message for all QC signers — single-signer and multi-signer QCs are
+    // homogeneous (AGENTS §7.3 domain separation).
+    //
     // Phase 2: single signer (100% stake in single-validator mode) satisfies
     // 2f+1 trivially. Phase 3+: collect 2f+1 signers via commit-ack gossip.
     let header_digest = header.digest();
-    let header_sig = keypair.sign_to_lemma(header_digest.as_bytes());
+    let signed_msg = commit_ack_message(header.height, &header_digest);
+    let header_sig = keypair.sign_to_lemma(&signed_msg);
 
     let mut signers = BTreeMap::new();
     signers.insert(proposer, header_sig);
@@ -338,9 +347,24 @@ pub fn build_block_from_commit(
 ///      `DagBlock` in the driver's DAG, resolves `TxBatchRef → Vec<Transaction>`
 ///      via `batch_store`, deduplicates by tx hash.
 ///    - Passes the resolved txs to `build_block_from_commit` → Flux execution.
+///    - Signs and broadcasts a `CommitAck` on `lemma/commit-ack/1`.
+///    - Accumulates incoming `CommitAck`s until ≥ 2f+1 stake → multi-signer QC.
 ///    - This replaces the old `mempool.pending_by_priority()` shortcut, which
 ///      would diverge across nodes in multi-validator mode.
 /// 4. **Equivocations**: logged. Evidence construction + broadcasting is Phase 3.
+///
+/// ## Commit-ack gossip (P4·Step 9)
+///
+/// After building a chain block, the driver:
+/// 1. Signs `blake3(b"commit-ack" || height_le_u64 || header_digest)` with the
+///    validator's hybrid keypair.
+/// 2. Broadcasts the `CommitAckPayload` via `commit_ack_tx`.
+/// 3. Feeds the own ack into the `CommitAckAccumulator` (sig_ok = true, self-signed).
+/// 4. Drains `incoming_commit_ack_rx` for peer acks (decoded + sig-verified by
+///    `network_runner`; `sig_ok: bool` injected per B3-2 pattern).
+/// 5. When ≥ 2f+1 stake accumulated → `try_build_qc()` → multi-signer QC.
+///
+/// In single-validator mode (100% stake), step 3 immediately satisfies quorum.
 ///
 /// ## Batch availability miss
 ///
@@ -377,14 +401,26 @@ pub async fn run_dag_driver(
     block_tx: Option<mpsc::Sender<Block>>,
     dag_block_tx: Option<mpsc::Sender<Vec<u8>>>,
     batch_tx: Option<mpsc::Sender<Vec<u8>>>,
+    // Channel for broadcasting own `CommitAckPayload` bytes to the network
+    // (JSON-encoded, routed to `lemma/commit-ack/1` by `network_runner`).
+    // Pass `None` in single-node mode or tests that don't need gossip.
+    commit_ack_tx: Option<mpsc::Sender<Vec<u8>>>,
     write_lock: Arc<Mutex<()>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
     mut incoming_dag_block_rx: Option<mpsc::Receiver<(DagBlock, bool)>>,
+    // Channel for receiving peer `CommitAckPayload` bytes (JSON-encoded,
+    // already decoded + sig-verified by `network_runner`; `sig_ok: bool`
+    // injected per B3-2 pattern). Pass `None` in single-node mode.
+    mut incoming_commit_ack_rx: Option<mpsc::Receiver<(CommitAckPayload, bool)>>,
 ) -> Result<(), NodeError> {
     // Construct the per-epoch SurgeDriver. With a single-validator committee,
     // every DagBlock immediately crosses the >2/3 quorum threshold.
     let mut driver = SurgeDriver::new(cfg.validator_set.clone())
         .map_err(|e| NodeError::Config(format!("SurgeDriver::new failed: {e}")))?;
+
+    // Per-block CommitAckAccumulator: keyed by (height, header_digest).
+    // Replaced on each new commit. None until the first block is committed.
+    let mut commit_ack_acc: Option<CommitAckAccumulator> = None;
 
     info!(
         epoch    = cfg.epoch,
@@ -444,6 +480,8 @@ pub async fn run_dag_driver(
                                 &batch_store,
                                 &batch_tx,
                                 &block_tx,
+                                &commit_ack_tx,
+                                &mut commit_ack_acc,
                                 &write_lock,
                                 &cfg,
                                 &keypair,
@@ -468,6 +506,46 @@ pub async fn run_dag_driver(
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     info!("dag_driver: incoming_dag_block channel closed — stopping");
                     break;
+                }
+            }
+        }
+
+        // ── Drain incoming commit-acks (non-blocking, every iteration) ───────
+        //
+        // Peer commit-acks arrive decoded + sig-verified by `network_runner`
+        // (B3-2 pattern). Feed them into the current accumulator (if any).
+        // Non-fatal: invalid acks are logged and dropped.
+        if let Some(ref mut rx) = incoming_commit_ack_rx {
+            match rx.try_recv() {
+                Ok((ack, sig_ok)) => {
+                    if let Some(ref mut acc) = commit_ack_acc {
+                        match acc.add(&ack, &cfg.validator_set, sig_ok) {
+                            Ok(reached) => {
+                                if reached {
+                                    debug!(
+                                        height = ack.height,
+                                        signer = %ack.signer,
+                                        "dag_driver: commit-ack quorum reached (peer ack)"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                debug!(
+                                    height = ack.height,
+                                    signer = %ack.signer,
+                                    error  = %e,
+                                    "dag_driver: peer commit-ack rejected (non-fatal)"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    // No peer ack available right now.
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    debug!("dag_driver: incoming_commit_ack channel closed");
+                    incoming_commit_ack_rx = None;
                 }
             }
         }
@@ -531,6 +609,8 @@ pub async fn run_dag_driver(
             &batch_store,
             &batch_tx,
             &block_tx,
+            &commit_ack_tx,
+            &mut commit_ack_acc,
             &write_lock,
             &cfg,
             &keypair,
@@ -552,16 +632,28 @@ pub async fn run_dag_driver(
 /// Handles:
 /// 1. **Equivocations** — logged; evidence deferred to Phase 3.
 /// 2. **Commits** — for each commit: resolve txs → execute → build chain block
+///    → sign + broadcast `CommitAck` → accumulate acks → attach multi-signer QC
 ///    → persist → gossip → mempool post-commit.
 /// 3. **New round** — build ancestors, gossip batch, build DagBlock → set `next_block`.
 ///
 /// Called from BOTH the self-authored path AND the peer-block path (DRY — AGENTS §2.1).
+///
+/// ## Commit-ack flow (P4·Step 9)
+///
+/// After `build_block_from_commit` succeeds:
+/// 1. Sign `commit_ack_message(height, header_digest)` with the local keypair.
+/// 2. Broadcast the `CommitAckPayload` via `commit_ack_tx`.
+/// 3. Feed the own ack into `commit_ack_acc` (sig_ok = true, self-signed).
+/// 4. In single-validator mode (100% stake), own ack immediately satisfies
+///    2f+1 → `try_build_qc()` returns `Some(qc)` → block persisted with
+///    multi-signer QC (same as before, but now via the accumulator path).
 ///
 /// ## Error policy
 ///
 /// - Persist errors (`commit_block`) → `Err` (fatal — Sui-stall lesson).
 /// - Build errors (`build_block_from_commit`) → `WARN` + skip (transient).
 /// - `build_dag_block` errors → `WARN` + skip (non-fatal for round advancement).
+/// - Commit-ack errors (invalid ack, equivocation) → `debug!` + drop (non-fatal).
 ///
 /// # Errors
 ///
@@ -575,6 +667,8 @@ async fn process_surge_output(
     batch_store: &BatchStore,
     batch_tx: &Option<mpsc::Sender<Vec<u8>>>,
     block_tx: &Option<mpsc::Sender<Block>>,
+    commit_ack_tx: &Option<mpsc::Sender<Vec<u8>>>,
+    commit_ack_acc: &mut Option<CommitAckAccumulator>,
     write_lock: &Arc<Mutex<()>>,
     cfg: &DagConfig,
     keypair: &Arc<KeyPair>,
@@ -611,8 +705,106 @@ async fn process_surge_output(
         }
 
         match build_block_from_commit(commit, &chain, cfg.proposer, Arc::clone(db), txs, keypair) {
-            Ok((block, hash)) => {
+            Ok((mut block, mut hash)) => {
                 let height = block.height();
+                let header_digest = block
+                    .quorum_cert
+                    .as_ref()
+                    .map(|qc| qc.header_digest)
+                    .unwrap_or_else(|| block.header.digest());
+
+                // ── Commit-ack: sign + broadcast + accumulate (P4·Step 9) ────
+                //
+                // 1. Sign the domain-separated message (AGENTS §7.3).
+                // 2. Broadcast own ack via commit_ack_tx.
+                // 3. Feed own ack into the accumulator (sig_ok = true — self-signed).
+                // 4. In single-validator mode (100% stake), own ack immediately
+                //    satisfies 2f+1 → try_build_qc() returns Some(qc).
+                let ack_msg = commit_ack_message(height, &header_digest);
+                let ack_sig = keypair.sign_to_lemma(&ack_msg);
+
+                let own_ack = CommitAckPayload {
+                    height,
+                    header_digest,
+                    signer: cfg.proposer,
+                    signature: ack_sig,
+                };
+
+                // Broadcast own ack to peers (non-fatal: no peers in single-node).
+                if let Some(ref tx) = commit_ack_tx {
+                    match serde_json::to_vec(&own_ack) {
+                        Ok(bytes) => {
+                            if let Err(e) = tx.try_send(bytes) {
+                                debug!(height, error = ?e, "commit_ack_tx send failed (non-fatal)");
+                            }
+                        }
+                        Err(e) => {
+                            warn!(height, error = %e, "CommitAckPayload JSON encode failed (non-fatal)");
+                        }
+                    }
+                }
+
+                // Create a fresh accumulator for this block.
+                let mut acc = CommitAckAccumulator::for_validator_set(
+                    height,
+                    header_digest,
+                    &cfg.validator_set,
+                );
+
+                // Feed own ack (sig_ok = true — we just signed it).
+                match acc.add(&own_ack, &cfg.validator_set, true) {
+                    Ok(reached) => {
+                        if reached {
+                            // Single-validator fast-path: own ack satisfies 2f+1.
+                            debug!(height, "dag_driver: commit-ack quorum reached (own ack)");
+                        }
+                    }
+                    Err(e) => {
+                        // Should never happen for a self-signed ack — log as warn.
+                        warn!(height, error = %e, "dag_driver: own commit-ack rejected (BUG)");
+                    }
+                }
+
+                // If quorum is already reached (single-validator fast-path),
+                // replace the block's QC with the multi-signer QC.
+                // In multi-validator mode, the block is persisted with the
+                // single-signer QC from build_block_from_commit; the multi-signer
+                // QC is assembled asynchronously as peer acks arrive (deferred
+                // to Phase 4 multi-node wiring — the accumulator is stored in
+                // commit_ack_acc for the network_runner to feed into).
+                if let Some(qc) = acc.try_build_qc() {
+                    // Rebuild block with the multi-signer QC.
+                    // Block::new re-validates structural invariants (defense-in-depth).
+                    match lemma_core::block::Block::new(
+                        block.header.clone(),
+                        block.transactions.clone(),
+                        block.receipts.clone(),
+                        Some(qc),
+                    ) {
+                        Ok(new_block) => {
+                            // Recompute hash after QC update.
+                            match compute_block_hash(&new_block) {
+                                Ok(new_hash) => {
+                                    block = new_block;
+                                    hash = new_hash;
+                                    debug!(height, "dag_driver: multi-signer QC attached");
+                                }
+                                Err(e) => {
+                                    warn!(height, error = %e,
+                                          "dag_driver: block hash recompute failed after QC update — using single-signer QC");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(height, error = %e,
+                                  "dag_driver: Block::new failed after QC update — using single-signer QC");
+                        }
+                    }
+                }
+
+                // Store accumulator for peer acks (multi-validator mode).
+                *commit_ack_acc = Some(acc);
+
                 let committed_hashes = collect_committed_hashes(&block.transactions);
 
                 {

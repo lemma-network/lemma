@@ -76,8 +76,8 @@ use lemma_crypto::KeyPair;
 use lemma_mempool::pool::Mempool;
 use lemma_network::{service::NetworkHandle, service::NetworkService, NetworkConfig};
 use lemma_node::{
-    dag_driver::DagConfig, init_chain, new_batch_store, run_block_broadcaster, run_dag_driver,
-    run_network_dispatch, InitOutcome, NodeConfig,
+    dag_driver::DagConfig, init_chain, new_batch_store, run_block_broadcaster,
+    run_commit_ack_broadcaster, run_dag_driver, run_network_dispatch, InitOutcome, NodeConfig,
 };
 use lemma_storage::db::LemmaDb;
 
@@ -219,6 +219,18 @@ async fn main() -> anyhow::Result<()> {
     let (incoming_dag_block_tx, incoming_dag_block_rx) =
         mpsc::channel::<(DagBlock, bool)>(INCOMING_DAG_BLOCK_CHANNEL_CAPACITY);
 
+    // Commit-ack gossip channels (P4·Step 9 — multi-signer QuorumCert).
+    //
+    // `commit_ack_tx`: dag_driver → network_runner → gossip mesh (own ack bytes).
+    // `incoming_commit_ack_tx`: network_runner → dag_driver (peer ack + sig_ok).
+    //
+    // Capacity: 64 is generous — one ack per validator per block; a 100-validator
+    // committee produces at most 100 acks per block, well within 64 per iteration.
+    const COMMIT_ACK_CHANNEL_CAPACITY: usize = 64;
+    let (commit_ack_tx, commit_ack_rx) = mpsc::channel::<Vec<u8>>(COMMIT_ACK_CHANNEL_CAPACITY);
+    let (incoming_commit_ack_tx, incoming_commit_ack_rx) =
+        mpsc::channel::<(lemma_consensus::CommitAckPayload, bool)>(COMMIT_ACK_CHANNEL_CAPACITY);
+
     info!(
         epoch    = dag_cfg.epoch,
         proposer = %dag_cfg.proposer,
@@ -227,8 +239,17 @@ async fn main() -> anyhow::Result<()> {
 
     let net_handle_dag = net_handle.clone();
     let net_handle_batch = net_handle.clone();
+    let net_handle_commit_ack = net_handle.clone();
 
-    let (net_res, bcast_res, dag_bcast_res, batch_bcast_res, dispatch_res, dag_res) = tokio::join!(
+    let (
+        net_res,
+        bcast_res,
+        dag_bcast_res,
+        batch_bcast_res,
+        commit_ack_bcast_res,
+        dispatch_res,
+        dag_res,
+    ) = tokio::join!(
         tokio::spawn(net_service.run()),
         tokio::spawn(run_block_broadcaster(
             net_handle.clone(),
@@ -245,6 +266,13 @@ async fn main() -> anyhow::Result<()> {
             batch_rx,
             shutdown_rx.clone(),
         )),
+        // Commit-ack broadcaster: forwards own ack bytes to the gossip mesh
+        // (lemma/commit-ack/1). Same pattern as run_batch_broadcaster (P4·Step 9).
+        tokio::spawn(run_commit_ack_broadcaster(
+            net_handle_commit_ack,
+            commit_ack_rx,
+            shutdown_rx.clone(),
+        )),
         tokio::spawn(run_network_dispatch(
             Arc::clone(&db),
             Arc::clone(&mempool),
@@ -255,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_rx.clone(),
             validator_set,
             Some(incoming_dag_block_tx),
+            Some(incoming_commit_ack_tx),
         )),
         tokio::spawn(run_dag_driver(
             Arc::clone(&db),
@@ -265,9 +294,11 @@ async fn main() -> anyhow::Result<()> {
             Some(block_tx),
             Some(dag_block_tx),
             Some(batch_tx),
+            Some(commit_ack_tx),
             Arc::clone(&write_lock),
             shutdown_rx,
             Some(incoming_dag_block_rx),
+            Some(incoming_commit_ack_rx),
         )),
     );
 
@@ -275,6 +306,7 @@ async fn main() -> anyhow::Result<()> {
     bcast_res.context("block broadcaster task panicked")?;
     dag_bcast_res.context("dag block broadcaster task panicked")?;
     batch_bcast_res.context("batch broadcaster task panicked")?;
+    commit_ack_bcast_res.context("commit-ack broadcaster task panicked")?;
     dispatch_res
         .context("network dispatch task panicked")?
         .context("network dispatch error")?;

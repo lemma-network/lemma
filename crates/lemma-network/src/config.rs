@@ -71,6 +71,23 @@ pub const TOPIC_TX: &str = "lemma/tx/1";
 /// `ValidationMode::Strict` is required (same as all Lemma gossip topics).
 pub const TOPIC_BATCH: &str = "lemma/batch/1";
 
+/// gossipsub topic — commit-acknowledgement messages (P4·Step 9).
+///
+/// After a validator commits a chain block, it signs the `BlockHeader::digest()`
+/// and broadcasts a `CommitAck` on this topic. Peers accumulate acks until
+/// ≥ 2f+1 stake is reached, then assemble a multi-signer [`QuorumCert`].
+///
+/// The payload is a **JSON-serialized `CommitAckPayload`** (opaque `Vec<u8>` at
+/// the network layer — same DB-A12 pattern as `TOPIC_DAG`). The node layer
+/// handles encode/decode.
+///
+/// Domain separation: the signed message is
+/// `blake3(b"commit-ack" || height_le_u64 || header_digest)` — prevents
+/// cross-message replay (AGENTS §7.3).
+///
+/// [`QuorumCert`]: lemma_core::QuorumCert
+pub const TOPIC_COMMIT_ACK: &str = "lemma/commit-ack/1";
+
 /// request-response protocol — bounded range/backfill sync.
 ///
 /// Leading slash: libp2p multistream-select convention (see module-level doc).
