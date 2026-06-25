@@ -16,16 +16,15 @@
 //! 2. Cross-check secondary peers and replace the primary on conflict
 //!    (12-NETWORK_SYNC_SPEC §3.5).
 //!
-//! Note: the `Equivocation` variant will gain a `conflicting_cert` field once
-//! `lemma-consensus` defines `QuorumCert` (blocked on 13-VALIDATOR_EPOCH_SPEC).
-//! See the variant doc comment below.
+//! The `Equivocation` variant carries a `conflicting_cert: Box<QuorumCert>`
+//! evidence payload for the slashing path (S-4, unblocked by DB-9).
 //!
 //! See `12-NETWORK_SYNC_SPEC.md §6` for the authoritative variant specification.
 
 use libp2p::PeerId;
 use thiserror::Error;
 
-use lemma_core::Hash;
+use lemma_core::{Hash, QuorumCert};
 
 /// Typed errors for `lemma-network`.
 ///
@@ -94,14 +93,22 @@ pub enum NetworkError {
     /// Use [`NetworkError::is_attack_signal`] to distinguish this from routine
     /// demotion cases before deciding how to handle the error.
     ///
-    /// # Pending field
+    /// `conflicting_cert` carries the second QC — the slashing evidence payload.
+    /// The first QC is the one the node already holds for this height; the
+    /// conflicting cert is the one received from the misbehaving peer.
     ///
-    /// `conflicting_cert` (the second QC — the slashing evidence payload) will
-    /// be added here once `lemma-consensus` defines `QuorumCert`.
-    /// TODO(network): attach `conflicting_cert: Box<QuorumCert>` — blocked on
-    /// 13-VALIDATOR_EPOCH_SPEC landing and `QuorumCert` being defined.
+    /// Emission site: P4 network-resume (the sync/gossip handler that detects
+    /// two distinct QCs at the same height will construct this variant with the
+    /// conflicting cert). Until then, the type is ready for the slashing path.
     #[error("equivocation detected at height {height}")]
-    Equivocation { height: u64 },
+    Equivocation {
+        height: u64,
+        /// The conflicting quorum certificate — slashing evidence payload.
+        ///
+        /// Boxed to keep the `NetworkError` enum size small (QuorumCert
+        /// contains a BTreeMap of signers).
+        conflicting_cert: Box<QuorumCert>,
+    },
 
     // ── Connection / transport ────────────────────────────────────────────
     /// A request-response call to a specific peer timed out before a response

@@ -705,6 +705,8 @@ impl MandateReceipt {
     /// just without structured content.
     #[must_use]
     pub fn to_log(&self) -> Log {
+        // Sanctioned direct `blake3::hash` — `lemma-core` cannot depend on
+        // `lemma-crypto` (circular). See `lemma-crypto/src/hashing.rs` doc header.
         let sig_hash = blake3::hash(MANDATE_RECEIPT_EVENT_SIG);
         let topic = Hash::from_bytes(*sig_hash.as_bytes());
         let data = serde_json::to_vec(self).unwrap_or_default();

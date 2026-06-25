@@ -2,7 +2,22 @@
 //!
 //! This module is the **single canonical location** for all hashing in the
 //! Lemma codebase (AGENTS.md §2.2 — one canonical way). Every other crate
-//! imports from here; no crate calls `blake3::hash` directly.
+//! imports from here, with these sanctioned exceptions:
+//!
+//! - **`lemma-core` direct `blake3`** — `lemma-core` cannot depend on
+//!   `lemma-crypto` (circular). `Address`, `BlockHeader::digest()`,
+//!   `ValidatorSet::hash()`, and `MandateReceipt::to_log()` use `blake3`
+//!   directly. These are justified: `lemma-core` is the lower crate.
+//! - **Consensus manual-framing digests** — `DagBlock::compute_digest`
+//!   (`dag/block.rs`) and `Commit::digest` (`commit.rs`) use
+//!   `blake3::Hasher` streaming with explicit field-by-field big-endian
+//!   encoding. This is the most robust style for consensus digests and
+//!   must NOT be replaced with `hash_bytes` (which would require an
+//!   intermediate allocation and lose the explicit field framing).
+//! - **Domain-separated message signing** — `signing.rs`
+//!   `compute_message_hash` uses `blake3::Hasher` streaming for
+//!   `domain || length || message` — `hash_bytes` cannot do incremental
+//!   hashing.
 //!
 //! # Determinism
 //!

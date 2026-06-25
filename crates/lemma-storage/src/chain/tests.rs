@@ -7,9 +7,14 @@
 //! All tests use `tempfile::tempdir()` for DB isolation per the storage test
 //! convention (db/tests.rs pattern).
 
+use std::collections::BTreeMap;
+
 use tempfile::tempdir;
 
-use lemma_core::{address::Address, amount::Amount, block::Block, hash::Hash, header::BlockHeader};
+use lemma_core::{
+    address::Address, amount::Amount, block::Block, cert::QuorumCert, hash::Hash,
+    header::BlockHeader, signature::Signature,
+};
 
 use super::*;
 use crate::{
@@ -447,4 +452,52 @@ fn get_range_partial_subrange() {
     assert_eq!(range.len(), 3);
     assert_eq!(range[0].height(), 1);
     assert_eq!(range[2].height(), 3);
+}
+
+// ── bincode::deserialize guard (S1-1) ─────────────────────────────────────────
+//
+// `Signature` uses `#[serde(tag = "type")]` (internally-tagged enum). Bincode v1
+// does not support `deserialize_any`, which internally-tagged serde formats
+// require. Attempting `bincode::deserialize::<Block>()` on a block containing a
+// `Signature` (via `QuorumCert.signers`) panics with:
+//   "Bincode does not support Deserializer::deserialize_any"
+//
+// This test locks the invariant: `serde_json` MUST be used for Block
+// deserialization, never `bincode`. If a future refactor changes `Signature`'s
+// serde representation to be bincode-compatible, this test will start passing
+// (no panic) and should be updated to reflect the new invariant.
+//
+// See chain.rs serialization note (lines 70–87) and AGENTS §7.2/§9.3.
+
+#[test]
+fn bincode_deserialize_block_with_signature_panics() {
+    // Build a block with a QuorumCert containing a real Signature value.
+    let mut signers = BTreeMap::new();
+    signers.insert(
+        Address::zero(),
+        Signature::Classical {
+            bytes: vec![0u8; 64],
+        },
+    );
+    let qc = QuorumCert::new(0, Hash::from_bytes([0xCC; 32]), signers);
+
+    let (block, _hash) = make_block_at(0, Hash::zero());
+    // Reconstruct with a QC that has a Signature.
+    let block_with_qc = Block::new(block.header.clone(), vec![], vec![], Some(qc))
+        .expect("Block::new must succeed");
+
+    // bincode::serialize succeeds (the panic is on deserialize only).
+    let encoded =
+        bincode::serialize(&block_with_qc).expect("bincode::serialize of Block must succeed");
+
+    // bincode::deserialize MUST panic due to Signature's internally-tagged enum.
+    let result = std::panic::catch_unwind(|| {
+        let _: Block = bincode::deserialize(&encoded).unwrap();
+    });
+    assert!(
+        result.is_err(),
+        "bincode::deserialize::<Block> with Signature must panic — \
+         if this assertion fails, Signature's serde format has changed \
+         and the chain.rs serialization note should be revisited"
+    );
 }

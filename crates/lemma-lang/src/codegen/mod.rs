@@ -34,7 +34,12 @@
 //! `lemma_lang::compile`.
 
 pub(crate) mod abi;
-pub(crate) mod metadata;
+/// `"lemma.meta"` custom-section builder.
+///
+/// `pub` for cross-crate pin tests (S3-2): `lemma-vm` dev-depends on
+/// `lemma-lang` and uses [`metadata::SafetyConstraintMeta`] to verify the
+/// emit→parse mirror stays in sync. Internal build logic remains `pub(crate)`.
+pub mod metadata;
 pub(crate) mod types;
 pub(crate) mod wasm;
 

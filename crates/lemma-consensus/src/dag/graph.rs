@@ -207,7 +207,7 @@ impl Dag {
     ///
     /// Returns `Err(ConsensusError::StakeOverflow)` if accumulation overflows
     /// `u128` (AGENTS §7.4). Non-member authors (stake 0 by definition) are
-    /// silently skipped — consistent with `check_strong_link_quorum` and
+    /// silently skipped — consistent with `validate_strong_link_quorum` and
     /// `ThresholdClock::add_block` (AGENTS §2 one canonical way).
     ///
     /// # Errors
@@ -317,13 +317,13 @@ impl Dag {
         // Verify block.digest == compute_digest(body) BEFORE sig check.
         // A forged digest makes sig_ok meaningless: "signed this forged hash"
         // ≠ "block body is authentic". Closes peer content-integrity gap (D·15b-1).
-        validity::check_digest_integrity(&block)?;
+        validity::validate_digest_integrity(&block)?;
 
         // ── Rule 2: author + sig (spec §3 rule 2) ───────────────────────────
-        validity::check_author_and_signature(&block, vset, sig_ok)?;
+        validity::validate_author_and_signature(&block, vset, sig_ok)?;
 
         // ── Rule 3: GC boundary (spec §3 rule 3) ────────────────────────────
-        validity::check_gc_boundary(block.round, self.gc_round())?;
+        validity::validate_gc_boundary(block.round, self.gc_round())?;
 
         // ── Rule 4: ancestors present (spec §3 rule 4) ──────────────────────
         let missing = validity::collect_missing_ancestors(&block, |r| self.blocks.contains_key(r));
@@ -341,11 +341,11 @@ impl Dag {
         }
 
         // ── Rule 5: strong-link quorum (spec §3 rule 5) ─────────────────────
-        validity::check_strong_link_quorum(&block, vset)?;
+        validity::validate_strong_link_quorum(&block, vset)?;
 
         // ── Rule 6: equivocation (spec §3 rule 6) ───────────────────────────
         let existing = self.block_at_slot(block.slot());
-        match validity::check_no_equivocation(&block, existing) {
+        match validity::validate_no_equivocation(&block, existing) {
             Ok(()) => {}
             Err(ConsensusError::Equivocation {
                 author,

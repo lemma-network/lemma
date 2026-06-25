@@ -48,7 +48,7 @@ use crate::{
     gas::{gas_used, FuelMeter, Gas, GasMeter, GasSchedule},
     host::{BlockContext, CallContext, HostState},
     runtime::LemmaEngine,
-    safety_manifest::{check_safety_invariants, parse_safety_manifest, SafetyManifest},
+    safety_manifest::{parse_safety_manifest, validate_safety_invariants, SafetyManifest},
     state::ContractStateView,
 };
 
@@ -799,10 +799,33 @@ impl Executor {
             tx.data.clone(), // calldata for input() host fn (DB-A53 §4.5)
         );
 
-        let (wasm_consumed, host_after) = match self.run_wasm(host_abi, &module, host) {
-            Ok(r) => r,
-            Err(e) => return (Err(e), Some((contract_addr, manifest))),
-        };
+        let (wasm_consumed, host_after) =
+            match self.run_wasm_with_entry(host_abi, &module, host, ENTRY_POINT) {
+                Ok((gas, host_state)) => {
+                    // "call" MUST exist for ContractCall — absence is an error, not a no-op.
+                    // run_wasm_with_entry returns (Gas::ZERO, host) when the entry point is
+                    // absent. For INIT_ENTRY_POINT that is correct (defaults-only deploy).
+                    // For ENTRY_POINT ("call"), absence means the contract has no callable
+                    // entry — this is an invalid contract, not a silent success.
+                    if gas == Gas::ZERO
+                        && !module.exports().any(|e| {
+                            e.name() == ENTRY_POINT
+                                && matches!(e.ty(), wasmtime::ExternType::Func(_))
+                        })
+                    {
+                        return (
+                            Err(VmError::InstantiationFailed {
+                                reason: format!(
+                                    "contract has no \"{ENTRY_POINT}\" export — cannot call"
+                                ),
+                            }),
+                            Some((contract_addr, manifest)),
+                        );
+                    }
+                    (gas, host_state)
+                }
+                Err(e) => return (Err(e), Some((contract_addr, manifest))),
+            };
 
         // Destructure host_after to avoid partial-move issues.
         let HostState {
@@ -845,10 +868,18 @@ impl Executor {
         (Ok(events), Some((contract_addr, manifest)))
     }
 
-    /// Run a compiled WASM module to completion.
+    /// Run a compiled WASM module to completion via the given entry point.
     ///
-    /// Sets wasmtime fuel from the host meter, calls the `"call"` entry point,
-    /// reads back remaining fuel, and returns `(gas_consumed, host_state)`.
+    /// This is the **sole** WASM execution method on `Executor` (V-DRY-2).
+    /// Both `execute_call` and `execute_deploy` (init) route through here.
+    ///
+    /// Sets wasmtime fuel from the host meter, calls `entry_point`, reads back
+    /// remaining fuel, and returns `(gas_consumed, host_state)`.
+    ///
+    /// If the module does NOT export `entry_point`, returns
+    /// `Ok((Gas::ZERO, host))` — absence is a no-op. Callers that require the
+    /// entry point to exist (e.g. `execute_call` with `ENTRY_POINT`) must check
+    /// the `Gas::ZERO` return and map it to an error themselves.
     ///
     /// ## Fuel sync
     ///
@@ -858,68 +889,10 @@ impl Executor {
     ///
     /// # Errors
     ///
-    /// Maps wasmtime traps to [`VmError`] variants.
-    fn run_wasm<S: ContractStateView + Clone + 'static>(
-        &self,
-        abi: u32,
-        module: &wasmtime::Module,
-        host: HostState<S>,
-    ) -> Result<(Gas, HostState<S>), VmError> {
-        let initial_fuel = host.meter.remaining();
-
-        let mut store = wasmtime::Store::new(self.engine.inner(), host);
-
-        // Set wasmtime fuel from the meter's remaining budget.
-        store
-            .set_fuel(initial_fuel.as_u64())
-            .map_err(|e| VmError::InvalidParameter {
-                reason: format!("set_fuel failed: {e}"),
-            })?;
-
-        // Build linker for the contract's host-ABI version (DB-A58 L2).
-        let linker = linker::build_linker_for_abi::<S>(abi, &self.engine)?;
-        let instance =
-            linker
-                .instantiate(&mut store, module)
-                .map_err(|e| VmError::InstantiationFailed {
-                    reason: e.to_string(),
-                })?;
-
-        // Get the typed entry-point function.
-        let func = instance
-            .get_typed_func::<(), ()>(&mut store, ENTRY_POINT)
-            .map_err(|e| VmError::InstantiationFailed {
-                reason: e.to_string(),
-            })?;
-
-        // Call the entry point — map traps to VmError.
-        func.call(&mut store, ()).map_err(map_trap_to_vm_error)?;
-
-        // Compute WASM instruction fuel consumed.
-        let fuel_remaining = store.get_fuel().unwrap_or(0);
-        let wasm_consumed = Gas(initial_fuel.as_u64().saturating_sub(fuel_remaining));
-
-        Ok((wasm_consumed, store.into_data()))
-    }
-
-    /// Run the optional `"init"` constructor of a compiled WASM module.
-    ///
-    /// Identical to [`run_wasm`] except:
-    /// - Calls [`INIT_ENTRY_POINT`] (`"init"`) instead of `"call"`.
-    /// - If the module does NOT export `"init"`, returns `Ok((Gas::ZERO, host))`
-    ///   — absence is a no-op (defaults-only deploy), not an error.
-    ///
-    /// ## Fuel sync
-    ///
-    /// Same fuel-sync pattern as [`run_wasm`]: initial fuel from host meter,
-    /// consumed = initial − remaining after execution.
-    ///
-    /// # Errors
-    ///
     /// - [`VmError::InstantiationFailed`] — module cannot be instantiated.
-    /// - [`VmError::OutOfGas`] — init exhausted the gas budget.
-    /// - [`VmError::StackOverflow`] — native WASM stack exceeded during init.
-    /// - [`VmError::TrapUnknown`] — any other WASM trap during init.
+    /// - [`VmError::OutOfGas`] — execution exhausted the gas budget.
+    /// - [`VmError::StackOverflow`] — native WASM stack exceeded.
+    /// - [`VmError::TrapUnknown`] — any other WASM trap.
     fn run_wasm_with_entry<S: ContractStateView + Clone + 'static>(
         &self,
         abi: u32,
@@ -1023,7 +996,7 @@ impl Executor {
                 // is None, fell back to tx.sender = deployer EOA, not the contract).
                 if let Some((contract_addr, ref m)) = manifest {
                     if !m.constraints.is_empty() {
-                        if let Err(violation) = check_safety_invariants(
+                        if let Err(violation) = validate_safety_invariants(
                             m,
                             &contract_addr,
                             scratch.storage_writes_ref(),
@@ -1249,7 +1222,7 @@ impl<'a, S: ContractStateView> ScratchState<'a, S> {
     /// Read access to the storage writes for safety-invariant checking.
     ///
     /// Returns a reference to the `BTreeMap` of `(contract_addr, key) → Option<value>`.
-    /// `Some(v)` = written, `None` = deleted. Used by [`check_safety_invariants`]
+    /// `Some(v)` = written, `None` = deleted. Used by [`validate_safety_invariants`]
     /// to inspect the state diff without cloning.
     pub(crate) fn storage_writes_ref(&self) -> &BTreeMap<(Address, Vec<u8>), Option<Vec<u8>>> {
         &self.storage_writes
@@ -1258,7 +1231,7 @@ impl<'a, S: ContractStateView> ScratchState<'a, S> {
     /// Read access to the canonical (inner) state for safety-invariant checking.
     ///
     /// Returns a reference to the underlying state view (pre-transaction state).
-    /// Used by [`check_safety_invariants`] to read old values for ratchet checks.
+    /// Used by [`validate_safety_invariants`] to read old values for ratchet checks.
     pub(crate) fn inner_ref(&self) -> &S {
         self.inner
     }
@@ -1273,31 +1246,11 @@ impl<'a, S: ContractStateView> ScratchState<'a, S> {
         self.code_store_writes.insert(hash, bytes);
     }
 
-    /// Look up bytecode in the content-addressed scratch store by hash.
-    ///
-    /// Returns `Some(&bytes)` if this hash was stored in the current transaction,
-    /// `None` if not present in scratch (may still exist in committed state).
-    // consumer: execute_call cold/warm path (P3·Step 7 subtask_06)
-    #[allow(dead_code)]
-    pub(crate) fn get_code_content(&self, hash: &Hash) -> Option<&Vec<u8>> {
-        self.code_store_writes.get(hash)
-    }
-
     /// Set the thin pointer: `contract_address → code_hash` (DB-A22).
     ///
     /// Called by `execute_deploy` after successful compilation and dedup check.
     pub(crate) fn set_code_hash_ptr(&mut self, addr: &Address, hash: Hash) {
         self.code_hash_writes.insert(*addr, hash);
-    }
-
-    /// Get the thin pointer for a contract address.
-    ///
-    /// Returns `Some(hash)` if a code_hash was registered for this address in
-    /// the current transaction, `None` otherwise.
-    // consumer: init invocation path (P3·Step 7 subtask_07)
-    #[allow(dead_code)]
-    pub(crate) fn get_code_hash_ptr(&self, addr: &Address) -> Option<Hash> {
-        self.code_hash_writes.get(addr).copied()
     }
 
     /// Resolve bytecode for a contract address via the thin-pointer path.
@@ -1438,6 +1391,10 @@ impl<'a, S: ContractStateView> ScratchState<'a, S> {
         // execute_deploy always stores bytecode in code_store_writes (for both first
         // and later deployers), so the lookup here always succeeds for any address
         // that was deployed in this transaction.
+        //
+        // LOCKSTEP: block_exec.rs `apply_one_write` (StateKey::Code branch) performs
+        // the same code_hash→bytecode resolution for the node-level WorldState path.
+        // If the thin-pointer encoding changes here, update block_exec.rs too.
         for (addr, hash) in &self.code_hash_writes {
             if let Some(bytes) = self.code_store_writes.get(hash) {
                 self.inner.set_code(addr, bytes.clone());
@@ -1608,21 +1565,22 @@ impl<S: ContractStateView + Clone + 'static> CanonicalStateRead for S {
 
 /// Run a compiled WASM module to completion for a cross-contract call.
 ///
-/// This is the free-function equivalent of [`Executor::run_wasm`], used by
-/// the `call_contract` host function (P3·Step 21 subtask_02) to execute a
-/// callee contract from inside a host callback.
+/// This is the free-function equivalent of [`Executor::run_wasm_with_entry`],
+/// used by the `call_contract` host function (P3·Step 21 subtask_02) to
+/// execute a callee contract from inside a host callback.
 ///
 /// ## Why a free function?
 ///
-/// `Executor::run_wasm` is a method on `Executor` and requires `&self` for the
-/// engine reference. Inside a host callback, we have the engine via
-/// `HostState::engine` (an `Arc`-backed `LemmaEngine` clone). A free function
-/// avoids the need to construct a full `Executor` for the recursive call.
+/// `Executor::run_wasm_with_entry` is a method on `Executor` and requires
+/// `&self` for the engine reference. Inside a host callback, we have the
+/// engine via `HostState::engine` (an `Arc`-backed `LemmaEngine` clone). A
+/// free function avoids the need to construct a full `Executor` for the
+/// recursive call.
 ///
 /// ## Fuel sync
 ///
-/// Same pattern as `Executor::run_wasm`: initial fuel from host meter,
-/// consumed = initial − remaining after execution.
+/// Same pattern as `Executor::run_wasm_with_entry`: initial fuel from host
+/// meter, consumed = initial − remaining after execution.
 ///
 /// # Type parameter
 ///

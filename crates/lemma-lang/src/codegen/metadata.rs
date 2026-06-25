@@ -69,18 +69,16 @@ const SAFETY_RULESET_VERSION: &str = "1.0.0";
 
 /// Host-ABI version embedded in every `"lemma.meta"` section (DB-A58 L2).
 ///
+/// References the single source of truth in `lemma-core::CURRENT_HOST_ABI_VERSION`
+/// (S3-1 audit fix — no bare unconnected literal in two crates).
+///
 /// Identifies the host-function ABI version the contract was compiled against.
 /// The LemmaVM uses this to dispatch to the correct host-function implementation
 /// (see `docs/17-VERSIONING_SPEC.md §3`).
 ///
-/// Versioning scheme: monotonic u32 integer.
-/// - `1` = initial 17-fn set (P3·Step 6b-vm-2).
-/// - Future bumps require epoch feature-gate activation before new contracts
-///   with the higher version can be deployed (P3·Step 20 + P4·Step 12).
-///
 /// `parse_host_abi()` in `lemma-vm` defaults to `1` if this field is absent
 /// (backward compatibility for pre-Step-20 compiled contracts).
-const HOST_ABI_VERSION: u32 = 1;
+const HOST_ABI_VERSION: u32 = lemma_core::CURRENT_HOST_ABI_VERSION;
 
 // ── Serializable structures ───────────────────────────────────────────────────
 
@@ -102,24 +100,17 @@ struct FnMeta {
 /// These mirror the VM's `SafetyConstraint` enum but are Serialize-only
 /// (the VM deserializes its own version — no cross-crate type dependency,
 /// AGENTS §8).
+///
+/// `pub` for cross-crate pin tests (S3-2): `lemma-vm` dev-depends on
+/// `lemma-lang` and serializes these variants to verify the emit→parse
+/// mirror stays in sync. Constructor methods are provided for test ergonomics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
-enum SafetyConstraintMeta {
-    /// One-way boolean gate: may unlock but never re-lock.
-    /// E.g. `tradingEnabled` can be set to `true` but never back to `false`.
-    ///
-    /// Emitted when SAFETY-009 analysis detects a gating boolean on the transfer
-    /// path. Currently no extraction logic emits this variant — the consumer is
-    /// `@std/token` (P3·Step 8) which defines `tradingEnabled`/`enableTrading()`.
-    #[allow(dead_code)] // consumer: @std/token enableTrading (Step 8)
-    #[serde(rename = "ratchet_bool")]
-    RatchetBool {
-        /// Storage key prefix identifying this field.
-        key: Vec<u8>,
-        /// The value that BLOCKS transfers (the "locked" / honeypot state).
-        locked_value: Vec<u8>,
-    },
-
+pub enum SafetyConstraintMeta {
+    // Deleted: RatchetBool variant (P3 audit subtask 10).
+    // Consumer `@std/token enableTrading` (Step 8) never materialized — no
+    // extraction logic ever constructed this variant.  If needed later, add it
+    // back with a real emitter in `extract_safety_constraints`.
     /// Ratchet-off capability flag: may disable but never re-enable.
     /// E.g. `mintable: true → false` allowed; reverse blocked.
     #[serde(rename = "ratchet_off")]
@@ -145,6 +136,26 @@ enum SafetyConstraintMeta {
         /// Storage key prefix identifying this field.
         key: Vec<u8>,
     },
+}
+
+impl SafetyConstraintMeta {
+    /// Build a `RatchetOff` constraint (S3-2 cross-crate test helper).
+    pub fn ratchet_off(key: &[u8]) -> Self {
+        Self::RatchetOff { key: key.to_vec() }
+    }
+
+    /// Build a `FeeCap` constraint (S3-2 cross-crate test helper).
+    pub fn fee_cap(fee_keys: &[&[u8]], max_sum_bps: u16) -> Self {
+        Self::FeeCap {
+            fee_keys: fee_keys.iter().map(|k| k.to_vec()).collect(),
+            max_sum_bps,
+        }
+    }
+
+    /// Build a `RatchetUp` constraint (S3-2 cross-crate test helper).
+    pub fn ratchet_up(key: &[u8]) -> Self {
+        Self::RatchetUp { key: key.to_vec() }
+    }
 }
 
 /// Top-level `"lemma.meta"` payload.
@@ -278,8 +289,11 @@ pub(crate) fn build_metadata(contract: &TypedContract<'_>) -> Vec<u8> {
         safety_constraints,
     };
 
-    // Serialize to JSON bytes. Infallible for our fully-serializable types.
-    serde_json::to_vec(&meta).unwrap_or_default()
+    // Serialize to JSON bytes. Our types are fully serializable (no maps with
+    // non-string keys, no recursive references) — failure here is a bug, not a
+    // runtime condition. LOUD failure over silent-empty for a security payload
+    // the VM enforces at runtime (L-7, AGENTS §12).
+    serde_json::to_vec(&meta).expect("contract metadata is infallibly serializable")
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

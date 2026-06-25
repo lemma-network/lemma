@@ -75,6 +75,7 @@ use lemma_core::{
 };
 use lemma_crypto::PublicKey;
 use lemma_storage::WorldState;
+use tracing::warn;
 
 use crate::{
     circuit_breaker::NetworkTier,
@@ -309,11 +310,37 @@ impl Mempool {
 
         let replaced_hash: Option<Hash> = if let Some(old_hash) = existing {
             // Extract needed fields before mutating (ends the immutable borrow).
+            // S-3 fix: graceful handling instead of expect() on production path
+            // (AGENTS §4.2). The invariant (by_sender → entries consistency) is
+            // checked via debug_assert! in dev/test; in prod, a desync logs a
+            // warning and skips the RBF path rather than panicking the mempool.
             let (old_priority, old_seq, old_gas_price) = {
-                let e = self.entries.get(&old_hash).expect(
-                    "pool invariant: by_sender points to a hash that must exist in entries",
+                let entry = self.entries.get(&old_hash);
+                debug_assert!(
+                    entry.is_some(),
+                    "pool invariant violated: by_sender points to hash {old_hash} not in entries"
                 );
-                (e.priority, e.seq, e.tx.gas_price)
+                match entry {
+                    Some(e) => (e.priority, e.seq, e.tx.gas_price),
+                    None => {
+                        warn!(
+                            old_hash = %old_hash,
+                            sender = %tx.sender,
+                            nonce = tx.nonce,
+                            "pool index desync: by_sender references hash not in entries — \
+                             cleaning up stale index and treating as new insertion"
+                        );
+                        // Clean up the stale by_sender entry.
+                        if let Some(nonces) = self.by_sender.get_mut(&tx.sender) {
+                            nonces.remove(&tx.nonce);
+                            if nonces.is_empty() {
+                                self.by_sender.remove(&tx.sender);
+                            }
+                        }
+                        // Fall through to the "no existing entry" path (new insertion).
+                        return self.admit_as_new(tx, priority, hint, ctx);
+                    }
+                }
             };
             // Require a minimum price bump — stops spam replacements.
             let min_price = rbf_min_price(old_gas_price, MIN_REPLACE_BUMP_BPS);
@@ -506,6 +533,82 @@ impl Mempool {
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// Remove `hash` from all three indexes.
+    ///
+    /// `priority` and `seq` are the key used in `priority_index`; they must
+    /// match the entry's stored values (the caller is responsible for reading
+    /// them before calling).
+    ///
+    /// Returns the removed [`PoolEntry`] if it existed, `None` otherwise.
+    /// Always removes the `(priority, seq)` key from `priority_index` (defensive
+    /// cleanup even if the primary entry was somehow absent).
+    /// Admit a transaction as a new insertion (no RBF replacement).
+    ///
+    /// Runs steps 5b–8 of the admission pipeline: capacity eviction, local fee
+    /// recording, Express classification, and index insertion.
+    ///
+    /// Extracted as a helper for the S-3 graceful-fallback path: when a
+    /// `by_sender` index desync is detected, the stale entry is cleaned up and
+    /// the transaction is admitted as if no prior `(sender, nonce)` existed.
+    fn admit_as_new(
+        &mut self,
+        tx: Transaction,
+        priority: Priority,
+        hint: Option<&ExpressHint>,
+        _ctx: &AdmitContext,
+    ) -> Result<AdmitOutcome, MempoolError> {
+        // ── Step 5b: Capacity — evict lowest-priority if pool is full ─────
+        if self.entries.len() >= self.capacity {
+            let min_entry = self.priority_index.iter().next().map(|(&k, &v)| (k, v));
+            match min_entry {
+                Some(((min_p, min_seq), evict_hash)) if priority > min_p => {
+                    self.remove_internal(evict_hash, min_p, min_seq);
+                }
+                _ => {
+                    return Err(MempoolError::PoolFull {
+                        tx_hash: tx.hash,
+                        capacity: self.capacity,
+                    });
+                }
+            }
+        }
+
+        // ── Step 6: Local fee recording ──────────────────────────────────────
+        if let Some(contract_addr) = tx.to {
+            if matches!(tx.tx_type, TxType::ContractCall | TxType::ContractDeploy) {
+                self.local_fees.record(&contract_addr);
+            }
+        }
+
+        // ── Step 7: Express classification ───────────────────────────────────
+        let express = classify(tx.tx_type, hint);
+
+        // ── Step 8: Insert into all indexes ──────────────────────────────────
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+
+        let hash = tx.hash;
+        let sender = tx.sender;
+        let nonce = tx.nonce;
+
+        self.entries.insert(
+            hash,
+            PoolEntry {
+                tx,
+                priority,
+                seq,
+                express,
+            },
+        );
+        self.priority_index.insert((priority, seq), hash);
+        self.by_sender
+            .entry(sender)
+            .or_default()
+            .insert(nonce, hash);
+
+        Ok(AdmitOutcome::Inserted)
+    }
 
     /// Remove `hash` from all three indexes.
     ///

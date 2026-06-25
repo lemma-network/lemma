@@ -458,11 +458,11 @@ pub(crate) fn build_abi(contract: &TypedContract<'_>) -> Result<Vec<u8>, crate::
         });
     }
 
-    // Serialize to JSON bytes. Infallible for our fully-serializable types
-    // (structs with String/u32/Vec fields). unwrap_or_default returns empty
-    // on the impossible error (serde_json only fails for non-serializable types
-    // or recursive references, which our types don't have).
-    Ok(serde_json::to_vec(&descriptors).unwrap_or_default())
+    // Serialize to JSON bytes. Our types are fully serializable (structs with
+    // String/u32/Vec fields — no maps with non-string keys, no recursive
+    // references). LOUD failure over silent-empty for a security payload the VM
+    // uses for dispatch (L-7, AGENTS §12).
+    Ok(serde_json::to_vec(&descriptors).expect("ABI descriptor is infallibly serializable"))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

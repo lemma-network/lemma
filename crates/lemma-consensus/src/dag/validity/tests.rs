@@ -16,8 +16,8 @@ use lemma_core::{
 use crate::{
     dag::block::{DagBlock, DagBlockBody, DagBlockRef},
     dag::validity::{
-        check_author_and_signature, check_digest_integrity, check_gc_boundary,
-        check_no_equivocation, check_strong_link_quorum, collect_missing_ancestors,
+        collect_missing_ancestors, validate_author_and_signature, validate_digest_integrity,
+        validate_gc_boundary, validate_no_equivocation, validate_strong_link_quorum,
     },
     error::ConsensusError,
 };
@@ -75,73 +75,73 @@ fn make_block(round: u64, author_n: u8, ancestors: Vec<DagBlockRef>) -> DagBlock
     )
 }
 
-// ── check_digest_integrity ────────────────────────────────────────────────────
+// ── validate_digest_integrity ────────────────────────────────────────────────────
 
 #[test]
-fn check_digest_integrity_honest_block_passes() {
+fn validate_digest_integrity_honest_block_passes() {
     // DagBlock::new computes digest from body — always matches.
     let block = make_block(1, 1, vec![]);
-    assert!(check_digest_integrity(&block).is_ok());
+    assert!(validate_digest_integrity(&block).is_ok());
 }
 
 #[test]
-fn check_digest_integrity_forged_digest_rejected() {
+fn validate_digest_integrity_forged_digest_rejected() {
     // Build honest block, then overwrite digest with a forged value.
     // DagBlock.digest is pub so we can mutate it directly for this test.
     let mut block = make_block(1, 1, vec![]);
     block.digest = Hash::from_bytes([0xDE; 32]); // forged — does not match body
-    let err = check_digest_integrity(&block).unwrap_err();
+    let err = validate_digest_integrity(&block).unwrap_err();
     assert!(
         matches!(err, ConsensusError::DigestMismatch { .. }),
         "expected DigestMismatch, got {err:?}"
     );
 }
 
-// ── check_author_and_signature ────────────────────────────────────────────────
+// ── validate_author_and_signature ────────────────────────────────────────────────
 
 #[test]
-fn check_author_and_signature_known_author_and_sig_ok_passes() {
+fn validate_author_and_signature_known_author_and_sig_ok_passes() {
     let vset = vset_4();
     let block = make_block(1, 1, vec![]);
-    assert!(check_author_and_signature(&block, &vset, true).is_ok());
+    assert!(validate_author_and_signature(&block, &vset, true).is_ok());
 }
 
 #[test]
-fn check_author_and_signature_unknown_author_returns_error() {
+fn validate_author_and_signature_unknown_author_returns_error() {
     let vset = vset_4();
     let block = make_block(1, 9, vec![]); // addr(9) not in vset
-    let err = check_author_and_signature(&block, &vset, true).unwrap_err();
+    let err = validate_author_and_signature(&block, &vset, true).unwrap_err();
     assert!(matches!(err, ConsensusError::UnknownAuthor { .. }));
 }
 
 #[test]
-fn check_author_and_signature_sig_fail_returns_error() {
+fn validate_author_and_signature_sig_fail_returns_error() {
     let vset = vset_4();
     let block = make_block(1, 1, vec![]);
-    let err = check_author_and_signature(&block, &vset, false).unwrap_err();
+    let err = validate_author_and_signature(&block, &vset, false).unwrap_err();
     assert!(matches!(err, ConsensusError::InvalidSignature { .. }));
 }
 
 #[test]
-fn check_author_and_signature_unknown_author_takes_precedence_over_bad_sig() {
+fn validate_author_and_signature_unknown_author_takes_precedence_over_bad_sig() {
     // Unknown author is checked first (membership before sig).
     let vset = vset_4();
     let block = make_block(1, 9, vec![]);
-    let err = check_author_and_signature(&block, &vset, false).unwrap_err();
+    let err = validate_author_and_signature(&block, &vset, false).unwrap_err();
     assert!(matches!(err, ConsensusError::UnknownAuthor { .. }));
 }
 
-// ── check_gc_boundary ─────────────────────────────────────────────────────────
+// ── validate_gc_boundary ─────────────────────────────────────────────────────────
 
 #[test]
-fn check_gc_boundary_round_above_gc_passes() {
-    assert!(check_gc_boundary(10, 5).is_ok());
+fn validate_gc_boundary_round_above_gc_passes() {
+    assert!(validate_gc_boundary(10, 5).is_ok());
 }
 
 #[test]
-fn check_gc_boundary_round_exactly_at_gc_rejected() {
+fn validate_gc_boundary_round_exactly_at_gc_rejected() {
     // Strict >: round must be ABOVE gc_round, not equal.
-    let err = check_gc_boundary(5, 5).unwrap_err();
+    let err = validate_gc_boundary(5, 5).unwrap_err();
     assert!(matches!(
         err,
         ConsensusError::BelowGcBoundary {
@@ -152,8 +152,8 @@ fn check_gc_boundary_round_exactly_at_gc_rejected() {
 }
 
 #[test]
-fn check_gc_boundary_round_below_gc_rejected() {
-    let err = check_gc_boundary(3, 10).unwrap_err();
+fn validate_gc_boundary_round_below_gc_rejected() {
+    let err = validate_gc_boundary(3, 10).unwrap_err();
     assert!(matches!(
         err,
         ConsensusError::BelowGcBoundary {
@@ -164,37 +164,37 @@ fn check_gc_boundary_round_below_gc_rejected() {
 }
 
 #[test]
-fn check_gc_boundary_genesis_round_zero_exempt() {
+fn validate_gc_boundary_genesis_round_zero_exempt() {
     // Genesis round (0) is always exempt, even when gc_round = 0.
-    assert!(check_gc_boundary(0, 0).is_ok());
+    assert!(validate_gc_boundary(0, 0).is_ok());
 }
 
-// ── check_strong_link_quorum ──────────────────────────────────────────────────
+// ── validate_strong_link_quorum ──────────────────────────────────────────────────
 
 #[test]
-fn check_strong_link_quorum_genesis_round_exempt() {
+fn validate_strong_link_quorum_genesis_round_exempt() {
     let vset = vset_4();
     // Round 0: no prev round → no strong links needed.
     let block = make_block(0, 1, vec![]);
-    assert!(check_strong_link_quorum(&block, &vset).is_ok());
+    assert!(validate_strong_link_quorum(&block, &vset).is_ok());
 }
 
 #[test]
-fn check_strong_link_quorum_sufficient_quorum_passes() {
+fn validate_strong_link_quorum_sufficient_quorum_passes() {
     // 3 of 4 validators at round 0 → quorum. Block is at round 1.
     let vset = vset_4();
     let ancestors = vec![block_ref(0, 1), block_ref(0, 2), block_ref(0, 3)];
     let block = make_block(1, 4, ancestors);
-    assert!(check_strong_link_quorum(&block, &vset).is_ok());
+    assert!(validate_strong_link_quorum(&block, &vset).is_ok());
 }
 
 #[test]
-fn check_strong_link_quorum_exact_two_thirds_not_sufficient() {
+fn validate_strong_link_quorum_exact_two_thirds_not_sufficient() {
     // 2 of 4 validators at round 0 → 20 * 3 = 60, total * 2 = 80. 60 > 80 is false.
     let vset = vset_4();
     let ancestors = vec![block_ref(0, 1), block_ref(0, 2)];
     let block = make_block(1, 3, ancestors);
-    let err = check_strong_link_quorum(&block, &vset).unwrap_err();
+    let err = validate_strong_link_quorum(&block, &vset).unwrap_err();
     assert!(matches!(
         err,
         ConsensusError::InsufficientStrongLinks { .. }
@@ -202,7 +202,7 @@ fn check_strong_link_quorum_exact_two_thirds_not_sufficient() {
 }
 
 #[test]
-fn check_strong_link_quorum_non_member_ancestors_do_not_count() {
+fn validate_strong_link_quorum_non_member_ancestors_do_not_count() {
     // 2 known members + 1 unknown at round 0 → still only 20 stake → not quorum.
     let vset = vset_4();
     let ancestors = vec![
@@ -211,7 +211,7 @@ fn check_strong_link_quorum_non_member_ancestors_do_not_count() {
         block_ref(0, 9), // addr(9) not in vset
     ];
     let block = make_block(1, 3, ancestors);
-    let err = check_strong_link_quorum(&block, &vset).unwrap_err();
+    let err = validate_strong_link_quorum(&block, &vset).unwrap_err();
     assert!(matches!(
         err,
         ConsensusError::InsufficientStrongLinks { .. }
@@ -219,7 +219,7 @@ fn check_strong_link_quorum_non_member_ancestors_do_not_count() {
 }
 
 #[test]
-fn check_strong_link_quorum_weak_links_do_not_count_toward_quorum() {
+fn validate_strong_link_quorum_weak_links_do_not_count_toward_quorum() {
     // Weak links at round < prev do NOT count toward strong-link quorum.
     // Only ancestors at exactly round-1 are strong links.
     let vset = vset_4();
@@ -234,45 +234,45 @@ fn check_strong_link_quorum_weak_links_do_not_count_toward_quorum() {
         block_ref(0, 3),
     ];
     let block = make_block(2, 4, ancestors);
-    let err = check_strong_link_quorum(&block, &vset).unwrap_err();
+    let err = validate_strong_link_quorum(&block, &vset).unwrap_err();
     assert!(matches!(
         err,
         ConsensusError::InsufficientStrongLinks { .. }
     ));
 }
 
-// ── check_no_equivocation ─────────────────────────────────────────────────────
+// ── validate_no_equivocation ─────────────────────────────────────────────────────
 
 #[test]
-fn check_no_equivocation_no_prior_block_passes() {
+fn validate_no_equivocation_no_prior_block_passes() {
     let block = make_block(1, 1, vec![]);
-    assert!(check_no_equivocation(&block, None).is_ok());
+    assert!(validate_no_equivocation(&block, None).is_ok());
 }
 
 #[test]
-fn check_no_equivocation_same_block_resubmitted_passes() {
+fn validate_no_equivocation_same_block_resubmitted_passes() {
     // Identical block (same digest) = idempotent re-delivery, not equivocation.
     let block = make_block(1, 1, vec![]);
     let existing = Some(block.reference());
-    assert!(check_no_equivocation(&block, existing).is_ok());
+    assert!(validate_no_equivocation(&block, existing).is_ok());
 }
 
 #[test]
-fn check_no_equivocation_different_block_same_slot_returns_error() {
+fn validate_no_equivocation_different_block_same_slot_returns_error() {
     let block_a = make_block(1, 1, vec![]);
     let block_b = make_block(1, 1, vec![block_ref(0, 2)]); // different body → different digest
     let existing = Some(block_a.reference());
-    let err = check_no_equivocation(&block_b, existing).unwrap_err();
+    let err = validate_no_equivocation(&block_b, existing).unwrap_err();
     assert!(matches!(err, ConsensusError::Equivocation { .. }));
     assert!(err.is_equivocation());
 }
 
 #[test]
-fn check_no_equivocation_error_contains_both_digests() {
+fn validate_no_equivocation_error_contains_both_digests() {
     let block_a = make_block(1, 1, vec![]);
     let block_b = make_block(1, 1, vec![block_ref(0, 2)]);
     let existing = Some(block_a.reference());
-    let err = check_no_equivocation(&block_b, existing).unwrap_err();
+    let err = validate_no_equivocation(&block_b, existing).unwrap_err();
     if let ConsensusError::Equivocation { first, second, .. } = err {
         assert_eq!(first, block_a.digest);
         assert_eq!(second, block_b.digest);

@@ -160,14 +160,15 @@ pub fn parse_safety_manifest(wasm_bytes: &[u8]) -> SafetyManifest {
 /// Returns `1` (the initial ABI) when:
 /// - the `"lemma.meta"` section is absent (pre-Step-20 compiled contract),
 /// - the `"host_abi"` field is missing from the JSON,
-/// - the JSON is malformed,
-/// - or the value is out of `u32` range.
+/// - the JSON is malformed.
 ///
 /// This default ensures backward compatibility: contracts compiled before
 /// P3·Step 20 (which do not embed `host_abi`) continue to work with ABI v1.
 ///
-/// Reuses [`crate::parallel::hints::find_lemma_meta_section`] to locate the
-/// custom section (DRY — AGENTS §2.4). No panic — all error paths return 1.
+/// V-DRY-1 audit fix: now parses via the shared [`RawContractMetadata`] struct
+/// (which includes `host_abi: Option<u32>`) instead of a separate
+/// `serde_json::Value` re-parse. ONE parse path for the entire `"lemma.meta"`
+/// section (DRY — AGENTS §2.4).
 ///
 /// See `docs/17-VERSIONING_SPEC.md §3.2` and `DB-A58 L2`.
 pub(crate) fn parse_host_abi(wasm_bytes: &[u8]) -> u32 {
@@ -175,14 +176,12 @@ pub(crate) fn parse_host_abi(wasm_bytes: &[u8]) -> u32 {
         // No "lemma.meta" section — pre-Step-20 contract or non-Lem bytecode.
         return 1;
     };
-    let Ok(obj) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+    let Ok(raw) = serde_json::from_slice::<crate::parallel::hints::RawContractMetadata>(&payload)
+    else {
         // Malformed JSON — fail-safe default (old contracts expected to lack this field).
         return 1;
     };
-    obj.get("host_abi")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(1)
+    raw.host_abi.unwrap_or(1)
 }
 
 // ── Byte-value interpretation helpers ─────────────────────────────────────────
@@ -251,7 +250,7 @@ fn bytes_to_u128(bytes: &[u8]) -> Result<u128, VmError> {
 
 // ── Post-execution invariant check ───────────────────────────────────────────
 
-/// Check whether the scratch state-diff violates any safety constraint.
+/// Validate whether the scratch state-diff satisfies all safety constraints.
 ///
 /// Called in `settle()` after execution success, before commit. If any constraint
 /// is violated, returns `Err(VmError::HoneypotInvariantViolation)` and the
@@ -277,7 +276,7 @@ fn bytes_to_u128(bytes: &[u8]) -> Result<u128, VmError> {
 ///
 /// This function never panics. All conversions use safe byte-level ops.
 /// Returns `Ok(())` for empty manifests (backward compat).
-pub(crate) fn check_safety_invariants<S: ContractStateView>(
+pub(crate) fn validate_safety_invariants<S: ContractStateView>(
     manifest: &SafetyManifest,
     contract_addr: &Address,
     storage_writes: &BTreeMap<(Address, Vec<u8>), Option<Vec<u8>>>,
@@ -286,16 +285,16 @@ pub(crate) fn check_safety_invariants<S: ContractStateView>(
     for constraint in &manifest.constraints {
         match constraint {
             SafetyConstraint::RatchetBool { key, locked_value } => {
-                check_ratchet_bool(contract_addr, key, locked_value, storage_writes, canonical)?;
+                validate_ratchet_bool(contract_addr, key, locked_value, storage_writes, canonical)?;
             }
             SafetyConstraint::RatchetOff { key } => {
-                check_ratchet_off(contract_addr, key, storage_writes, canonical)?;
+                validate_ratchet_off(contract_addr, key, storage_writes, canonical)?;
             }
             SafetyConstraint::FeeCap {
                 fee_keys,
                 max_sum_bps,
             } => {
-                check_fee_cap(
+                validate_fee_cap(
                     contract_addr,
                     fee_keys,
                     *max_sum_bps,
@@ -304,7 +303,7 @@ pub(crate) fn check_safety_invariants<S: ContractStateView>(
                 )?;
             }
             SafetyConstraint::RatchetUp { key } => {
-                check_ratchet_up(contract_addr, key, storage_writes, canonical)?;
+                validate_ratchet_up(contract_addr, key, storage_writes, canonical)?;
             }
         }
     }
@@ -316,7 +315,7 @@ pub(crate) fn check_safety_invariants<S: ContractStateView>(
 /// A write changing the field TO `locked_value` when the old value was different
 /// (i.e. was unlocked) is a violation. New fields (no prior value) and fields
 /// already at `locked_value` are not violations.
-fn check_ratchet_bool<S: ContractStateView>(
+fn validate_ratchet_bool<S: ContractStateView>(
     contract_addr: &Address,
     key: &[u8],
     locked_value: &[u8],
@@ -366,7 +365,7 @@ fn check_ratchet_bool<S: ContractStateView>(
 /// - "falsy"  = all bytes are zero, or empty/absent (disabled/off).
 ///
 /// A write changing from falsy (off) to truthy (on) is a violation (re-enabling).
-fn check_ratchet_off<S: ContractStateView>(
+fn validate_ratchet_off<S: ContractStateView>(
     contract_addr: &Address,
     key: &[u8],
     storage_writes: &BTreeMap<(Address, Vec<u8>), Option<Vec<u8>>>,
@@ -406,7 +405,7 @@ fn check_ratchet_off<S: ContractStateView>(
 /// Interpret a byte slice as a boolean: truthy if any byte is non-zero.
 ///
 /// Empty slices are falsy (no bytes → no non-zero byte).
-/// Used by `check_ratchet_off` for normalized boolean interpretation (W2 fix).
+/// Used by `validate_ratchet_off` for normalized boolean interpretation (W2 fix).
 fn is_truthy(bytes: &[u8]) -> bool {
     bytes.iter().any(|&b| b != 0)
 }
@@ -416,7 +415,7 @@ fn is_truthy(bytes: &[u8]) -> bool {
 /// If ANY fee key was written this tx, re-evaluate the sum of ALL fee keys
 /// (using scratch values for written keys, canonical for unwritten keys).
 /// If the sum exceeds `max_sum_bps`, it's a violation.
-fn check_fee_cap<S: ContractStateView>(
+fn validate_fee_cap<S: ContractStateView>(
     contract_addr: &Address,
     fee_keys: &[Vec<u8>],
     max_sum_bps: u16,
@@ -471,7 +470,7 @@ fn check_fee_cap<S: ContractStateView>(
 ///
 /// If the new value (little-endian u128) is less than the old value, it's a
 /// violation. New fields (no prior value) are not violations.
-fn check_ratchet_up<S: ContractStateView>(
+fn validate_ratchet_up<S: ContractStateView>(
     contract_addr: &Address,
     key: &[u8],
     storage_writes: &BTreeMap<(Address, Vec<u8>), Option<Vec<u8>>>,

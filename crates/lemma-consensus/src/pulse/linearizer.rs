@@ -252,7 +252,7 @@ fn linearize_sub_dag(
 /// the 2f+1 quorum — so "all round-(L-1) member ancestors" and
 /// "strong-link quorum parents" are the same set given an accepted leader.
 /// Non-member ancestors (stake 0) are skipped (AGENTS §2, consistent with
-/// `ThresholdClock` and `check_strong_link_quorum`).
+/// `ThresholdClock` and `validate_strong_link_quorum`).
 /// The result is clamped to be ≥ `last_commit_ts_ms` (monotonic).
 ///
 /// **Not** the leader's own `timestamp_ms` (that is advisory only).
@@ -280,7 +280,7 @@ pub(crate) fn commit_timestamp(
 
     // Collect (stake, timestamp_ms) for each round-(L-1) parent.
     // Non-member ancestors: stake 0 by definition → skip (consistent
-    // with ThresholdClock and check_strong_link_quorum, AGENTS §2).
+    // with ThresholdClock and validate_strong_link_quorum, AGENTS §2).
     let mut samples: Vec<(u128, u64)> = Vec::new(); // (stake_drop, timestamp_ms)
     for ancestor_ref in leader.ancestors_at_round(prev_round) {
         if let Some(member) = vset.members.get(&ancestor_ref.author) {

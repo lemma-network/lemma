@@ -274,7 +274,7 @@ fn parse_extracts_empty_constraints_array() {
     assert!(manifest.constraints.is_empty());
 }
 
-// ── check_safety_invariants tests (P3·Step 18-05) ────────────────────────────
+// ── validate_safety_invariants tests (P3·Step 18-05) ────────────────────────────
 
 use crate::state::InMemoryStateView;
 
@@ -310,7 +310,7 @@ fn check_empty_manifest_always_passes() {
     let writes = writes_with(&addr, b"anything", Some(vec![42]));
     let canonical = InMemoryStateView::new();
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_ok());
 }
 
@@ -325,7 +325,7 @@ fn ratchet_bool_passes_when_key_not_written() {
     let writes = BTreeMap::new(); // no writes
     let canonical = InMemoryStateView::new();
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -339,7 +339,7 @@ fn ratchet_bool_passes_when_written_to_unlocked_value() {
     let writes = writes_with(&addr, b"tradingEnabled", Some(vec![1]));
     let canonical = InMemoryStateView::new();
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -353,7 +353,7 @@ fn ratchet_bool_passes_when_field_is_new() {
     let writes = writes_with(&addr, b"tradingEnabled", Some(vec![0]));
     let canonical = InMemoryStateView::new(); // empty — field is new
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -367,7 +367,7 @@ fn ratchet_bool_passes_when_already_locked() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"tradingEnabled", vec![0]); // already locked
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -381,7 +381,7 @@ fn ratchet_bool_violates_when_relocking() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"tradingEnabled", vec![1]); // was unlocked
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_err());
     let err = result.unwrap_err();
     let msg = err.to_string();
@@ -406,7 +406,7 @@ fn ratchet_bool_passes_when_deleted() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"tradingEnabled", vec![1]);
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 // ── RatchetOff tests ─────────────────────────────────────────────────────────
@@ -420,7 +420,7 @@ fn ratchet_off_passes_when_key_not_written() {
     let writes = BTreeMap::new();
     let canonical = InMemoryStateView::new();
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -434,7 +434,7 @@ fn ratchet_off_passes_when_disabling() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"mintable", vec![1]); // was on
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -448,7 +448,7 @@ fn ratchet_off_violates_when_re_enabling() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"mintable", vec![0]); // was off
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -472,7 +472,7 @@ fn ratchet_off_passes_when_already_on() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"mintable", vec![1]); // was already on
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -485,7 +485,7 @@ fn ratchet_off_passes_when_field_is_new() {
     let writes = writes_with(&addr, b"mintable", Some(vec![1]));
     let canonical = InMemoryStateView::new(); // empty
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 // ── FeeCap tests ─────────────────────────────────────────────────────────────
@@ -499,7 +499,7 @@ fn fee_cap_passes_when_no_fee_keys_written() {
     let writes = BTreeMap::new();
     let canonical = InMemoryStateView::new();
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -515,7 +515,7 @@ fn fee_cap_passes_when_sum_within_cap() {
     canonical.write(&addr, b"fees.holders", 500u64.to_le_bytes().to_vec());
     // Total: 1000 + 500 = 1500 ≤ 2500 → OK
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -531,7 +531,7 @@ fn fee_cap_violates_when_sum_exceeds_cap() {
     canonical.write(&addr, b"fees.holders", 1000u64.to_le_bytes().to_vec());
     // Total: 2000 + 1000 = 3000 > 2500 → violation
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -564,7 +564,7 @@ fn fee_cap_passes_when_sum_equals_cap() {
     );
     let canonical = InMemoryStateView::new();
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -584,7 +584,7 @@ fn fee_cap_treats_deleted_key_as_zero() {
     insert_write(&mut writes, &addr, b"fees.holders", None); // deleted
     let canonical = InMemoryStateView::new();
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 // ── RatchetUp tests ──────────────────────────────────────────────────────────
@@ -598,7 +598,7 @@ fn ratchet_up_passes_when_key_not_written() {
     let writes = BTreeMap::new();
     let canonical = InMemoryStateView::new();
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -612,7 +612,7 @@ fn ratchet_up_passes_when_increasing() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"maxWallet", 100u128.to_le_bytes().to_vec());
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -626,7 +626,7 @@ fn ratchet_up_passes_when_equal() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"maxWallet", 100u128.to_le_bytes().to_vec());
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -640,7 +640,7 @@ fn ratchet_up_violates_when_decreasing() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"maxWallet", 200u128.to_le_bytes().to_vec());
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -661,7 +661,7 @@ fn ratchet_up_passes_when_field_is_new() {
     let writes = writes_with(&addr, b"maxWallet", Some(100u128.to_le_bytes().to_vec()));
     let canonical = InMemoryStateView::new(); // empty
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -675,7 +675,7 @@ fn ratchet_up_violates_when_deleted_and_old_nonzero() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"maxWallet", 100u128.to_le_bytes().to_vec());
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -699,7 +699,7 @@ fn ratchet_up_passes_when_deleted_and_old_zero() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"maxWallet", 0u128.to_le_bytes().to_vec());
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 // ── Multiple constraints ─────────────────────────────────────────────────────
@@ -727,7 +727,7 @@ fn check_stops_at_first_violation() {
     canonical.write(&addr, b"tradingEnabled", vec![1]);
     canonical.write(&addr, b"maxWallet", 100u128.to_le_bytes().to_vec());
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_err());
     // Should be the ratchet_bool violation (first constraint).
     let msg = result.unwrap_err().to_string();
@@ -774,7 +774,7 @@ fn check_passes_when_all_constraints_satisfied() {
     canonical.write(&addr, b"fees.holders", 500u64.to_le_bytes().to_vec());
     canonical.write(&addr, b"maxWallet", 100u128.to_le_bytes().to_vec());
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 // ── Different contract address ───────────────────────────────────────────────
@@ -792,7 +792,7 @@ fn check_ignores_writes_to_different_contract() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&other_addr, b"tradingEnabled", vec![1]);
 
-    assert!(check_safety_invariants(&manifest, &contract_addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &contract_addr, &writes, &canonical).is_ok());
 }
 
 // ── Byte helper tests ────────────────────────────────────────────────────────
@@ -877,7 +877,7 @@ fn ratchet_bool_lock_then_unlock_nets_to_unlocked_passes() {
     canonical.write(&addr, b"tradingEnabled", vec![1]); // was unlocked
 
     // Net write is unlocked → no violation.
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -895,7 +895,7 @@ fn ratchet_bool_unlock_then_lock_nets_to_locked_violates() {
     canonical.write(&addr, b"tradingEnabled", vec![1]); // was unlocked
 
     // Net write is locked (was unlocked → now locked) → violation.
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -918,7 +918,7 @@ fn fee_cap_oversized_bytes_rejects() {
     let writes = writes_with(&addr, b"fees.burn", Some(oversized_value));
     let canonical = InMemoryStateView::new();
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(result.is_err(), "oversized fee value must be rejected");
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -940,7 +940,7 @@ fn ratchet_up_oversized_bytes_rejects() {
     let mut canonical = InMemoryStateView::new();
     canonical.write(&addr, b"maxWallet", 100u128.to_le_bytes().to_vec());
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(
         result.is_err(),
         "oversized ratchet-up value must be rejected"
@@ -967,7 +967,7 @@ fn ratchet_off_multi_byte_truthy_re_enable_violates() {
     // Old value is [0, 0] — falsy (all zeros).
     canonical.write(&addr, b"mintable", vec![0, 0]);
 
-    let result = check_safety_invariants(&manifest, &addr, &writes, &canonical);
+    let result = validate_safety_invariants(&manifest, &addr, &writes, &canonical);
     assert!(
         result.is_err(),
         "multi-byte truthy re-enable must be a violation"
@@ -984,7 +984,7 @@ fn ratchet_off_multi_byte_falsy_to_truthy_from_empty_passes() {
     let writes = writes_with(&addr, b"mintable", Some(vec![0, 0, 1]));
     let canonical = InMemoryStateView::new(); // empty — field is new
 
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 #[test]
@@ -1000,7 +1000,7 @@ fn ratchet_off_all_zero_multi_byte_is_falsy_no_violation() {
     canonical.write(&addr, b"mintable", vec![1]); // was on
 
     // Disabling (truthy → falsy) is allowed.
-    assert!(check_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
+    assert!(validate_safety_invariants(&manifest, &addr, &writes, &canonical).is_ok());
 }
 
 // ── parse_host_abi tests (P3·Step 20, DB-A58 L2) ─────────────────────────────
@@ -1102,4 +1102,150 @@ fn parse_host_abi_defaults_to_1_for_string_value() {
                   \"functions\":[],\"host_abi\":\"v1\"}";
     let wasm = wasm_with_meta_json(json);
     assert_eq!(parse_host_abi(&wasm), 1);
+}
+
+// ── S3-1: Cross-crate host-ABI version anchor pin test ───────────────────────
+
+#[test]
+fn s3_1_host_abi_anchor_emit_leq_max() {
+    // Pin test: the compiler's emitted HOST_ABI_VERSION must be ≤ the VM's
+    // MAX_SUPPORTED_HOST_ABI. Both now reference lemma_core::CURRENT_HOST_ABI_VERSION,
+    // but this test catches any future divergence (e.g. if one side is bumped
+    // without the other, or if the anchor is bypassed).
+    //
+    // See docs/17-VERSIONING_SPEC.md §3.
+    let emit_version = lemma_core::CURRENT_HOST_ABI_VERSION;
+    let max_supported = crate::MAX_SUPPORTED_HOST_ABI;
+    assert!(
+        emit_version <= max_supported,
+        "S3-1: compiler emit version ({emit_version}) must be ≤ VM max supported ({max_supported})"
+    );
+}
+
+// ── S3-2: Cross-crate SafetyConstraint mirror round-trip test ────────────────
+//
+// The compiler (lemma-lang) emits SafetyConstraintMeta (Serialize-only) and the
+// VM (lemma-vm) deserializes SafetyConstraint (Serialize+Deserialize). These are
+// a deliberate cross-WASM-section mirror (AGENTS §8) kept in sync by hand.
+//
+// This test pins the wire contract: for every shared variant, serialize the
+// emit-side enum → deserialize as the parse-side enum → assert tags+fields match.
+// A renamed tag or new variant breaks THIS test, not production.
+//
+// Note: SafetyConstraint::RatchetBool exists only on the VM side (the compiler
+// deleted it per P3 audit subtask 10). It is tested separately for backward
+// compat (VM can still deserialize old contracts that embedded it).
+
+/// Serialize a SafetyConstraintMeta (lang-side) to JSON, then deserialize as
+/// SafetyConstraint (VM-side) and assert structural equality.
+fn assert_mirror_roundtrip(lang_json: &str, expected_vm: &SafetyConstraint) {
+    let deserialized: SafetyConstraint = serde_json::from_str(lang_json).unwrap_or_else(|e| {
+        panic!("S3-2: lang→vm deserialization failed for JSON: {lang_json}\nerror: {e}")
+    });
+    assert_eq!(
+        &deserialized, expected_vm,
+        "S3-2: lang→vm mirror mismatch for JSON: {lang_json}"
+    );
+}
+
+#[test]
+fn s3_2_mirror_roundtrip_ratchet_off() {
+    // Lang emits: {"type":"ratchet_off","key":[109,105,110,116,97,98,108,101]}
+    // VM must deserialize to SafetyConstraint::RatchetOff { key: b"mintable" }
+    use lemma_lang::codegen::metadata::SafetyConstraintMeta;
+
+    let lang_variant = SafetyConstraintMeta::ratchet_off(b"mintable");
+    let lang_json = serde_json::to_string(&lang_variant).expect("serialize lang");
+    let expected = SafetyConstraint::RatchetOff {
+        key: b"mintable".to_vec(),
+    };
+    assert_mirror_roundtrip(&lang_json, &expected);
+}
+
+#[test]
+fn s3_2_mirror_roundtrip_fee_cap() {
+    // Lang emits: {"type":"fee_cap","fee_keys":[[...],[...]],"max_sum_bps":2500}
+    // VM must deserialize to SafetyConstraint::FeeCap { fee_keys, max_sum_bps }
+    use lemma_lang::codegen::metadata::SafetyConstraintMeta;
+
+    let lang_variant =
+        SafetyConstraintMeta::fee_cap(&[b"fees.burn", b"fees.holders", b"fees.others"], 2500);
+    let lang_json = serde_json::to_string(&lang_variant).expect("serialize lang");
+    let expected = SafetyConstraint::FeeCap {
+        fee_keys: vec![
+            b"fees.burn".to_vec(),
+            b"fees.holders".to_vec(),
+            b"fees.others".to_vec(),
+        ],
+        max_sum_bps: 2500,
+    };
+    assert_mirror_roundtrip(&lang_json, &expected);
+}
+
+#[test]
+fn s3_2_mirror_roundtrip_ratchet_up() {
+    // Lang emits: {"type":"ratchet_up","key":[109,97,120,87,97,108,108,101,116]}
+    // VM must deserialize to SafetyConstraint::RatchetUp { key: b"maxWallet" }
+    use lemma_lang::codegen::metadata::SafetyConstraintMeta;
+
+    let lang_variant = SafetyConstraintMeta::ratchet_up(b"maxWallet");
+    let lang_json = serde_json::to_string(&lang_variant).expect("serialize lang");
+    let expected = SafetyConstraint::RatchetUp {
+        key: b"maxWallet".to_vec(),
+    };
+    assert_mirror_roundtrip(&lang_json, &expected);
+}
+
+#[test]
+fn s3_2_mirror_roundtrip_full_manifest() {
+    // Serialize a full manifest from the lang side, deserialize as VM SafetyManifest.
+    // This catches field-level drift (e.g. "safety_constraints" vs "constraints").
+    use lemma_lang::codegen::metadata::SafetyConstraintMeta;
+
+    let lang_constraints = vec![
+        SafetyConstraintMeta::ratchet_off(b"mintable"),
+        SafetyConstraintMeta::fee_cap(&[b"fees.burn", b"fees.holders"], 2500),
+        SafetyConstraintMeta::ratchet_up(b"maxWallet"),
+    ];
+    let lang_json = serde_json::to_string(&lang_constraints).expect("serialize lang");
+
+    let vm_constraints: Vec<SafetyConstraint> =
+        serde_json::from_str(&lang_json).expect("deserialize vm");
+
+    assert_eq!(vm_constraints.len(), 3);
+    assert_eq!(
+        vm_constraints[0],
+        SafetyConstraint::RatchetOff {
+            key: b"mintable".to_vec()
+        }
+    );
+    assert_eq!(
+        vm_constraints[1],
+        SafetyConstraint::FeeCap {
+            fee_keys: vec![b"fees.burn".to_vec(), b"fees.holders".to_vec()],
+            max_sum_bps: 2500,
+        }
+    );
+    assert_eq!(
+        vm_constraints[2],
+        SafetyConstraint::RatchetUp {
+            key: b"maxWallet".to_vec()
+        }
+    );
+}
+
+#[test]
+fn s3_2_ratchet_bool_vm_only_backward_compat() {
+    // RatchetBool exists only on the VM side (compiler deleted it per P3 audit
+    // subtask 10). Verify the VM can still deserialize it from old contracts.
+    let json = r#"{"type":"ratchet_bool","key":[116,114,97,100,105,110,103],"locked_value":[0]}"#;
+    let constraint: SafetyConstraint = serde_json::from_str(json)
+        .expect("VM must still deserialize RatchetBool for backward compat");
+    assert_eq!(
+        constraint,
+        SafetyConstraint::RatchetBool {
+            key: b"trading".to_vec(),
+            locked_value: vec![0],
+        }
+    );
 }

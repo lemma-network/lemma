@@ -1,4 +1,4 @@
-//! Authorization-set analysis — `Auth(f)` and `EffAuth`.
+//! Authorization-set analysis — `Auth(f)`.
 //!
 //! ## Purpose
 //!
@@ -6,10 +6,6 @@
 //!
 //! - **`Auth(f)`** (`auth_set`): the guard set declared directly on function `f`
 //!   via `@`-annotations (`@onlyOwner`, `@onlyRole("GOVERNANCE")`, etc.).
-//! - **`EffAuth(f, entry)`** (`compute_eff_auth`): the *effective* guard set
-//!   when `f` is reached from a `pub` entry function.  This is the union of
-//!   `Auth(entry)` and the `Auth` of every internal function on the call path
-//!   from `entry` to `f`.  Used by SAFETY-001/005/007/009.
 //!
 //! ## Canonical guard set (spec §2)
 //!
@@ -25,12 +21,10 @@
 //! "Requires governance" in the spec always means `@onlyRole("GOVERNANCE")` — **not**
 //! `@onlyOwner` and not a separate `@governance` annotation (spec §2 note).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::parser::{AnnotationArg, Expr, Literal};
-use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
-
-use super::cfg::CallGraph;
+use crate::type_checker::typed_contract::ContractFunction;
 
 // ─── Guard ────────────────────────────────────────────────────────────────────
 
@@ -89,107 +83,14 @@ pub fn auth_set(func: &ContractFunction<'_>) -> BTreeSet<Guard> {
     guards
 }
 
-// ─── EffAuth ──────────────────────────────────────────────────────────────────
-
-/// Compute effective guard sets for all functions reachable from a single
-/// `pub` entry function.
-///
-/// `EffAuth(callee, entry)` = `Auth(entry)` ∪ `Auth(fn1)` ∪ … ∪ `Auth(callee)`
-/// for every internal function on the call path from `entry` to `callee`.
-///
-/// ## Multi-path semantics (soundness)
-///
-/// When a callee is reachable via **multiple paths** (e.g. a diamond call graph:
-/// `entry → A → helper` and `entry → B → helper`), the effective guard set is
-/// the **intersection** of per-path sets — the weakest guarantee across all
-/// paths.  This is the sound conservative value for "is this mutation
-/// adequately guarded?" queries (SAFETY-001/002/009): if any path to the node
-/// is unguarded, the node is reachable without the guard.
-///
-/// ## Algorithm
-///
-/// Monotone fixpoint iteration over a worklist.  The guard-set lattice is
-/// ordered by ⊆; the merge operator is ∩ (meet).  Since intersection is
-/// monotonically decreasing and guard sets are finite, the algorithm always
-/// terminates.  Cycles (recursion) are handled naturally: a function is
-/// re-added to the worklist only when its guard set shrinks.
-///
-/// ## Pending consumer (intentional-deferred, not dead)
-///
-/// `EffAuth` is the transitive guard the spec mandates for the **SAFETY-001
-/// balance-direction symmetry** check (spec §86/§104/§107 — `EffAuth(disposal) ⊆
-/// EffAuth(acq)`).  That full symmetry form is **deferred** as `P3-rule-5`
-/// (needs balance-direction analysis + `msg.sender` recognition, blocked on
-/// P3-checker-14, Step 5/7).  The 4f rules (005/007/009) use direct `auth_set`
-/// with self-contained transitive closures, which is sound for *their* queries;
-/// `compute_eff_auth` is retained for the deferred 001-symmetry consumer.
-#[allow(dead_code)] // consumer: SAFETY-001 EffAuth symmetry (P3-rule-5, Step 5/7)
-#[must_use]
-pub fn compute_eff_auth(
-    entry_fn: &str,
-    fn_guards: &BTreeMap<String, BTreeSet<Guard>>,
-    call_graph: &CallGraph,
-) -> BTreeMap<String, BTreeSet<Guard>> {
-    let mut result: BTreeMap<String, BTreeSet<Guard>> = BTreeMap::new();
-    // Worklist: (fn_name, accumulated_guards_from_caller)
-    let mut worklist: std::collections::VecDeque<(String, BTreeSet<Guard>)> =
-        std::collections::VecDeque::new();
-
-    let entry_own = fn_guards.get(entry_fn).cloned().unwrap_or_default();
-    worklist.push_back((entry_fn.to_owned(), entry_own));
-
-    while let Some((fn_name, incoming)) = worklist.pop_front() {
-        // EffAuth at fn_name = incoming (from caller) ∪ own guards.
-        let own = fn_guards.get(&fn_name).cloned().unwrap_or_default();
-        let new_guards: BTreeSet<Guard> = incoming.union(&own).cloned().collect();
-
-        let changed = match result.get(&fn_name) {
-            None => {
-                result.insert(fn_name.clone(), new_guards.clone());
-                true
-            }
-            Some(existing) => {
-                // Multi-path merge: intersect to get weakest guarantee.
-                // If any path carries fewer guards, the intersection shrinks.
-                let merged: BTreeSet<Guard> = existing.intersection(&new_guards).cloned().collect();
-                if &merged == existing {
-                    false // Fixpoint reached for this function.
-                } else {
-                    result.insert(fn_name.clone(), merged);
-                    true
-                }
-            }
-        };
-
-        // Re-queue callees only when the effective guard set changed.
-        // Self-recursion terminates: the second visit yields merged == existing
-        // (intersecting a set with itself), so `changed` is false and no
-        // re-queue happens — fixpoint reached.
-        if changed {
-            if let Some(callees) = call_graph.get(&fn_name) {
-                let fn_eff = result.get(&fn_name).cloned().unwrap_or_default();
-                for callee in callees {
-                    worklist.push_back((callee.clone(), fn_eff.clone()));
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Collect `Auth(f)` for every function in a contract.
-///
-/// Convenience wrapper used by `compute_eff_auth` callers — retained with it for
-/// the deferred SAFETY-001 EffAuth-symmetry consumer (P3-rule-5).
-#[allow(dead_code)] // consumer: SAFETY-001 EffAuth symmetry (P3-rule-5, Step 5/7)
-#[must_use]
-pub fn all_auth_sets(contract: &TypedContract<'_>) -> BTreeMap<String, BTreeSet<Guard>> {
-    contract
-        .functions()
-        .into_iter()
-        .map(|f| (f.name.to_owned(), auth_set(&f)))
-        .collect()
-}
+// ─── Deleted: compute_eff_auth + all_auth_sets (P3 audit subtask 10) ─────────
+//
+// `compute_eff_auth` and `all_auth_sets` were deleted as dead code (AGENTS §1.3).
+// Their consumer (SAFETY-001 EffAuth balance-direction symmetry, P3-rule-5)
+// never materialized despite Steps 5/7 completing.  The 4f rules (005/007/009)
+// use direct `auth_set` with self-contained transitive closures, which is sound
+// for their queries.  If EffAuth symmetry is wanted later, assign a P4
+// Track·Step and rebuild from the spec.
 
 // ─── Guard predicates ─────────────────────────────────────────────────────────
 

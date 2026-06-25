@@ -13,9 +13,10 @@
 //!
 //! This is **sound** (no false negatives — every value-bearing field is a state
 //! field). The false-positive rate on non-value fields is the known trade-off,
-//! intentional for 4d. Narrowing to value-bearing fields requires value-path
-//! taint from `dataflow::taint_propagate` — tracked as a living-notes item to
-//! refine in 4e when taint consumers are added.
+//! intentional for 4d. Narrowing to value-bearing fields would require
+//! value-path taint analysis — if wanted, assign a P4 Track·Step and rebuild
+//! from the spec (the prior `taint_propagate` infra was deleted as dead code
+//! in P3 audit subtask 10).
 //!
 //! ## Gap-closure (P3·Step 4e.5)
 //!

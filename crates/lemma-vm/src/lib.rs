@@ -58,8 +58,11 @@ pub use state::{ContractStateView, InMemoryStateView};
 
 /// Maximum host-ABI version supported by this node binary.
 ///
+/// References the single source of truth in `lemma_core::CURRENT_HOST_ABI_VERSION`
+/// (S3-1 audit fix — no bare unconnected literal in two crates).
+///
 /// Contracts compiled against a higher version cannot be deployed or called.
 /// Bumped only when a new ABI version ships AND the corresponding epoch
 /// feature gate (P4·Step 12) has been activated. Current: ABI v1 = initial
 /// 17-fn set (P3·Step 6b-vm-2, docs/17-VERSIONING_SPEC.md §3).
-pub(crate) const MAX_SUPPORTED_HOST_ABI: u32 = 1;
+pub(crate) const MAX_SUPPORTED_HOST_ABI: u32 = lemma_core::CURRENT_HOST_ABI_VERSION;

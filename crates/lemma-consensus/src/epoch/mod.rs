@@ -185,4 +185,15 @@ pub enum EpochError {
     /// per AGENTS.md §7.2 / Sui-stall lesson.
     #[error("reward error: {0}")]
     Reward(#[from] crate::rewards::RewardError),
+
+    /// An unexpected internal error during epoch settlement (S-2).
+    ///
+    /// Catch-all for cross-crate invariant violations that would otherwise
+    /// `unreachable!()` and panic the settlement path. Returning `Err` lets
+    /// the node binary handle the failure gracefully (AGENTS §7.2 / §9.3).
+    #[error("internal epoch error: {reason}")]
+    Internal {
+        /// Human-readable description of the unexpected condition.
+        reason: String,
+    },
 }

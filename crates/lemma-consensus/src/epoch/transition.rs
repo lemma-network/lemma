@@ -295,9 +295,14 @@ fn build_next_validator_set(
         CoreError::Validator(ValidatorError::EmptyValidatorSet { epoch }) => {
             EpochError::EmptyNextCommittee { next_epoch: epoch }
         }
-        // Safety: from_active_validators only returns PowerOverflow or
-        // EmptyValidatorSet — all other CoreError variants are unreachable here.
-        _ => unreachable!("ValidatorSet::from_active_validators returned unexpected error"),
+        // S-2 fix: a future CoreError variant from from_active_validators must
+        // not panic the settlement path (AGENTS §7.2 / §9.3 Sui-stall lesson).
+        // Map to EpochError::Internal so the node can handle it gracefully.
+        other => EpochError::Internal {
+            reason: format!(
+                "ValidatorSet::from_active_validators returned unexpected error: {other}"
+            ),
+        },
     })
 }
 

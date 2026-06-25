@@ -1,14 +1,9 @@
-//! Dataflow analyses: taint propagation and state-write reachability.
+//! Dataflow analyses: state-write reachability and restriction-field detection.
 //!
 //! Both analyses consume the pre-computed call graph from [`super::cfg`];
 //! neither rebuilds the call graph internally (AGENTS §2 DRY).
 //!
 //! ## Analyses
-//!
-//! - **[`taint_propagate`]**: for each function, the set of locally-named
-//!   variables that carry untrusted (tainted) values.  Consumed by rules that
-//!   check whether external input reaches a sensitive operation without a
-//!   dominating guard (SAFETY-002/003/005).
 //!
 //! - **[`state_write_reachability`]**: for each `state {}` field, the set of
 //!   function names that can transitively write to it.  Consumed by SAFETY-003
@@ -30,159 +25,28 @@
 //!
 //! ```ignore
 //! let cg    = build_call_graph(&contract);
-//! let taint = taint_propagate(&contract, &cg);
 //! let reach = state_write_reachability(&contract, &cg);
+//! let deny  = restriction_fields(&contract);
 //! ```
-// Dead-code status (audited after the full 4f rule batch, AGENTS §1 Rule 7):
-// - `restriction_fields` + `state_write_reachability` are LIVE (consumed by
-//   SAFETY-005/007/009 — no allow needed).
-// - The `taint_propagate` machinery (`TaintOrigin`, `TaintedVar`, `taint_seeds`,
-//   `collect_ext_bindings*`, `is_ext_call`, `collect_pattern_idents`) is
-//   intentional-deferred, NOT dead: its named consumer is `P3-rule-1`
-//   (SAFETY-012 value-taint narrowing — scope unchecked arithmetic to
-//   value-bearing fields), blocked on `msg`/value-path recognition
-//   (P3-checker-14, Step 7).  Each such item carries a targeted `#[allow(
-//   dead_code)]` with this pointer instead of a blanket module allow.
+//!
+//! ## Deleted: taint_propagate (P3 audit subtask 10)
+//!
+//! The taint-propagation machinery (`TaintOrigin`, `TaintedVar`,
+//! `taint_propagate` + helpers) was deleted as dead code (AGENTS §1.3).
+//! Its consumer (SAFETY-012 value-taint narrowing — scope unchecked-arithmetic
+//! to value-bearing fields) never materialized despite Steps 5/7 completing.
+//! The current over-approximation in `rules/integer.rs` is SOUND (flags all
+//! state fields, not just value-bearing ones — no false-accept).  If narrowing
+//! is wanted later, assign a P4 Track·Step and rebuild from the spec.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::parser::{Expr, ForIter, MatchBody, Pattern, Stmt};
+use crate::parser::{Expr, Stmt};
 use crate::type_checker::typed_contract::{ContractFunction, TypedContract};
 use crate::visit::{walk_stmt, Visitor};
 
 use super::cfg::{walk_function, CallGraph, CfgNode};
 use super::util::{block_contains_revert, is_self, is_transfer_path_entry};
-
-// ─── TaintOrigin / TaintedVar ────────────────────────────────────────────────
-
-/// How a variable acquired taint (untrusted data).
-///
-/// `Ord` is derived for deterministic `BTreeSet` iteration (AGENTS §7.1).
-#[allow(dead_code)] // consumer: SAFETY-012 value-taint narrowing (P3-rule-1, Step 7)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum TaintOrigin {
-    /// Function parameter — any caller could be untrusted.
-    Param,
-    /// Bound directly to the return value of an external call.
-    ExternalCallReturn,
-}
-
-/// A named variable in a function that carries tainted (potentially
-/// attacker-controlled) data.
-///
-/// `Ord` derives lexicographically on `(name, origin)` — deterministic per
-/// AGENTS §7.1.
-#[allow(dead_code)] // consumer: SAFETY-012 value-taint narrowing (P3-rule-1, Step 7)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct TaintedVar {
-    /// Variable or parameter name.
-    pub(crate) name: String,
-    /// How this variable acquired taint.
-    pub(crate) origin: TaintOrigin,
-}
-
-#[allow(dead_code)] // consumer: SAFETY-012 value-taint narrowing (P3-rule-1, Step 7)
-impl TaintedVar {
-    /// Convenience ctor: parameter taint.
-    pub(crate) fn param(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            origin: TaintOrigin::Param,
-        }
-    }
-    /// Convenience ctor: external-call-return taint.
-    pub(crate) fn ext_return(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            origin: TaintOrigin::ExternalCallReturn,
-        }
-    }
-}
-
-// ─── taint_propagate ─────────────────────────────────────────────────────────
-
-/// Compute the taint set for every function in a contract.
-///
-/// **Taint sources** (per-function seeds):
-/// 1. All function parameters — any caller could be untrusted.
-/// 2. `let`-bound locals whose RHS is a direct external call:
-///    `let x = ext.method(…)` → `x` acquires `ExternalCallReturn` taint.
-///
-/// **Seed coverage note (flow-insensitive model):** `for`-loop pattern
-/// bindings (e.g. `for x of ext.call() { … }`), `catch` variables, and
-/// re-assignment of ext-call results (`x = ext.call()` after `let x = 0`)
-/// are **not** seeded in this foundational layer.  Rule modules 4d–4f add
-/// the precision they need; SEED gaps are tracked in `living-notes.md`.
-///
-/// **Cross-function propagation** (conservative over-approximation):
-/// If A calls internal function B and A has any tainted variables, all of B's
-/// parameters are marked tainted (a tainted value *could* be passed as any
-/// argument).  Taint sets grow monotonically over a finite variable universe,
-/// so the worklist fixpoint always terminates — including on cyclic call graphs
-/// (mutual recursion, self-recursion).
-///
-/// Pre-condition: `call_graph` must be built with
-/// [`super::cfg::build_call_graph`].
-///
-/// ## Pending consumer (intentional-deferred, not dead)
-///
-/// First production consumer is `P3-rule-1` (SAFETY-012 value-taint narrowing —
-/// scope unchecked-arithmetic rejection to value-bearing fields), blocked on
-/// `msg`/value-path recognition (P3-checker-14, Step 7).
-#[allow(dead_code)] // consumer: SAFETY-012 value-taint narrowing (P3-rule-1, Step 7)
-#[must_use]
-pub(crate) fn taint_propagate(
-    contract: &TypedContract<'_>,
-    call_graph: &CallGraph,
-) -> BTreeMap<String, BTreeSet<TaintedVar>> {
-    // Phase 1: per-function seeds (params + let=ext-call bindings).
-    let mut result: BTreeMap<String, BTreeSet<TaintedVar>> = contract
-        .functions()
-        .into_iter()
-        .map(|f| (f.name.to_owned(), taint_seeds(&f)))
-        .collect();
-
-    // Param-name table for cross-function propagation.
-    let param_names: BTreeMap<String, Vec<String>> = contract
-        .functions()
-        .into_iter()
-        .map(|f| {
-            let names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
-            (f.name.to_owned(), names)
-        })
-        .collect();
-
-    // Phase 2: fixpoint — seed worklist with functions that have tainted locals.
-    let mut worklist: VecDeque<String> = result
-        .iter()
-        .filter(|(_, t)| !t.is_empty())
-        .map(|(n, _)| n.clone())
-        .collect();
-
-    while let Some(caller) = worklist.pop_front() {
-        if result.get(&caller).is_none_or(BTreeSet::is_empty) {
-            continue;
-        }
-        let Some(callees) = call_graph.get(&caller) else {
-            continue;
-        };
-        for callee in callees {
-            let Some(params) = param_names.get(callee) else {
-                continue;
-            };
-            let entry = result.entry(callee.clone()).or_default();
-            let before = entry.len();
-            for p in params {
-                entry.insert(TaintedVar::param(p.as_str()));
-            }
-            if entry.len() > before {
-                worklist.push_back(callee.clone());
-            }
-        }
-    }
-
-    result
-}
 
 // ─── state_write_reachability ─────────────────────────────────────────────────
 
@@ -360,153 +224,6 @@ fn collect_self_field_reads(expr: &Expr, out: &mut BTreeSet<String>) {
 }
 
 // ─── Private helpers ─────────────────────────────────────────────────────────
-
-/// Per-function taint seeds: all params + `let x = ext.call()` bindings.
-#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
-fn taint_seeds(func: &ContractFunction<'_>) -> BTreeSet<TaintedVar> {
-    let mut seeds = BTreeSet::new();
-    for p in func.params {
-        seeds.insert(TaintedVar::param(p.name.as_str()));
-    }
-    if let Some(body) = func.body {
-        collect_ext_bindings(body, &mut seeds);
-    }
-    seeds
-}
-
-/// Walk `stmts` and add `let x = ext.call()` names as `ExternalCallReturn`-tainted.
-#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
-fn collect_ext_bindings(stmts: &[Stmt], out: &mut BTreeSet<TaintedVar>) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Let { pattern, expr, .. } => {
-                if is_ext_call(expr) {
-                    collect_pattern_idents(pattern, out);
-                }
-                collect_ext_bindings_in_expr(expr, out);
-            }
-            Stmt::If {
-                cond, then, else_, ..
-            } => {
-                collect_ext_bindings_in_expr(cond, out);
-                collect_ext_bindings(then, out);
-                if let Some(b) = else_ {
-                    collect_ext_bindings(b, out);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                collect_ext_bindings_in_expr(cond, out);
-                collect_ext_bindings(body, out);
-            }
-            Stmt::For { iter, body, .. } => {
-                match iter {
-                    ForIter::Of(e) => collect_ext_bindings_in_expr(e, out),
-                    ForIter::In(s, _, e, _) => {
-                        collect_ext_bindings_in_expr(s, out);
-                        collect_ext_bindings_in_expr(e, out);
-                    }
-                }
-                collect_ext_bindings(body, out);
-            }
-            Stmt::Loop { body, .. } => collect_ext_bindings(body, out),
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    match &arm.body {
-                        MatchBody::Block(stmts) => collect_ext_bindings(stmts, out),
-                        MatchBody::Expr(e) => collect_ext_bindings_in_expr(e, out),
-                    }
-                }
-            }
-            Stmt::Try {
-                body, catch_body, ..
-            } => {
-                collect_ext_bindings(body, out);
-                collect_ext_bindings(catch_body, out);
-            }
-            Stmt::Unchecked(body, _) => collect_ext_bindings(body, out),
-            Stmt::Expr(e, _) => collect_ext_bindings_in_expr(e, out),
-            // Return/Break/Continue/Emit/Assert/Revert/Const/Assign/Placeholder:
-            // none introduce let-bindings of ext-call results.
-            _ => {}
-        }
-    }
-}
-
-/// Recurse into expression-level statement blocks (`if_`, `match_` expressions).
-///
-/// Only `Expr::If_` and `Expr::Match_` carry embedded statement lists where
-/// let-bindings can appear; all other expressions are leaves here.
-#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
-fn collect_ext_bindings_in_expr(expr: &Expr, out: &mut BTreeSet<TaintedVar>) {
-    match expr {
-        Expr::If_ {
-            cond, then, else_, ..
-        } => {
-            collect_ext_bindings_in_expr(cond, out);
-            collect_ext_bindings(then, out);
-            if let Some(b) = else_ {
-                collect_ext_bindings(b, out);
-            }
-        }
-        Expr::Match_(e, arms, _) => {
-            collect_ext_bindings_in_expr(e, out);
-            for arm in arms {
-                match &arm.body {
-                    MatchBody::Block(stmts) => collect_ext_bindings(stmts, out),
-                    MatchBody::Expr(e2) => collect_ext_bindings_in_expr(e2, out),
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Returns `true` if `expr` is a method call on a non-`self` receiver or a
-/// `new <Contract>(…)` deployment — i.e., a call that leaves the contract.
-#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
-fn is_ext_call(expr: &Expr) -> bool {
-    match expr {
-        Expr::Call { callee, .. } => matches!(
-            callee.as_ref(),
-            Expr::Member(obj, _, _)
-                if !matches!(obj.as_ref(), Expr::Ident(n, _) if n == "self")
-        ),
-        Expr::New { .. } => true,
-        _ => false,
-    }
-}
-
-/// Collect all `Pattern::Ident` leaves into `out` as `ExternalCallReturn`-tainted.
-///
-/// Handles nested patterns (tuple, struct, enum variant) recursively.
-/// `Wildcard`, `Literal`, and `Rest` patterns bind nothing.
-#[allow(dead_code)] // helper of taint_propagate (P3-rule-1, Step 7)
-fn collect_pattern_idents(pattern: &Pattern, out: &mut BTreeSet<TaintedVar>) {
-    match pattern {
-        Pattern::Ident(name, _) => {
-            out.insert(TaintedVar::ext_return(name.as_str()));
-        }
-        Pattern::Tuple(pats, _) => {
-            for p in pats {
-                collect_pattern_idents(p, out);
-            }
-        }
-        Pattern::Struct_ { fields, .. } => {
-            for (_, p) in fields {
-                collect_pattern_idents(p, out);
-            }
-        }
-        Pattern::EnumVariant {
-            inner: Some(pats), ..
-        } => {
-            for p in pats {
-                collect_pattern_idents(p, out);
-            }
-        }
-        // Wildcard(_), Literal(..), Rest(_), EnumVariant(None): bind nothing.
-        _ => {}
-    }
-}
 
 /// Collect the set of state fields directly written by `func` using one CFG
 /// walk via [`walk_function`] (AGENTS §2 DRY — no separate re-walk).

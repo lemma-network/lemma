@@ -1,6 +1,6 @@
 //! Pure validity-check functions for DAG block acceptance (spec §3 rules 1–6).
 //!
-//! Each function checks exactly one rule and returns `Ok(())` on success or a
+//! Each function validates exactly one rule and returns `Ok(())` on success or a
 //! typed [`ConsensusError`] on failure. **No state mutation** — these are pure
 //! predicates callable independently of the [`Dag`] store, making them easy to
 //! unit-test and reason about.
@@ -18,7 +18,7 @@
 //! # `lemma-crypto` independence
 //!
 //! Rule 2 crypto part (signature bytes verification) is performed by the
-//! **network layer** before forwarding to consensus. `check_author_and_signature`
+//! **network layer** before forwarding to consensus. `validate_author_and_signature`
 //! accepts the result as `sig_ok: bool` (injected). See decisions-log
 //! "Decision 4a" and `docs/07-CONSENSUS_SPEC.md §3` implementation note.
 //!
@@ -46,7 +46,7 @@ use crate::{
 /// # Errors
 ///
 /// [`ConsensusError::DigestMismatch`] if `block.verify_digest()` returns false.
-pub(crate) fn check_digest_integrity(block: &DagBlock) -> Result<(), ConsensusError> {
+pub(crate) fn validate_digest_integrity(block: &DagBlock) -> Result<(), ConsensusError> {
     if block.verify_digest() {
         Ok(())
     } else {
@@ -64,7 +64,7 @@ pub(crate) fn check_digest_integrity(block: &DagBlock) -> Result<(), ConsensusEr
 /// Membership is checked directly against [`ValidatorSet::members`].
 /// `sig_ok` is the result of hybrid Ed25519+ML-DSA signature verification
 /// performed by the network layer (decision-log "Decision 4a").
-pub(crate) fn check_author_and_signature(
+pub(crate) fn validate_author_and_signature(
     block: &DagBlock,
     vset: &ValidatorSet,
     sig_ok: bool,
@@ -93,7 +93,7 @@ pub(crate) fn check_author_and_signature(
 /// and `0 > 0` is false — but round-0 blocks are valid DAG starting points.
 /// The spec's genesis-round exemption (explicit for rule 5) is implicitly
 /// required for rule 3 too.
-pub(crate) fn check_gc_boundary(block_round: u64, gc_round: u64) -> Result<(), ConsensusError> {
+pub(crate) fn validate_gc_boundary(block_round: u64, gc_round: u64) -> Result<(), ConsensusError> {
     if block_round == 0 || block_round > gc_round {
         Ok(())
     } else {
@@ -117,7 +117,7 @@ pub(crate) fn check_gc_boundary(block_round: u64, gc_round: u64) -> Result<(), C
 /// round from which to draw strong links.
 ///
 /// Assumes rule 4 has already passed (all ancestors are in the DAG).
-pub(crate) fn check_strong_link_quorum(
+pub(crate) fn validate_strong_link_quorum(
     block: &DagBlock,
     vset: &ValidatorSet,
 ) -> Result<(), ConsensusError> {
@@ -158,7 +158,7 @@ pub(crate) fn check_strong_link_quorum(
 /// Returns `Err(ConsensusError::Equivocation)` if a conflicting block already
 /// exists. The same block submitted twice (idempotent re-delivery) is **not**
 /// equivocation: digests match, no error.
-pub(crate) fn check_no_equivocation(
+pub(crate) fn validate_no_equivocation(
     block: &DagBlock,
     existing_at_slot: Option<DagBlockRef>,
 ) -> Result<(), ConsensusError> {

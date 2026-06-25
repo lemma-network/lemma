@@ -254,6 +254,16 @@ pub(crate) struct RawContractMetadata {
     /// Parsed by [`crate::safety_manifest::parse_safety_manifest`].
     #[serde(default)]
     pub(crate) safety_constraints: Option<Vec<crate::safety_manifest::SafetyConstraint>>,
+    /// Host-ABI version the contract was compiled against (P3·Step 20, DB-A58 L2).
+    ///
+    /// `None` when the field is absent (pre-Step-20 contracts). Defaults to ABI v1
+    /// for backward compatibility. Parsed by [`crate::safety_manifest::parse_host_abi`].
+    ///
+    /// V-DRY-1 audit fix: previously parsed via a separate `serde_json::Value`
+    /// re-parse in `parse_host_abi`. Now part of the shared struct — ONE parse
+    /// path for the entire `"lemma.meta"` section.
+    #[serde(default)]
+    pub(crate) host_abi: Option<u32>,
 }
 
 /// Raw deserialized per-function metadata entry.

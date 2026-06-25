@@ -300,6 +300,8 @@ pub fn verify_transaction(tx: &Transaction, pubkey: &PublicKey) -> Result<(), Cr
 /// Without the length prefix, `sign_message(b"AB")` would produce the same
 /// hash as a message `b"A"` in a scheme that concatenates with `b"B"`. The
 /// 8-byte LE length commits to the exact message boundary.
+// Sanctioned direct `blake3::Hasher` — streaming API for domain+length prefix
+// (cannot use `hash_bytes` which takes a single contiguous slice). See hashing.rs doc.
 pub fn compute_message_hash(message: &[u8]) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PERSONAL_SIGN_DOMAIN);

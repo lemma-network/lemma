@@ -398,6 +398,9 @@ fn apply_one_write(
         }
 
         // ── Code ──────────────────────────────────────────────────────────────
+        // LOCKSTEP: executor.rs `ScratchState::commit_with_nonce` (code_hash_writes
+        // loop) performs the same code_hash→bytecode resolution for the VM scratch
+        // path. If the thin-pointer encoding changes here, update executor.rs too.
         (StateKey::Code(addr), StateValue::Code(Some(bytecode))) => {
             // Compute code_hash = blake3(bytecode) — canonical Blake3 primitive
             // (AGENTS §2.2). Used as both the CF_CODE key and the account pointer.

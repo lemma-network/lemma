@@ -45,12 +45,12 @@
 //! a defensive measure — the surge driver (which calls `add_block` after
 //! `Dag::insert`) will normally only present accepted blocks, and `insert`
 //! already rejects non-member authors (spec §3 rule 2). Consistency with
-//! [`check_strong_link_quorum`]'s treatment of non-member ancestors (AGENTS §2).
+//! [`validate_strong_link_quorum`]'s treatment of non-member ancestors (AGENTS §2).
 //!
 //! [`Dag`]: crate::dag::graph::Dag
 //! [`Dag::insert`]: crate::dag::graph::Dag::insert
 //! [`add_block`]: ThresholdClock::add_block
-//! [`check_strong_link_quorum`]: crate::dag::validity::check_strong_link_quorum
+//! [`validate_strong_link_quorum`]: crate::dag::validity::validate_strong_link_quorum
 
 use lemma_core::{amount::Amount, validator_set::ValidatorSet};
 
@@ -148,9 +148,9 @@ impl ThresholdClock {
         }
 
         // Resolve voting power. Non-member = 0 stake by definition → skip
-        // silently. Consistent with check_strong_link_quorum (AGENTS §2 —
+        // silently. Consistent with validate_strong_link_quorum (AGENTS §2 —
         // one canonical way for non-member handling). Defensive: Dag::insert
-        // (rule 2, see validity::check_author_and_signature) normally filters
+        // (rule 2, see validity::validate_author_and_signature) normally filters
         // non-members before blocks reach the clock, but the clock does not
         // assume that contract holds (D5b).
         let Some(member) = vset.members.get(&b.author) else {

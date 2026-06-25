@@ -814,8 +814,7 @@ pub(crate) fn build_mandate_receipt_log<S: ContractStateView>(
     // This is the Intent Mandate fingerprint: the exact policy state the agent
     // operated under, after counters were updated (§11: "executed terms").
     let policy_bytes = serde_json::to_vec(&policy).unwrap_or_default();
-    let hash_bytes = *blake3::hash(&policy_bytes).as_bytes();
-    let policy_hash = lemma_core::hash::Hash::from_bytes(hash_bytes);
+    let policy_hash = lemma_crypto::hash_bytes(&policy_bytes);
 
     // `spent_total` was set to `total_after ≤ budget_total` by counter commit, so
     // this subtraction should never underflow. If it somehow does (future refactor

@@ -1,4 +1,6 @@
-use lemma_core::Hash;
+use std::collections::BTreeMap;
+
+use lemma_core::{Hash, QuorumCert};
 use libp2p::PeerId;
 
 use super::*;
@@ -22,6 +24,13 @@ fn test_peer() -> PeerId {
 /// Returns a zero `Hash` for use in error construction tests.
 fn test_hash() -> Hash {
     Hash::zero()
+}
+
+/// Returns a minimal `QuorumCert` for use in error construction tests.
+///
+/// No real signatures — just enough to construct the `Equivocation` variant.
+fn test_qc(height: u64) -> QuorumCert {
+    QuorumCert::new(height, Hash::zero(), BTreeMap::new())
 }
 
 // ── Display format tests ──────────────────────────────────────────────────────
@@ -106,7 +115,10 @@ fn expired_display_contains_height() {
 
 #[test]
 fn equivocation_display_contains_height() {
-    let err = NetworkError::Equivocation { height: 77 };
+    let err = NetworkError::Equivocation {
+        height: 77,
+        conflicting_cert: Box::new(test_qc(77)),
+    };
     let msg = err.to_string();
     assert!(msg.contains("77"), "expected height in message, got: {msg}");
 }
@@ -209,7 +221,13 @@ fn all_variants_debug_output_contains_variant_name() {
             &NetworkError::RangeTooWide { got: 1, max: 0 },
         ),
         ("Expired", &NetworkError::Expired { height: 0 }),
-        ("Equivocation", &NetworkError::Equivocation { height: 0 }),
+        (
+            "Equivocation",
+            &NetworkError::Equivocation {
+                height: 0,
+                conflicting_cert: Box::new(test_qc(0)),
+            },
+        ),
         ("Timeout", &NetworkError::Timeout { peer: test_peer() }),
         (
             "Transport",
@@ -249,7 +267,10 @@ fn all_variants_debug_output_contains_variant_name() {
 
 #[test]
 fn equivocation_is_attack_signal() {
-    let err = NetworkError::Equivocation { height: 1 };
+    let err = NetworkError::Equivocation {
+        height: 1,
+        conflicting_cert: Box::new(test_qc(1)),
+    };
     assert!(
         err.is_attack_signal(),
         "Equivocation must be classified as attack signal"
@@ -315,7 +336,10 @@ fn invalid_state_chunk_is_peer_misbehaviour() {
 
 #[test]
 fn equivocation_is_peer_misbehaviour() {
-    let err = NetworkError::Equivocation { height: 0 };
+    let err = NetworkError::Equivocation {
+        height: 0,
+        conflicting_cert: Box::new(test_qc(0)),
+    };
     assert!(err.is_peer_misbehaviour());
 }
 
@@ -396,7 +420,10 @@ fn invalid_block_is_not_bounds_violation() {
 
 #[test]
 fn attack_signal_is_also_peer_misbehaviour() {
-    let err = NetworkError::Equivocation { height: 0 };
+    let err = NetworkError::Equivocation {
+        height: 0,
+        conflicting_cert: Box::new(test_qc(0)),
+    };
     assert!(err.is_attack_signal());
     assert!(err.is_peer_misbehaviour());
     assert!(!err.is_bounds_violation());
@@ -459,7 +486,10 @@ fn range_too_wide_propagates_via_question_mark() {
 #[test]
 fn network_error_usable_as_boxed_std_error() {
     // Verifies usability in anyhow / Box<dyn std::error::Error> contexts.
-    let err: Box<dyn std::error::Error> = Box::new(NetworkError::Equivocation { height: 7 });
+    let err: Box<dyn std::error::Error> = Box::new(NetworkError::Equivocation {
+        height: 7,
+        conflicting_cert: Box::new(test_qc(7)),
+    });
     assert!(!err.to_string().is_empty());
     assert!(err.to_string().contains("7"));
 }

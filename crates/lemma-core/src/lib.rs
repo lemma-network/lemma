@@ -64,6 +64,22 @@ pub use hash::Hash;
 pub use limits::MAX_CONTRACT_WASM_SIZE;
 pub use signature::Signature;
 
+// ── Host-ABI versioning anchor (S3-1, 17-VERSIONING_SPEC §3) ────────────────
+
+/// Current host-ABI version for the Lemma protocol.
+///
+/// **Single source of truth** for the host-function ABI version. Both the
+/// compiler emitter (`lemma-lang` `HOST_ABI_VERSION`) and the VM ceiling
+/// (`lemma-vm` `MAX_SUPPORTED_HOST_ABI`) reference this constant, ensuring
+/// they cannot drift apart (S3-1 audit fix).
+///
+/// Versioning scheme: monotonic u32 integer.
+/// - `1` = initial 17-fn set (P3·Step 6b-vm-2).
+/// - Future bumps require epoch feature-gate activation (P4·Step 12).
+///
+/// See `docs/17-VERSIONING_SPEC.md §3`.
+pub const CURRENT_HOST_ABI_VERSION: u32 = 1;
+
 pub use error::{
     AddressError, AmountError, BlockError, CoreError, HashError, SerializationError,
     TransactionError, ValidatorError,

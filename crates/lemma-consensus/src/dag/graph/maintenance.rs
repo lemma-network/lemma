@@ -52,9 +52,9 @@ impl Dag {
             }
 
             // Re-run rules 5–6 (rules 1–4 already passed at original submission).
-            let strong_ok = validity::check_strong_link_quorum(&block, vset).is_ok();
+            let strong_ok = validity::validate_strong_link_quorum(&block, vset).is_ok();
             let existing = self.block_at_slot(block.slot());
-            let no_equiv = validity::check_no_equivocation(&block, existing).is_ok();
+            let no_equiv = validity::validate_no_equivocation(&block, existing).is_ok();
 
             if strong_ok && no_equiv {
                 self.accept_block(suspended_ref, block);
